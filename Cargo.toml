@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
