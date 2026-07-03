@@ -9,6 +9,7 @@ license = "AGPL-3.0-only"
 # Central version pinning (CLAUDE.md: "pin versions"). Shared across outlap-schema,
 # outlap-py, core, and the CLI so the file-format contract and its consumers agree.
 [workspace.dependencies]
+num-traits = { version = "0.2.19", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 schemars = "1.2.1"

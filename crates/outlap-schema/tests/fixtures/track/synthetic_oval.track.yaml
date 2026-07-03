@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Synthetic track fixture — NOT a real circuit (no real-world geometry in CI goldens).
+schema: track/1.0
+name: Synthetic Oval
+closed: true
+centerline: synthetic_oval.centerline.csv
+meta:
+  source: synthetic
+  accuracy_class: C
+  attribution: "Synthetic fixture (CC-BY-SA-4.0): circle r=100 m with a gentle z(s) ripple"
+  notes: "exercises the periodic geometry spline + flat data channels"

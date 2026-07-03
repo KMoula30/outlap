@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Conditions",
+  "description": "Session conditions: air, wind, and thermal boundaries for one run.",
+  "type": "object",
+  "properties": {
+    "air": {
+      "description": "Air state (drives air density for the aero model).",
+      "$ref": "#/$defs/Air",
+      "default": {
+        "pressure_hpa": 1013.25,
+        "temperature_c": 20.0
+      }
+    },
+    "ambient_c": {
+      "description": "Thermal-model ambient / pre-radiator coolant proxy, °C.",
+      "type": "number",
+      "format": "double",
+      "default": 20.0
+    },
+    "schema": {
+      "description": "Schema version, e.g. `conditions/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "track_surface_c": {
+      "description": "Track-surface temperature (tire thermal boundary `T_road`, §7.2), °C.",
+      "type": "number",
+      "format": "double",
+      "default": 20.0
+    },
+    "wind": {
+      "description": "Wind vector (constant in v1).",
+      "$ref": "#/$defs/Wind",
+      "default": {
+        "direction_deg": 0.0,
+        "speed_mps": 0.0
+      }
+    }
+  },
+  "required": [
+    "schema"
+  ],
+  "$defs": {
+    "Air": {
+      "description": "Air state.",
+      "type": "object",
+      "properties": {
+        "pressure_hpa": {
+          "description": "Absolute air pressure, hPa.",
+          "type": "number",
+          "format": "double",
+          "default": 1013.25
+        },
+        "temperature_c": {
+          "description": "Air temperature, °C.",
+          "type": "number",
+          "format": "double",
+          "default": 20.0
+        }
+      }
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "Wind": {
+      "description": "A constant wind vector (v1): speed and the compass direction it blows *from*.",
+      "type": "object",
+      "properties": {
+        "direction_deg": {
+          "description": "Meteorological direction the wind comes from, degrees (0 = North, 90 = East).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "speed_mps": {
+          "description": "Wind speed, m/s (default still air).",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      }
+    }
+  }
+}

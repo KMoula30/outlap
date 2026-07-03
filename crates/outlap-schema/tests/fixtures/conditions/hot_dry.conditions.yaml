@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# A warm, breezy session — the fourth input of the quartet (§9.6).
+schema: conditions/1.0
+air:
+  temperature_c: 28.0
+  pressure_hpa: 1005.0
+wind:
+  speed_mps: 3.5
+  direction_deg: 240.0
+track_surface_c: 41.0
+ambient_c: 28.0

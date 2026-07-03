@@ -17,6 +17,15 @@ dependencies = [
     "xarray>=2026.4.0",
 ]
 
+[project.optional-dependencies]
+# Tooling for the track importer + plot sanity (§9.3). Network + heavier deps, kept out of the
+# core install; enable with `uv sync --extra track-import`.
+track-import = [
+    "requests>=2.32.0",
+    "scipy>=1.14.0",
+    "matplotlib>=3.9.0",
+]
+
 [project.scripts]
 outlap = "outlap:main"
 
