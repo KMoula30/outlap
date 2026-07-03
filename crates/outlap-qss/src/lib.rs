@@ -17,21 +17,31 @@
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
+    clippy::doc_markdown,
+    // Physics kernels index parallel SoA arrays by station; a range loop is clearer than zips.
+    clippy::needless_range_loop,
     // Physics kernels use single-letter symbols (v, s, m, g, μ) by convention (Decision #33).
     clippy::many_single_char_names,
     clippy::similar_names,
     // T0Error embeds the miette-annotated SchemaError (source text) on the cold error path.
     clippy::result_large_err,
-    // Cold-path assembly + curve sampling: these casts are safe at drivetrain sizes.
+    // Cold-path assembly + curve sampling: these casts are safe at drivetrain/track sizes.
     clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
 
 pub mod error;
+pub mod path;
+pub mod result;
+pub mod solver;
 pub mod vehicle;
 
 pub use error::T0Error;
+pub use path::T0Path;
+pub use result::{LapResult, LineDescriptor, T0Workspace};
+pub use solver::{solve_into, solve_lap};
 pub use vehicle::{T0Options, T0Vehicle};
 
 /// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];

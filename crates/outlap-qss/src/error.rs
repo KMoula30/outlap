@@ -25,4 +25,19 @@ pub enum T0Error {
     /// constant CdA/CzA (the ride-height aero map is a T1 concern).
     #[error("aero has no `constant` block; T0 needs constant CdA/CzA (set `allow_degraded` to run with zero aero)")]
     NoConstantAero,
+    /// The closed-lap forward/backward passes did not reach a fixed point within the iteration cap
+    /// (never observed on physical tracks; a divergence backstop).
+    #[error("closed-lap velocity passes did not converge within {iterations} iterations")]
+    PassesDiverged {
+        /// The iteration cap that was hit.
+        iterations: usize,
+    },
+    /// The workspace was sized for a different number of stations than the path.
+    #[error("workspace has {workspace} stations but the path has {path}")]
+    WorkspaceMismatch {
+        /// Workspace station count.
+        workspace: usize,
+        /// Path station count.
+        path: usize,
+    },
 }

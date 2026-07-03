@@ -13,6 +13,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 outlap-schema = { path = "../outlap-schema" }
+proptest = { workspace = true }
+dhat = { workspace = true }
 
 [lints]
 workspace = true
