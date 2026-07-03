@@ -183,6 +183,63 @@ def test_battery_validator_rejects_bad_docs():
         validate_battery_doc(bad)
 
 
+# --- Thermal fit (emotor distillation) ---------------------------------------------------------
+
+
+def test_two_node_forward_model():
+    from outlap.importers.pdt_h5.thermal_fit import TwoNode
+
+    # No copper feedback → clean steady-state hand formula.
+    m = TwoNode(400.0, 3200.0, 6.0, 30.0, s_w=0.7, alpha=0.0, t_ref=65.0, t_cool=65.0)
+    p = 500.0
+    tw, tc = m.steady_state(p)
+    assert abs(tc - (65.0 + p / 30.0)) < 1e-6
+    assert abs(tw - (tc + 0.7 * p / 6.0)) < 1e-6
+    # Transient vs a dense explicit-Euler reference.
+    t0 = np.array([65.0, 65.0])
+    a, b = m._system(p)
+    t = t0.copy()
+    dt = 1e-3
+    for _ in range(int(20.0 / dt)):
+        t = t + dt * (a @ t + b)
+    assert np.allclose(m.transient(p, 20.0, t0), t, atol=1e-2)
+
+
+def test_nelder_mead_rosenbrock():
+    from outlap.importers.pdt_h5.thermal_fit import nelder_mead
+
+    def rosen(x):
+        return float((1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2)
+
+    x = nelder_mead(rosen, np.array([-1.2, 1.0]), max_iter=2000)
+    assert np.allclose(x, [1.0, 1.0], atol=1e-2)
+
+
+def test_two_node_truth_fit_reproduces_envelopes(tmp_path: Path):
+    src = tmp_path / "e2n.h5"
+    fx.make_edrive_two_node(src)
+    out = tmp_path / "m.ptm.yaml"
+    summary = convert_edrive(src, out, vdc=400.0)
+    # The envelopes came from a real 2-node model, so a 2-node fit reproduces them well.
+    assert summary["fit_rms"] < 0.03, f"fit RMS {summary['fit_rms']} too high"
+    emo = yaml.safe_load(Path(summary["emotor"]).read_text())
+    assert emo["schema"] == "emotor/1.0"
+    assert emo["meta"]["source"] == "pdt_distilled"
+    assert emo["cooling"]["liquid"]["coolant_temp_c"] == 65.0
+    assert emo["loss_routing"]["copper_alpha_per_k"] == 0.00393
+    # Fitted winding capacitance is in the right ballpark of the ground truth (400 J/K).
+    assert 100.0 < emo["nodes"]["winding"]["c_j_per_k"] < 2000.0
+
+
+def test_no_emotor_flag_skips_distillation(tmp_path: Path):
+    src = tmp_path / "e.h5"
+    fx.make_edrive(src)
+    out = tmp_path / "m.ptm.yaml"
+    summary = convert_edrive(src, out, vdc=400.0, emit_emotor=False)
+    assert "emotor" not in summary
+    assert not out.with_suffix(".emotor.yaml").exists()
+
+
 # --- CLI ---------------------------------------------------------------------------------------
 
 

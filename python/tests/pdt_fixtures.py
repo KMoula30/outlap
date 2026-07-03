@@ -121,6 +121,100 @@ def make_edrive(
     )
 
 
+def make_edrive_two_node(path: Path, *, ns: int = 6, nl: int = 9):
+    """EDrive fixture whose thermal envelopes are generated from a KNOWN 2-node model.
+
+    Returns ``(theta_star, t_max_w, t_max_c)``. The continuous/overload torque envelopes are found
+    by bisecting the ground-truth model, so a correct fit reproduces them to ~0.
+    """
+    from outlap.importers.pdt_h5.thermal_fit import TwoNode
+
+    t_max_w, t_max_c, t_cool = 180.0, 120.0, 65.0
+    theta = TwoNode(
+        400.0, 3200.0, 6.0, 30.0, s_w=0.7, alpha=0.00393, t_ref=t_cool, t_cool=t_cool
+    )
+    tau_pk = 128.0
+    k_cu, k_iron = 0.5, 0.02
+    durations = np.array([10.0, 20.0, 30.0])
+
+    speed = np.linspace(500.0, 12000.0, ns, dtype=np.float32)
+    omega = speed * (2.0 * np.pi / 60.0)
+    load_ratio = np.linspace(-1.0, 1.0, nl, dtype=np.float32)
+
+    def loss(tau: float, om: float) -> float:
+        return k_cu * tau * tau + k_iron * om + 20.0
+
+    def cont_torque(om: float) -> float:
+        lo, hi = 0.5, tau_pk
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            tw, tc = theta.steady_state(loss(mid, om))
+            over = max(
+                (tw - t_max_w) / (t_max_w - t_cool), (tc - t_max_c) / (t_max_c - t_cool)
+            )
+            hi, lo = (mid, lo) if over > 0 else (hi, mid)
+        return 0.5 * (lo + hi)
+
+    def peak_torque(om: float, d: float, t_cont: float) -> float:
+        t0 = theta.steady_state(loss(t_cont, om))
+        lo, hi = t_cont, tau_pk
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            tw = theta.transient(loss(mid, om), d, t0)[0]
+            hi, lo = (mid, lo) if tw > t_max_w else (hi, mid)
+        return 0.5 * (lo + hi)
+
+    tau = np.zeros((1, ns, nl), np.float32)
+    mloss = np.zeros((1, ns, nl), np.float32)
+    meff = np.zeros((1, ns, nl), np.float32)
+    for s in range(ns):
+        t = load_ratio * tau_pk
+        tau[0, s] = t
+        for li in range(nl):
+            p = loss(abs(float(t[li])), float(omega[s]))
+            mloss[0, s, li] = p
+            pm = abs(float(t[li])) * float(omega[s])
+            meff[0, s, li] = pm / (pm + p) if pm > 1e-6 else 0.0
+
+    cont = np.array([cont_torque(float(omega[s])) for s in range(ns)], np.float32)
+    peak = np.zeros((1, ns, 3), np.float32)
+    for s in range(ns):
+        for k, d in enumerate(durations):
+            peak[0, s, k] = peak_torque(float(omega[s]), float(d), float(cont[s]))
+
+    with h5py.File(path, "w") as f:
+        f["sweep/vdc"] = np.array([400.0], np.float32)
+        f["sweep/speed"] = speed
+        f["sweep/omega"] = omega.astype(np.float32)
+        f["sweep/load_ratio"] = load_ratio
+        og = f.create_group("operating_grid")
+        og["airgap_torque"] = tau
+        og["motor_efficiency"] = meff
+        og["inverter_efficiency"] = np.ones((1, ns, nl), np.float32)
+        og["motor_loss_total"] = mloss
+        og["inverter_loss_total"] = np.zeros((1, ns, nl), np.float32)
+        og["loss_breakdown/winding_stator"] = (theta.s_w * mloss).astype(np.float32)
+        pc = f.create_group("peak_capability")
+        pc["torque_drive"] = np.full((1, ns), tau_pk, np.float32)
+        pc["torque_regen"] = np.full((1, ns), -tau_pk, np.float32)
+        th = pc.create_group("thermal")
+        th["continuous/torque"] = cont.reshape(1, ns)
+        th["continuous/vdc_used"] = np.array([400.0], np.float32)
+        th["peak/durations"] = durations.astype(np.float32)
+        th["peak/torque"] = peak
+        th["peak/vdc_used"] = np.array([400.0], np.float32)
+        f["inertia/rotor_inertia"] = np.float32(0.007)
+        f["mass/drive_total_mass"] = np.float32(20.0)
+        f["info/alias"] = np.bytes_(b"synth_2node")
+        to = f.create_group("thermal_obj")
+        # 19-node C summing to the ground-truth total (fit init hint).
+        to["C"] = np.full((19,), (400.0 + 3200.0) / 19.0, np.float32)
+        to["cu_temp_coeff"] = np.float32(0.00393)
+        to["cooling/coolant_inlet_K"] = np.float32(t_cool + 273.15)
+
+    return theta, t_max_w, t_max_c
+
+
 def make_driveunit(
     path: Path, *, nv: int = 2, ns: int = 6, nl: int = 9, thermal_name: str = "Thermal"
 ) -> None:

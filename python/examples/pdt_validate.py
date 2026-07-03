@@ -81,8 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         args.ref / EDRIVE, Path(e["maps"]), e["speeds"], e["torque_points"]
     )
     print(
-        f"  vdc={e['vdc']} nan={e['nan_fraction']}  spot-check max err {err:.2e} (real: expect <1e-3)"
+        f"  vdc={e['vdc']} nan={e['nan_fraction']}  spot-check max err {err:.2e} (real: ~1e-3)"
     )
+    if "fit_rms" in e:
+        print(
+            f"  emotor distilled: fit RMS {e['fit_rms'] * 100:.1f}% (>5% expected for 19→2 nodes)"
+        )
 
     print("== DriveUnit ==")
     d = convert_driveunit(args.ref / DRIVEUNIT, args.out / "du.ptm.yaml", vdc=48.0)
