@@ -363,3 +363,38 @@ pub fn load_emotor(path: &str, loader: &dyn SourceLoader) -> Result<Emotor> {
     semantic::check_emotor(&em, &index, &sources, id)?;
     Ok(em)
 }
+
+/// Load and validate a standalone `track.yaml` document (the referenced `centerline.csv` is parsed
+/// by the `outlap-track` crate, which owns the geometry).
+pub fn load_track_doc(path: &str, loader: &dyn SourceLoader) -> Result<crate::track::TrackDoc> {
+    let mut sources = Sources::new();
+    let (doc, id, index, _) =
+        load_typed::<crate::track::TrackDoc>(path, schema_name::TRACK, loader, &mut sources)?;
+    semantic::check_track(&doc, &index, &sources, id)?;
+    Ok(doc)
+}
+
+/// Load and validate a standalone `conditions.yaml` document.
+pub fn load_conditions(
+    path: &str,
+    loader: &dyn SourceLoader,
+) -> Result<crate::conditions::Conditions> {
+    let mut sources = Sources::new();
+    let (c, id, index, _) = load_typed::<crate::conditions::Conditions>(
+        path,
+        schema_name::CONDITIONS,
+        loader,
+        &mut sources,
+    )?;
+    semantic::check_conditions(&c, &index, &sources, id)?;
+    Ok(c)
+}
+
+/// Load and validate a standalone `sim.yaml` document.
+pub fn load_sim(path: &str, loader: &dyn SourceLoader) -> Result<crate::sim::Sim> {
+    let mut sources = Sources::new();
+    let (sim, id, index, _) =
+        load_typed::<crate::sim::Sim>(path, schema_name::SIM, loader, &mut sources)?;
+    semantic::check_sim(&sim, &index, &sources, id)?;
+    Ok(sim)
+}

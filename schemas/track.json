@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TrackDoc",
+  "description": "A track descriptor: topology, the centerline reference, optional banking keypoints, and meta.",
+  "type": "object",
+  "properties": {
+    "banking_keypoints": {
+      "description": "Optional sparse banking keypoints, interpolated in `s` (§9.3). When present they OVERRIDE\nthe centerline's `banking_deg` column (the importer writes keypoints when per-row DEM\nbanking is not available).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BankingKeypoint"
+      }
+    },
+    "centerline": {
+      "description": "Reference to the `centerline.csv` sidecar (columns per §9.3).",
+      "$ref": "#/$defs/CenterlineRef"
+    },
+    "closed": {
+      "description": "Whether the track is a closed loop (periodic spline + closure check) or point-to-point.",
+      "type": "boolean",
+      "default": true
+    },
+    "meta": {
+      "description": "Provenance / accuracy metadata.",
+      "$ref": "#/$defs/TrackMeta",
+      "default": {}
+    },
+    "name": {
+      "description": "Human-readable circuit name.",
+      "type": "string"
+    },
+    "schema": {
+      "description": "Schema version, e.g. `track/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    }
+  },
+  "required": [
+    "schema",
+    "name",
+    "centerline"
+  ],
+  "$defs": {
+    "AccuracyClass": {
+      "description": "Geometry accuracy class (§9.3).",
+      "oneOf": [
+        {
+          "description": "Surveyed / high-precision.",
+          "type": "string",
+          "const": "A"
+        },
+        {
+          "description": "DEM-fused (typical OSM+DEM import).",
+          "type": "string",
+          "const": "B"
+        },
+        {
+          "description": "Estimated / hand-annotated.",
+          "type": "string",
+          "const": "C"
+        }
+      ]
+    },
+    "BankingKeypoint": {
+      "description": "A sparse banking keypoint: banking angle at an arc-length station.",
+      "type": "object",
+      "properties": {
+        "banking_deg": {
+          "description": "Banking angle at this station, degrees (positive raises the left/outside edge).",
+          "type": "number",
+          "format": "double"
+        },
+        "s_m": {
+          "description": "Arc-length station along the centerline, metres.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "s_m",
+        "banking_deg"
+      ]
+    },
+    "CenterlineRef": {
+      "description": "Reference to a `centerline.csv` track sidecar.",
+      "type": "string"
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "TrackMeta": {
+      "description": "Provenance and accuracy metadata for a track (§9.3, Decision #13).",
+      "type": "object",
+      "properties": {
+        "accuracy_class": {
+          "description": "Accuracy class of the geometry.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AccuracyClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attribution": {
+          "description": "Required attribution string for redistributable sources (ODbL/Copernicus).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dem": {
+          "description": "Digital elevation model used to fuse `z`, e.g. `copernicus-glo-30`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "description": "Free-form notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "How the centerline was sourced, e.g. `osm+dem`, `tumftm`, `survey`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

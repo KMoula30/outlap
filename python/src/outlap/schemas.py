@@ -44,6 +44,9 @@ _FIXTURES: dict[str, list[str]] = {
     ],
     "tyr": ["tyr/slick.tyr.yaml"],
     "emotor": ["emotor/rear.emotor.yaml"],
+    "track": ["track/synthetic_oval.track.yaml"],
+    "conditions": ["conditions/hot_dry.conditions.yaml"],
+    "sim": ["sim/qss.sim.yaml"],
 }
 
 

@@ -1,0 +1,11 @@
+# Imported by outlap.importers.osm_track — public data only.
+schema: track/1.0
+name: Circuit de Barcelona-Catalunya
+closed: true
+centerline: centerline.csv
+meta:
+  source: osm+dem
+  dem: eudem25m
+  accuracy_class: B
+  attribution: "© OpenStreetMap contributors (ODbL); elevation eudem25m via opentopodata.org"
+  notes: "widths defaulted; banking not resolved from DEM (add keypoints to refine)"

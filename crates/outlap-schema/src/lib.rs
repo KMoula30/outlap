@@ -40,6 +40,8 @@
     clippy::too_many_lines
 )]
 
+pub mod centerline;
+pub mod conditions;
 pub mod diagnostics;
 pub mod emotor;
 pub mod error;
@@ -47,13 +49,22 @@ pub mod io;
 pub mod load;
 pub mod ptm;
 pub mod refs;
+pub mod sim;
+pub mod track;
 pub mod tree;
 pub mod tyr;
 pub mod vehicle;
 pub mod version;
 
+pub use centerline::{parse_centerline, Centerline};
+pub use conditions::Conditions;
 pub use error::SchemaError;
-pub use load::{load_vehicle, resolve_vehicle, LoadOptions, Overrides, ResolvedVehicle};
+pub use load::{
+    load_conditions, load_sim, load_track_doc, load_vehicle, resolve_vehicle, LoadOptions,
+    Overrides, ResolvedVehicle,
+};
+pub use sim::Sim;
+pub use track::TrackDoc;
 pub use vehicle::Vehicle;
 pub use version::SchemaVersion;
 
@@ -67,6 +78,12 @@ pub mod schema_name {
     pub const TYR: &str = "tyr";
     /// The `.emotor` electric-machine thermal document.
     pub const EMOTOR: &str = "emotor";
+    /// The `track.yaml` document.
+    pub const TRACK: &str = "track";
+    /// The `conditions.yaml` document.
+    pub const CONDITIONS: &str = "conditions";
+    /// The `sim.yaml` document.
+    pub const SIM: &str = "sim";
 }
 
 /// The MAJOR version this build of the loader accepts for every schema (loaders accept same-major).

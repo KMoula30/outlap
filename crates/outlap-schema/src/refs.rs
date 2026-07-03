@@ -62,6 +62,10 @@ ref_newtype! {
     /// Reference to a battery equivalent-circuit parameter file.
     BatteryRef
 }
+ref_newtype! {
+    /// Reference to a `centerline.csv` track sidecar.
+    CenterlineRef
+}
 
 /// The `x-*` extension bag: vendor/experimental keys that are carried through but not interpreted.
 ///

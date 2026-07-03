@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# default-features = false keeps outlap-track wasm-clean (no FsLoader/std pull); callers supply a
+# SourceLoader (MemLoader for wasm/in-memory, FsLoader behind std at the app edge).
+outlap-core = { path = "../outlap-core" }
+outlap-schema = { path = "../outlap-schema", default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+outlap-schema = { path = "../outlap-schema" }
 
 [lints]
 workspace = true

@@ -6,7 +6,10 @@ use crate::diagnostics::{Sources, SrcSpan};
 use crate::error::{Result, SchemaError};
 use crate::load::report::ReportEntry;
 use crate::tree::SpanIndex;
-use crate::{emotor::Emotor, ptm::Ptm, tyr, vehicle::Vehicle};
+use crate::{
+    conditions::Conditions, emotor::Emotor, ptm::Ptm, sim::Sim, track::TrackDoc, tyr,
+    vehicle::Vehicle,
+};
 
 /// Aero map axis names this loader recognizes (unknown names are a semantic error with a hint).
 pub const KNOWN_AERO_AXES: &[&str] = &[
@@ -347,6 +350,115 @@ pub fn check_tyr(
         }
     }
     unit_interval(t.thermal.p_t, "thermal.p_t", "/thermal/p_t", &s, sources)?;
+    Ok(())
+}
+
+/// Semantic checks for a `track.yaml` document (the centerline itself is validated in
+/// [`crate::centerline`]). Banking keypoints must have strictly ascending `s_m`.
+pub fn check_track(
+    t: &TrackDoc,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    if t.name.trim().is_empty() {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/name"),
+            "`name` must not be empty",
+            None,
+        ));
+    }
+    let ks: Vec<f64> = t.banking_keypoints.iter().map(|k| k.s_m).collect();
+    if !ks.is_empty() && !is_ascending(&ks) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/banking_keypoints"),
+            "`banking_keypoints` must have strictly ascending `s_m`",
+            Some(
+                "keypoints are interpolated in arc length; duplicates/reorderings are ambiguous"
+                    .into(),
+            ),
+        ));
+    }
+    if let Some(first) = t.banking_keypoints.first() {
+        if first.s_m < 0.0 {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/banking_keypoints/0/s_m"),
+                "banking keypoint `s_m` must be >= 0",
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Semantic checks for a `conditions.yaml` document.
+pub fn check_conditions(
+    c: &Conditions,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    positive(
+        c.air.pressure_hpa,
+        "air.pressure_hpa",
+        "/air/pressure_hpa",
+        &s,
+        sources,
+    )?;
+    if c.wind.speed_mps < 0.0 || !c.wind.speed_mps.is_finite() {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/wind/speed_mps"),
+            "`wind.speed_mps` must be >= 0",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Semantic checks for a `sim.yaml` document.
+pub fn check_sim(
+    sim: &Sim,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    positive(sim.dt_s, "dt_s", "/dt_s", &s, sources)?;
+    let e = &sim.envelope;
+    if e.v_points < 2 || e.ax_points < 2 || e.g_normal_points < 1 {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/envelope"),
+            "`envelope` needs v_points >= 2, ax_points >= 2, g_normal_points >= 1",
+            None,
+        ));
+    }
+    // Exactly one racing-line source.
+    match (&sim.raceline.generator, &sim.raceline.file) {
+        (Some(_), None) | (None, Some(_)) => {}
+        (Some(_), Some(_)) => {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/raceline"),
+                "`raceline` sets both `generator` and `file`; choose one",
+                None,
+            ));
+        }
+        (None, None) => {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/raceline"),
+                "`raceline` needs either a `generator` or a `file`",
+                None,
+            ));
+        }
+    }
     Ok(())
 }
 

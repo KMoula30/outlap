@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sim",
+  "description": "Simulation settings for one run.",
+  "type": "object",
+  "properties": {
+    "allow_degraded": {
+      "description": "Allow documented-fallback (degraded) combinations, recorded in the result metadata\n(Decision #40).",
+      "type": "boolean",
+      "default": false
+    },
+    "dt_s": {
+      "description": "Fixed integration step, seconds (transient tiers).",
+      "type": "number",
+      "format": "double",
+      "default": 0.001
+    },
+    "envelope": {
+      "description": "g-g-g-v envelope resolution (QSS tiers).",
+      "$ref": "#/$defs/Envelope",
+      "default": {
+        "ax_points": 25,
+        "g_normal_points": 7,
+        "v_points": 40
+      }
+    },
+    "fz_coupling": {
+      "description": "Normal-load algebraic-loop coupling mode (Decision #29).",
+      "$ref": "#/$defs/FzCoupling",
+      "default": "one_step_lag"
+    },
+    "integrator": {
+      "description": "Fixed-step integrator (transient tiers).",
+      "$ref": "#/$defs/Integrator",
+      "default": "heun"
+    },
+    "raceline": {
+      "description": "Racing-line source.",
+      "$ref": "#/$defs/Raceline",
+      "default": {
+        "generator": "min_curvature"
+      }
+    },
+    "schema": {
+      "description": "Schema version, e.g. `sim/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "tier": {
+      "description": "Solver tier.",
+      "$ref": "#/$defs/Tier",
+      "default": "t1"
+    }
+  },
+  "required": [
+    "schema"
+  ],
+  "$defs": {
+    "Envelope": {
+      "description": "g-g-g-v envelope sampling resolution.",
+      "type": "object",
+      "properties": {
+        "ax_points": {
+          "description": "Number of longitudinal-acceleration samples.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "g_normal_points": {
+          "description": "Number of normal-g (banking/grade) samples.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "v_points": {
+          "description": "Number of speed samples.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "v_points",
+        "ax_points",
+        "g_normal_points"
+      ]
+    },
+    "FzCoupling": {
+      "description": "Normal-load (Fz) algebraic-loop coupling mode (Decision #29). A recorded simulation setting.",
+      "oneOf": [
+        {
+          "description": "Use the previous step's normal loads (default).",
+          "type": "string",
+          "const": "one_step_lag"
+        },
+        {
+          "description": "Damped fixed-point iteration to convergence within the step.",
+          "type": "string",
+          "const": "fixed_point"
+        }
+      ]
+    },
+    "Integrator": {
+      "description": "Fixed-step integrator (Decision #30 mandates fixed-step in production paths).",
+      "oneOf": [
+        {
+          "description": "Heun (explicit trapezoidal, 2nd order) — the default.",
+          "type": "string",
+          "const": "heun"
+        },
+        {
+          "description": "Classical Runge–Kutta, 4th order.",
+          "type": "string",
+          "const": "rk4"
+        }
+      ]
+    },
+    "Raceline": {
+      "description": "Racing-line source: a generator (v1: min-curvature, Decision #14) or a user-supplied CSV.\n\nExactly one of `generator` / `file` may be set; the semantic check enforces it. The default is\nthe min-curvature generator.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path to a user-supplied `raceline.csv` (same s-based format), instead of a generator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generator": {
+          "description": "Line generator to run.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RacelineGenerator"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RacelineGenerator": {
+      "description": "A racing-line generator (v1 ships only the min-curvature QP, §6.3).",
+      "oneOf": [
+        {
+          "description": "Minimum-curvature line: QP over lateral offset minimizing ∫κ² on the 3D ribbon.",
+          "type": "string",
+          "const": "min_curvature"
+        }
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "Tier": {
+      "description": "Solver tier (T0 point-mass … T3 full transient). The same vehicle description drives all tiers\n(Hard rule #4); this only selects fidelity.",
+      "oneOf": [
+        {
+          "description": "Point-mass with constant-μ and a power cap.",
+          "type": "string",
+          "const": "t0"
+        },
+        {
+          "description": "Quasi-steady-state g-g-g-v lap (the default lap solver).",
+          "type": "string",
+          "const": "t1"
+        },
+        {
+          "description": "Transient double-track.",
+          "type": "string",
+          "const": "t2"
+        },
+        {
+          "description": "Full transient with driver model.",
+          "type": "string",
+          "const": "t3"
+        }
+      ]
+    }
+  }
+}

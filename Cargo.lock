@@ -21,6 +21,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
 name = "blake3"
 version = "1.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -129,6 +135,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "marked-yaml"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -168,12 +180,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
+ "libm",
+]
+
+[[package]]
 name = "outlap-batch"
 version = "0.1.0"
 
 [[package]]
 name = "outlap-core"
 version = "0.1.0"
+dependencies = [
+ "num-traits",
+ "thiserror",
+]
 
 [[package]]
 name = "outlap-powertrain"
@@ -209,6 +235,11 @@ version = "0.1.0"
 [[package]]
 name = "outlap-track"
 version = "0.1.0"
+dependencies = [
+ "outlap-core",
+ "outlap-schema",
+ "thiserror",
+]
 
 [[package]]
 name = "outlap-transient"
