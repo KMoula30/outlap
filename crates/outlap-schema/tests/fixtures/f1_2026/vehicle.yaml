@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Reference topology: F1 2026 hybrid (ICE + MGU-K on the same shaft -> gearbox -> rear diff -> RL+RR).
+# NOTE: ERS/energy figures are approximate 2026-regulation values for testing — verify against the
+# published FIA 2026 Technical Regulations before shipping this as reference data.
+schema: vehicle/1.0
+name: "Reference F1 2026 hybrid"
+chassis:
+  mass_kg: 768.0
+  cg: [1.70, 0.0, 0.30]
+  inertia: [180.0, 950.0, 1000.0]
+  wheelbase_m: 3.40
+  track_m: [1.65, 1.60]
+aero:
+  map: aero/f1_2026.parquet
+  axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg, drs_flag]
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 220000.0
+    roll_stiffness_share: 0.58
+    roll_center_height_m: 0.03
+    anti_dive: 0.4
+  rear:
+    ride_rate_n_per_m: 240000.0
+    roll_stiffness_share: 0.42
+    roll_center_height_m: 0.06
+    anti_squat: 0.3
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/ice_v6.ptm.yaml
+      path:
+        - gearbox:
+            ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
+            final_drive: 3.1
+            shift_time_s: 0.02
+        - diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
+      wheels: [RL, RR]
+ers:
+  mgu_k: ptm/mgu_k.ptm.yaml
+  es:
+    capacity_mj: 4.0
+    soc_window: [0.2, 0.9]
+  deployment:
+    power_limit_kw: 350.0
+    taper_vs_speed:
+      speed_kph: [0.0, 290.0, 345.0]
+      power_frac: [1.0, 1.0, 0.0]
+  override_mode:
+    power_limit_kw: 350.0
+    taper_vs_speed:
+      speed_kph: [0.0, 337.0, 355.0]
+      power_frac: [1.0, 1.0, 0.0]
+    extra_energy_per_lap_mj: 0.5
+    activation: strategy
+  recovery:
+    braking_power_limit_kw: 350.0
+    per_lap_harvest_mj: 8.5
+    recharge_phases: true
+battery:
+  model: rc_pairs
+  params: battery/f1_es.yaml
+brakes:
+  balance_bar: 0.58
+  disc:
+    front:
+      thermal_capacity_j_per_k: 60000.0
+      cooling_area_m2: 0.14
+    rear:
+      thermal_capacity_j_per_k: 48000.0
+      cooling_area_m2: 0.11
+  regen_blend:
+    max_regen_frac: 0.5

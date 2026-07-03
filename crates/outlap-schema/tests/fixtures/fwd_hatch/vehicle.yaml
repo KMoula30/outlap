@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Reference topology: FWD hatchback (ICE -> gearbox -> front diff -> FL+FR). Constant aero (§7.4).
+schema: vehicle/1.0
+name: "Reference FWD hatchback"
+chassis:
+  mass_kg: 1280.0
+  cg: [1.05, 0.0, 0.52]
+  inertia: [420.0, 1900.0, 2100.0]
+  wheelbase_m: 2.60
+  track_m: [1.53, 1.51]
+aero:
+  map: aero/hatch.parquet
+  axes: []
+  constant:
+    cx_a_m2: 0.68
+    cz_front_a_m2: -0.02
+    cz_rear_a_m2: -0.03
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 28000.0
+    roll_stiffness_share: 0.62
+    roll_center_height_m: 0.06
+  rear:
+    ride_rate_n_per_m: 24000.0
+    roll_stiffness_share: 0.38
+    roll_center_height_m: 0.10
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/ice_v6.ptm.yaml
+      path:
+        - gearbox:
+            ratios: [3.5, 2.1, 1.4, 1.05, 0.85, 0.72]
+            final_drive: 4.06
+            shift_time_s: 0.25
+            efficiency: 0.96
+        - diff: { type: open }
+      wheels: [FL, FR]
+brakes:
+  balance_bar: 0.66
+  abs: true
+  disc:
+    front:
+      thermal_capacity_j_per_k: 30000.0
+      cooling_area_m2: 0.06
+    rear:
+      thermal_capacity_j_per_k: 20000.0
+      cooling_area_m2: 0.04

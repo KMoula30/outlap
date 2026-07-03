@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC 2-node emotor thermal model.
+schema: emotor/1.0
+nodes:
+  winding:
+    c_j_per_k: 9000.0
+    t_max_c: 180.0
+    t_warn_c: 160.0
+  case:
+    c_j_per_k: 32000.0
+    t_max_c: 120.0
+    t_warn_c: 105.0
+coupling:
+  g_wc_w_per_k: 12.0
+  g_cool_w_per_k: 45.0
+cooling:
+  liquid:
+    coolant_temp_c: 65.0
+loss_routing:
+  winding_split: 0.7
+  copper_alpha_per_k: 0.0039
+meta:
+  source: estimated
+  notes: "mass-based estimate"

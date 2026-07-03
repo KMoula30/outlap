@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Reference topology: 2-DU AWD EV (DU_f -> front diff -> FL+FR; DU_r -> rear diff -> RL+RR).
+schema: vehicle/1.0
+name: "Reference EV — 2-DU AWD"
+chassis:
+  mass_kg: 1780.0
+  cg: [1.42, 0.0, 0.40]
+  inertia: [560.0, 2500.0, 2700.0]
+  wheelbase_m: 2.95
+  track_m: [1.64, 1.62]
+aero:
+  map: aero/ev_2du.parquet
+  axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg]
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 48000.0
+    roll_stiffness_share: 0.52
+    roll_center_height_m: 0.05
+  rear:
+    ride_rate_n_per_m: 55000.0
+    roll_stiffness_share: 0.48
+    roll_center_height_m: 0.08
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/front_drive_unit.ptm.yaml
+      path:
+        - diff: { type: open }
+      wheels: [FL, FR]
+    - source: ptm/rear_drive_unit.ptm.yaml
+      thermal: emotor/rear.emotor.yaml
+      path:
+        - diff: { type: lsd, preload_nm: 60.0, ramp: [45.0, 60.0] }
+      wheels: [RL, RR]
+  control:
+    split:
+      front: 0.4
+battery:
+  model: rc_pairs
+  params: battery/pack_400v.yaml
+brakes:
+  balance_bar: 0.6
+  abs: true
+  disc:
+    front:
+      thermal_capacity_j_per_k: 44000.0
+      cooling_area_m2: 0.10
+    rear:
+      thermal_capacity_j_per_k: 36000.0
+      cooling_area_m2: 0.08
+  regen_blend:
+    max_regen_frac: 0.55
+    front_bias: 0.5

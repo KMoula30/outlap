@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# YAML anchors are not supported (inheritance is via `extends:` only) — must fail at parse.
+schema: vehicle/1.0
+name: "anchor car"
+chassis: &base
+  mass_kg: 1000.0
+aero: *base

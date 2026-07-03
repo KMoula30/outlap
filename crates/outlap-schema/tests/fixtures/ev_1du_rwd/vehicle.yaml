@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Reference topology: 1-DU RWD EV (DU -> open diff -> RL+RR).
+schema: vehicle/1.0
+name: "Reference EV — 1-DU RWD"
+chassis:
+  mass_kg: 1650.0
+  cg: [1.35, 0.0, 0.42]
+  inertia: [520.0, 2300.0, 2500.0]
+  wheelbase_m: 2.90
+  track_m: [1.62, 1.60]
+aero:
+  map: aero/ev_1du.parquet
+  axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg]
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 45000.0
+    roll_stiffness_share: 0.55
+    roll_center_height_m: 0.05
+  rear:
+    ride_rate_n_per_m: 52000.0
+    roll_stiffness_share: 0.45
+    roll_center_height_m: 0.08
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/rear_drive_unit.ptm.yaml
+      thermal: emotor/rear.emotor.yaml
+      path:
+        - diff: { type: open }
+      wheels: [RL, RR]
+battery:
+  model: rc_pairs
+  params: battery/pack_400v.yaml
+brakes:
+  balance_bar: 0.62
+  abs: true
+  disc:
+    front:
+      thermal_capacity_j_per_k: 42000.0
+      cooling_area_m2: 0.09
+    rear:
+      thermal_capacity_j_per_k: 34000.0
+      cooling_area_m2: 0.07
+  regen_blend:
+    max_regen_frac: 0.6

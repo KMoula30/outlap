@@ -1,0 +1,382 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! Stage 6 — range/consistency checks on the typed models, plus per-document checks for the
+//! referenced `.ptm`/`.tyr`/`.emotor` files. Spans are recovered from the [`SpanIndex`].
+
+use crate::diagnostics::{Sources, SrcSpan};
+use crate::error::{Result, SchemaError};
+use crate::load::report::ReportEntry;
+use crate::tree::SpanIndex;
+use crate::{emotor::Emotor, ptm::Ptm, tyr, vehicle::Vehicle};
+
+/// Aero map axis names this loader recognizes (unknown names are a semantic error with a hint).
+pub const KNOWN_AERO_AXES: &[&str] = &[
+    "ride_height_f_mm",
+    "ride_height_r_mm",
+    "ride_height_mm",
+    "yaw_deg",
+    "roll_deg",
+    "steer_deg",
+    "drs_flag",
+    "speed_mps",
+];
+
+/// A span resolver over one document's index (falls back to a blank span in that file).
+struct Spans<'a> {
+    index: &'a SpanIndex,
+    file: crate::diagnostics::SourceId,
+}
+
+impl Spans<'_> {
+    fn at(&self, pointer: &str) -> SrcSpan {
+        self.index
+            .span_for(pointer)
+            .unwrap_or_else(|| SrcSpan::blank(self.file))
+    }
+}
+
+/// Run all semantic checks on a resolved [`Vehicle`].
+pub fn check_vehicle(
+    spec: &Vehicle,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+
+    positive(
+        spec.chassis.mass_kg,
+        "chassis.mass_kg",
+        "/chassis/mass_kg",
+        &s,
+        sources,
+    )?;
+    positive(
+        spec.chassis.wheelbase_m,
+        "chassis.wheelbase_m",
+        "/chassis/wheelbase_m",
+        &s,
+        sources,
+    )?;
+    for (i, t) in spec.chassis.track_m.iter().enumerate() {
+        positive(
+            *t,
+            "chassis.track_m",
+            &format!("/chassis/track_m/{i}"),
+            &s,
+            sources,
+        )?;
+    }
+
+    unit_interval(
+        spec.brakes.balance_bar,
+        "brakes.balance_bar",
+        "/brakes/balance_bar",
+        &s,
+        sources,
+    )?;
+    if let Some(rb) = &spec.brakes.regen_blend {
+        unit_interval(
+            rb.max_regen_frac,
+            "brakes.regen_blend.max_regen_frac",
+            "/brakes/regen_blend/max_regen_frac",
+            &s,
+            sources,
+        )?;
+    }
+
+    for (label, axle, base) in [
+        ("front", &spec.suspension.front, "/suspension/front"),
+        ("rear", &spec.suspension.rear, "/suspension/rear"),
+    ] {
+        unit_interval(
+            axle.roll_stiffness_share,
+            &format!("suspension.{label}.roll_stiffness_share"),
+            &format!("{base}/roll_stiffness_share"),
+            &s,
+            sources,
+        )?;
+        positive(
+            axle.ride_rate_n_per_m,
+            &format!("suspension.{label}.ride_rate_n_per_m"),
+            &format!("{base}/ride_rate_n_per_m"),
+            &s,
+            sources,
+        )?;
+    }
+
+    // Aero axes must be recognized.
+    for (i, axis) in spec.aero.axes.iter().enumerate() {
+        if !KNOWN_AERO_AXES.contains(&axis.as_str()) {
+            let help = crate::diagnostics::suggest(axis, KNOWN_AERO_AXES.iter().copied())
+                .map(|s| format!("did you mean `{s}`?"));
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(&format!("/aero/axes/{i}")),
+                format!("unknown aero axis `{axis}`"),
+                help,
+            ));
+        }
+    }
+
+    // Differential conditional-requirement + ramp sanity.
+    check_drivetrain(spec, &s, sources)?;
+
+    // ERS.
+    if let Some(ers) = &spec.ers {
+        check_soc_window(ers.es.soc_window, "/ers/es/soc_window", &s, sources)?;
+        check_taper(
+            &ers.deployment.taper_vs_speed,
+            "/ers/deployment/taper_vs_speed",
+            &s,
+            sources,
+        )?;
+        if let Some(om) = &ers.override_mode {
+            check_taper(
+                &om.taper_vs_speed,
+                "/ers/override_mode/taper_vs_speed",
+                &s,
+                sources,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> {
+    use crate::vehicle::{Coupler, DiffKind};
+    for (ui, unit) in spec.drivetrain.units.iter().enumerate() {
+        for (pi, coupler) in unit.path.iter().enumerate() {
+            let base = format!("/drivetrain/units/{ui}/path/{pi}/diff");
+            if let Coupler::Diff(diff) = coupler {
+                let needs_preload = matches!(diff.kind, DiffKind::Lsd | DiffKind::Locked);
+                if needs_preload && diff.preload_nm.is_none() {
+                    return Err(SchemaError::semantic(
+                        sources,
+                        s.at(&base),
+                        format!(
+                            "a `{}` differential requires `preload_nm`",
+                            serde_plain_kind(diff.kind)
+                        ),
+                        Some("add `preload_nm: <N·m>` to this diff".into()),
+                    ));
+                }
+                if diff.ramp.is_some() && !matches!(diff.kind, DiffKind::Lsd) {
+                    return Err(SchemaError::semantic(
+                        sources,
+                        s.at(&format!("{base}/ramp")),
+                        "`ramp` only applies to an `lsd` differential",
+                        None,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn serde_plain_kind(kind: crate::vehicle::DiffKind) -> &'static str {
+    use crate::vehicle::DiffKind;
+    match kind {
+        DiffKind::Open => "open",
+        DiffKind::Locked => "locked",
+        DiffKind::Lsd => "lsd",
+        DiffKind::Solid => "solid",
+    }
+}
+
+fn check_soc_window(window: [f64; 2], ptr: &str, s: &Spans, sources: &Sources) -> Result<()> {
+    let [lo, hi] = window;
+    if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            "`soc_window` bounds must lie in [0, 1]",
+            None,
+        ));
+    }
+    if lo >= hi {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            "`soc_window` must be ascending (`[min, max]` with min < max)",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn check_taper(
+    taper: &crate::vehicle::SpeedTaper,
+    ptr: &str,
+    s: &Spans,
+    sources: &Sources,
+) -> Result<()> {
+    if taper.speed_kph.len() != taper.power_frac.len() {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            format!(
+                "taper arrays must be equal length (`speed_kph` has {}, `power_frac` has {})",
+                taper.speed_kph.len(),
+                taper.power_frac.len()
+            ),
+            None,
+        ));
+    }
+    if taper.speed_kph.is_empty() {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            "taper must have at least one point",
+            None,
+        ));
+    }
+    if !is_ascending(&taper.speed_kph) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at(&format!("{ptr}/speed_kph")),
+            "`speed_kph` must be strictly ascending",
+            None,
+        ));
+    }
+    for (i, p) in taper.power_frac.iter().enumerate() {
+        if !(0.0..=1.0).contains(p) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(&format!("{ptr}/power_frac/{i}")),
+                "`power_frac` values must lie in [0, 1]",
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn positive(v: f64, label: &str, ptr: &str, s: &Spans, sources: &Sources) -> Result<()> {
+    if v > 0.0 && v.is_finite() {
+        Ok(())
+    } else {
+        Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            format!("`{label}` must be > 0"),
+            None,
+        ))
+    }
+}
+
+fn unit_interval(v: f64, label: &str, ptr: &str, s: &Spans, sources: &Sources) -> Result<()> {
+    if (0.0..=1.0).contains(&v) {
+        Ok(())
+    } else {
+        Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            format!("`{label}` must lie in [0, 1]"),
+            None,
+        ))
+    }
+}
+
+fn is_ascending(xs: &[f64]) -> bool {
+    xs.windows(2).all(|w| w[0] < w[1])
+}
+
+// --- Referenced-file checks ------------------------------------------------------------------
+
+/// Semantic checks for a `.ptm` document.
+pub fn check_ptm(
+    ptm: &Ptm,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    if !is_ascending(&ptm.axes.speed_rpm) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/axes/speed_rpm"),
+            "`axes.speed_rpm` must be strictly ascending",
+            None,
+        ));
+    }
+    let curve = &ptm.limits.max_torque_nm_vs_speed;
+    if curve.speed_rpm.len() != curve.torque_nm.len() || curve.speed_rpm.is_empty() {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/limits/max_torque_nm_vs_speed"),
+            "`max_torque_nm_vs_speed` must have equal-length, non-empty `speed_rpm`/`torque_nm`",
+            None,
+        ));
+    }
+    positive(ptm.mass_kg, "mass_kg", "/mass_kg", &s, sources)?;
+    Ok(())
+}
+
+/// Semantic checks for a `.tyr` document. Returns non-fatal warnings (unknown MF6.1 keys).
+pub fn check_tyr(
+    t: &crate::tyr::Tyr,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+    warnings: &mut Vec<ReportEntry>,
+) -> Result<()> {
+    let s = Spans { index, file };
+    // Required-core coefficients.
+    for key in tyr::REQUIRED_MF61_KEYS {
+        if !t.mf61.0.contains_key(*key) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/mf61"),
+                format!("MF6.1 block is missing required coefficient `{key}`"),
+                None,
+            ));
+        }
+    }
+    // Unknown coefficients → warning with did-you-mean.
+    for name in t.mf61.0.keys() {
+        if !tyr::KNOWN_MF61_KEYS.contains(&name.as_str()) {
+            let hint = crate::diagnostics::suggest(name, tyr::KNOWN_MF61_KEYS.iter().copied())
+                .map(|s| format!(" (did you mean `{s}`?)"))
+                .unwrap_or_default();
+            warnings.push(ReportEntry::new(
+                format!("/mf61/{name}"),
+                format!("unknown MF6.1 coefficient `{name}`{hint} — carried through unvalidated"),
+            ));
+        }
+    }
+    unit_interval(t.thermal.p_t, "thermal.p_t", "/thermal/p_t", &s, sources)?;
+    Ok(())
+}
+
+/// Semantic checks for an `.emotor` document.
+pub fn check_emotor(
+    e: &Emotor,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    unit_interval(
+        e.loss_routing.winding_split,
+        "loss_routing.winding_split",
+        "/loss_routing/winding_split",
+        &s,
+        sources,
+    )?;
+    for (label, node, base) in [
+        ("winding", &e.nodes.winding, "/nodes/winding"),
+        ("case", &e.nodes.case, "/nodes/case"),
+    ] {
+        if node.t_warn_c > node.t_max_c {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(base),
+                format!("`{label}.t_warn_c` must not exceed `t_max_c`"),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}

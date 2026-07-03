@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Reference topology: 4-DU torque-vectoring EV (DU x4 -> one wheel each; TV controller allocates).
+schema: vehicle/1.0
+name: "Reference EV — 4-DU TV"
+chassis:
+  mass_kg: 1850.0
+  cg: [1.45, 0.0, 0.38]
+  inertia: [590.0, 2600.0, 2800.0]
+  wheelbase_m: 2.98
+  track_m: [1.66, 1.64]
+aero:
+  map: aero/ev_4du.parquet
+  axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg]
+suspension:
+  model: lumped_kc
+  front: { ride_rate_n_per_m: 50000.0, roll_stiffness_share: 0.50, roll_center_height_m: 0.05 }
+  rear: { ride_rate_n_per_m: 57000.0, roll_stiffness_share: 0.50, roll_center_height_m: 0.08 }
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/front_drive_unit.ptm.yaml
+      path: []
+      wheels: [FL]
+    - source: ptm/front_drive_unit.ptm.yaml
+      path: []
+      wheels: [FR]
+    - source: ptm/rear_drive_unit.ptm.yaml
+      path: []
+      wheels: [RL]
+    - source: ptm/rear_drive_unit.ptm.yaml
+      path: []
+      wheels: [RR]
+  control:
+    torque_vectoring:
+      enabled: true
+      k_yaw: 1200.0
+battery:
+  model: rc_pairs
+  params: battery/pack_800v.yaml
+brakes:
+  balance_bar: 0.6
+  abs: true
+  disc:
+    front: { thermal_capacity_j_per_k: 44000.0, cooling_area_m2: 0.10 }
+    rear: { thermal_capacity_j_per_k: 36000.0, cooling_area_m2: 0.08 }
+  regen_blend: { max_regen_frac: 0.6 }

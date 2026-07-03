@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ptm",
+  "description": "A neutral powertrain map.",
+  "type": "object",
+  "properties": {
+    "axes": {
+      "description": "Map axes.",
+      "$ref": "#/$defs/PtmAxes"
+    },
+    "inertia_kgm2": {
+      "description": "Rotational inertia referred to this map's shaft, kg·m².",
+      "type": "number",
+      "format": "double"
+    },
+    "kind": {
+      "description": "Source kind — determines how the topology consumes this map.",
+      "$ref": "#/$defs/PtmKind"
+    },
+    "limits": {
+      "description": "Limit envelopes (only `max_torque_nm_vs_speed` is required).",
+      "$ref": "#/$defs/PtmLimits"
+    },
+    "mass_kg": {
+      "description": "Mass attributed to this unit, kg.",
+      "type": "number",
+      "format": "double"
+    },
+    "meta": {
+      "description": "Free-form provenance/metadata.",
+      "$ref": "#/$defs/PtmMeta",
+      "default": {}
+    },
+    "schema": {
+      "description": "Schema version, e.g. `ptm/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "tables": {
+      "description": "Sidecar table references and column semantics.",
+      "$ref": "#/$defs/PtmTables"
+    }
+  },
+  "required": [
+    "schema",
+    "kind",
+    "axes",
+    "tables",
+    "limits",
+    "inertia_kgm2",
+    "mass_kg"
+  ],
+  "$defs": {
+    "LoadAxis": {
+      "description": "The load-axis declaration: absolute torque or a normalized fraction.\n\nExternally tagged, so the wire form is `{torque_nm: [...]}` **or** `{load_fraction: [...]}`.\nA load fraction is in −1..1 where negative values are the regen quadrant.",
+      "oneOf": [
+        {
+          "description": "Absolute torque breakpoints, N·m.",
+          "type": "object",
+          "properties": {
+            "torque_nm": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "torque_nm"
+          ]
+        },
+        {
+          "description": "Normalized load-fraction breakpoints, −1..1 (negative = regen).",
+          "type": "object",
+          "properties": {
+            "load_fraction": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "load_fraction"
+          ]
+        }
+      ]
+    },
+    "MapRef": {
+      "description": "Reference to a numeric sidecar map table (parquet/CSV), e.g. an aero or K&C map.",
+      "type": "string"
+    },
+    "Overload": {
+      "description": "Time-limited overload envelope: torque curves valid for each listed duration.",
+      "type": "object",
+      "properties": {
+        "durations_s": {
+          "description": "Durations for which the paired curves are valid, s.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "torque_nm_vs_speed": {
+          "description": "Torque curves, one per duration.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TorqueCurve"
+          }
+        }
+      },
+      "required": [
+        "durations_s",
+        "torque_nm_vs_speed"
+      ]
+    },
+    "PtmAxes": {
+      "description": "The axes of a powertrain map.",
+      "type": "object",
+      "properties": {
+        "load_axis": {
+          "description": "Load-axis kind — either an absolute torque axis or a normalized load fraction.",
+          "$ref": "#/$defs/LoadAxis"
+        },
+        "speed_rpm": {
+          "description": "Shaft-speed axis, rpm (monotonically increasing).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "torque_nm": {
+          "description": "Torque axis, N·m (the sampled torque grid, paired with `speed_rpm`).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "required": [
+        "speed_rpm",
+        "load_axis",
+        "torque_nm"
+      ]
+    },
+    "PtmKind": {
+      "description": "Source kind of a powertrain map.",
+      "oneOf": [
+        {
+          "description": "A bare electric machine (torque available at its own shaft; a downstream ratio may apply).",
+          "type": "string",
+          "const": "electric_machine"
+        },
+        {
+          "description": "An internal-combustion engine.",
+          "type": "string",
+          "const": "ice"
+        },
+        {
+          "description": "A machine+inverter+gearbox lumped at the wheel-side shaft. The topology must **not** apply\nanother gear ratio unless [`PtmMeta::upstream_ratio_applied`] is `false`.",
+          "type": "string",
+          "const": "drive_unit"
+        }
+      ]
+    },
+    "PtmLimits": {
+      "description": "Limit envelopes.\n\nOnly `max_torque_nm_vs_speed` (the peak envelope) is required. The others, when present, serve\nas **validation references**, not the derating mechanism — thermal capability is computed by the\n`.emotor` model from the loss tables (Decision #25).",
+      "type": "object",
+      "properties": {
+        "cont_torque_nm_vs_speed": {
+          "description": "Continuous torque vs speed, N·m (optional validation reference).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TorqueCurve"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "drag_torque_nm_vs_speed": {
+          "description": "Drag/braking torque vs speed, N·m (optional).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TorqueCurve"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_torque_nm_vs_speed": {
+          "description": "Peak torque vs speed, N·m (REQUIRED).",
+          "$ref": "#/$defs/TorqueCurve"
+        },
+        "overload": {
+          "description": "Overload envelope by duration (optional validation reference).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Overload"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "max_torque_nm_vs_speed"
+      ]
+    },
+    "PtmMeta": {
+      "description": "Free-form provenance/metadata for a powertrain map.",
+      "type": "object",
+      "properties": {
+        "dc_voltage_v": {
+          "description": "DC bus voltage the map was measured at, V (electric machines).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "source": {
+          "description": "Human-readable source/provenance note.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upstream_ratio_applied": {
+          "description": "For `drive_unit` maps: whether the internal gear ratio is already applied (default `true`).\nWhen `false`, the topology may apply one downstream ratio.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "PtmTables": {
+      "description": "Sidecar table reference plus the column semantics it must carry.",
+      "type": "object",
+      "properties": {
+        "efficiency": {
+          "description": "Efficiency column present (0..1, covering drive and regen quadrants).",
+          "type": "boolean",
+          "default": true
+        },
+        "file": {
+          "description": "Reference to the sidecar table (parquet/CSV).",
+          "$ref": "#/$defs/MapRef"
+        },
+        "loss_w": {
+          "description": "Whether a `loss_w` column is present (must be consistent with `efficiency` if both given).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "file"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "TorqueCurve": {
+      "description": "A torque-vs-speed curve: paired equal-length speed/torque arrays.",
+      "type": "object",
+      "properties": {
+        "speed_rpm": {
+          "description": "Speed breakpoints, rpm (ascending).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "torque_nm": {
+          "description": "Torque at each breakpoint, N·m.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "required": [
+        "speed_rpm",
+        "torque_nm"
+      ]
+    }
+  }
+}

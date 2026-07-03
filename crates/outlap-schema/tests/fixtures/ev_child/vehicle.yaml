@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# A concrete car that inherits the EV base preset and overrides only what differs.
+schema: vehicle/1.0
+extends: presets/ev_base.yaml
+name: "EV child — lightweight"
+chassis:
+  mass_kg: 1590.0   # overrides the preset's 1700.0; other chassis fields inherited
+drivetrain:
+  units:
+    - source: ptm/rear_drive_unit.ptm.yaml
+      path:
+        - diff: { type: open }
+      wheels: [RL, RR]
+battery:
+  model: rc_pairs
+  params: battery/pack_400v.yaml

@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tyr",
+  "description": "A tire model.",
+  "type": "object",
+  "properties": {
+    "mf61": {
+      "description": "MF6.1 coefficient block (superset of `.tir`, round-trippable).",
+      "$ref": "#/$defs/Mf61Coeffs"
+    },
+    "provenance": {
+      "description": "Provenance / citation.",
+      "$ref": "#/$defs/TyrProvenance"
+    },
+    "schema": {
+      "description": "Schema version, e.g. `tyr/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "thermal": {
+      "description": "Thermal-ring parameters (§7.2).",
+      "$ref": "#/$defs/TyrThermal"
+    },
+    "wear": {
+      "description": "Wear/cliff parameters (§7.3).",
+      "$ref": "#/$defs/TyrWear"
+    }
+  },
+  "required": [
+    "schema",
+    "mf61",
+    "thermal",
+    "wear",
+    "provenance"
+  ],
+  "$defs": {
+    "Mf61Coeffs": {
+      "description": "MF6.1 (Pacejka 2012) coefficients keyed by their standard `.tir` names, e.g. `PCX1`, `PKY1`.\n\nValidated in the semantic stage: unknown coefficient names produce a did-you-mean warning\n(the spec is silent on the full set, so unknown keys are non-fatal), and any missing member of\n[`REQUIRED_MF61_KEYS`] is a semantic error.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "format": "double"
+      }
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "TyrProvenance": {
+      "description": "Provenance / citation for a tire dataset.",
+      "type": "object",
+      "properties": {
+        "citation": {
+          "description": "Literature citation the coefficients derive from.",
+          "type": "string"
+        },
+        "source": {
+          "description": "Human-readable source note.",
+          "type": "string"
+        },
+        "synthetic": {
+          "description": "Whether the dataset is synthetic (physically plausible but not measured).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "citation",
+        "source"
+      ]
+    },
+    "TyrThermal": {
+      "description": "Two-node (tread surface / carcass, plus inflation gas) thermal-ring parameters (§7.2).",
+      "type": "object",
+      "properties": {
+        "c_c": {
+          "description": "Carcass/bulk node thermal capacity, J/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "c_g": {
+          "description": "Inflation-gas node thermal capacity, J/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "c_s": {
+          "description": "Tread-surface node thermal capacity, J/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "c_t": {
+          "description": "Grip-window width coefficient `c_T`.",
+          "type": "number",
+          "format": "double"
+        },
+        "g_cg": {
+          "description": "Carcass↔gas conductance, W/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "g_road": {
+          "description": "Carcass↔road conductance, W/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "g_sc": {
+          "description": "Surface↔carcass conductance, W/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "h0": {
+          "description": "Convection intercept `h0` in `h(v) = h0 + h1·v^0.8`, W/(m²·K).",
+          "type": "number",
+          "format": "double"
+        },
+        "h1": {
+          "description": "Convection slope `h1`, W/(m²·K) per (m/s)^0.8.",
+          "type": "number",
+          "format": "double"
+        },
+        "k_c": {
+          "description": "Carcass-softening coefficient `k_c`.",
+          "type": "number",
+          "format": "double"
+        },
+        "p_cold": {
+          "description": "Cold inflation pressure `p_cold`, kPa.",
+          "type": "number",
+          "format": "double"
+        },
+        "p_t": {
+          "description": "Friction-power partition into the surface node, 0..1 (≈0.6–0.7).",
+          "type": "number",
+          "format": "double"
+        },
+        "t_c_ref": {
+          "description": "Carcass-softening reference temperature `T_c,ref`, °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "t_cold": {
+          "description": "Cold reference temperature `T_cold`, °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "t_opt": {
+          "description": "Optimal grip temperature `T_opt`, °C.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "c_s",
+        "c_c",
+        "c_g",
+        "g_sc",
+        "g_cg",
+        "g_road",
+        "h0",
+        "h1",
+        "p_t",
+        "t_opt",
+        "c_t",
+        "k_c",
+        "t_c_ref",
+        "p_cold",
+        "t_cold"
+      ]
+    },
+    "TyrWear": {
+      "description": "Wear and thermal-damage (cliff) parameters (§7.3).",
+      "type": "object",
+      "properties": {
+        "beta": {
+          "description": "Damage exponent `β`.",
+          "type": "number",
+          "format": "double"
+        },
+        "delta_c": {
+          "description": "Cliff grip drop `Δ_c`, fraction.",
+          "type": "number",
+          "format": "double"
+        },
+        "delta_d": {
+          "description": "Thermal-damage grip drop `Δ_D`, fraction.",
+          "type": "number",
+          "format": "double"
+        },
+        "delta_t_ref": {
+          "description": "Damage reference temperature step `ΔT_ref`, K.",
+          "type": "number",
+          "format": "double"
+        },
+        "k_w": {
+          "description": "Wear coefficient `k_w`.",
+          "type": "number",
+          "format": "double"
+        },
+        "s_w": {
+          "description": "Cliff sharpness `s_w`, mm.",
+          "type": "number",
+          "format": "double"
+        },
+        "t_deg": {
+          "description": "Damage-onset temperature `T_deg`, °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "tau_d": {
+          "description": "Thermal-damage time constant `τ_D`, s.",
+          "type": "number",
+          "format": "double"
+        },
+        "w_c": {
+          "description": "Cliff onset tread depth `w_c`, mm.",
+          "type": "number",
+          "format": "double"
+        },
+        "w_max": {
+          "description": "New-tread depth `w_max`, mm.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "k_w",
+        "w_max",
+        "w_c",
+        "tau_d",
+        "t_deg",
+        "delta_t_ref",
+        "beta",
+        "delta_c",
+        "s_w",
+        "delta_d"
+      ]
+    }
+  }
+}
