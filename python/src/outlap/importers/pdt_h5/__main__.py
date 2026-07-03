@@ -45,6 +45,20 @@ def main(argv: list[str] | None = None) -> int:
             type=Path,
             help="parquet sidecar path (default: <out>.maps.parquet)",
         )
+    pe.add_argument(
+        "--emotor", type=Path, help="emotor path (default: <out>.emotor.yaml)"
+    )
+    pe.add_argument(
+        "--no-emotor", action="store_true", help="skip the 2-node thermal distillation"
+    )
+    pe.add_argument("--t-max-winding-c", type=float, default=180.0)
+    pe.add_argument("--t-max-case-c", type=float, default=120.0)
+    pe.add_argument(
+        "--no-copper-feedback",
+        action="store_true",
+        help="disable the α resistance rise",
+    )
+    pe.add_argument("--overload-from-cold", action="store_true")
     pd.add_argument(
         "--mass-kg", type=float, help="mass override if the file lacks a mass group"
     )
@@ -63,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
                 vdc=args.vdc,
                 torque_points=args.torque_points,
                 maps_path=args.maps,
+                emotor_out=args.emotor,
+                emit_emotor=not args.no_emotor,
+                t_max_winding=args.t_max_winding_c,
+                t_max_case=args.t_max_case_c,
+                copper_feedback=not args.no_copper_feedback,
+                overload_from_cold=args.overload_from_cold,
             )
         elif args.cmd == "driveunit":
             summary = convert_driveunit(

@@ -5,8 +5,9 @@
 //! exercises the full loader — version gate, unknown-key walk, and `check_ptm` semantic checks —
 //! so a format drift between the Python emitter and the Rust contract fails CI.
 
+use outlap_schema::emotor::EmotorSource;
 use outlap_schema::io::FsLoader;
-use outlap_schema::load::load_ptm;
+use outlap_schema::load::{load_emotor, load_ptm};
 use outlap_schema::ptm::{LoadAxis, PtmKind};
 
 fn loader() -> FsLoader {
@@ -47,4 +48,14 @@ fn driveunit_ptm_loads() {
     let json = serde_json::to_string(&ptm).unwrap();
     let back: outlap_schema::ptm::Ptm = serde_json::from_str(&json).unwrap();
     assert_eq!(ptm, back);
+}
+
+#[test]
+fn distilled_emotor_loads() {
+    let em = load_emotor("emotor/pdt_synth.emotor.yaml", &loader()).expect("emotor loads");
+    // The distillation stamps the PdtDistilled source (wire form `pdt_distilled`).
+    assert_eq!(em.meta.source, Some(EmotorSource::PdtDistilled));
+    // Node limits pass check_emotor (t_warn ≤ t_max) and capacities are positive.
+    assert!(em.nodes.winding.c_j_per_k > 0.0 && em.nodes.case.c_j_per_k > 0.0);
+    assert!(em.coupling.g_wc_w_per_k > 0.0 && em.coupling.g_cool_w_per_k > 0.0);
 }
