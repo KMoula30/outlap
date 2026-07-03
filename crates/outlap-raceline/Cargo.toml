@@ -1,0 +1,18 @@
+[package]
+name = "outlap-raceline"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+outlap-core = { path = "../outlap-core" }
+outlap-track = { path = "../outlap-track" }
+clarabel = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+outlap-schema = { path = "../outlap-schema" }
+outlap-qss = { path = "../outlap-qss" }
+
+[lints]
+workspace = true
