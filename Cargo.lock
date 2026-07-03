@@ -212,6 +212,12 @@ version = "0.1.0"
 [[package]]
 name = "outlap-qss"
 version = "0.1.0"
+dependencies = [
+ "outlap-core",
+ "outlap-schema",
+ "outlap-track",
+ "thiserror",
+]
 
 [[package]]
 name = "outlap-schema"

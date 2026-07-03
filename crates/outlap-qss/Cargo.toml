@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+outlap-core = { path = "../outlap-core" }
+outlap-track = { path = "../outlap-track" }
+# default-features = false keeps outlap-qss wasm-clean; the example/tests bring the std FsLoader.
+outlap-schema = { path = "../outlap-schema", default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+outlap-schema = { path = "../outlap-schema" }
 
 [lints]
 workspace = true

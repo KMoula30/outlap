@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//! [`T0Error`] — the typed error surface for T0 assembly and solving.
+
+/// An error assembling a [`T0Vehicle`](crate::vehicle::T0Vehicle) or running the T0 passes.
+#[derive(Debug, thiserror::Error)]
+pub enum T0Error {
+    /// A referenced `.ptm`/`.tyr` file failed to load or validate.
+    #[error(transparent)]
+    Load(#[from] outlap_schema::SchemaError),
+    /// A torque/taper envelope could not be fitted (too few points or non-monotone speed axis —
+    /// should not happen after schema validation; surfaced defensively).
+    #[error("could not fit a T0 envelope: {0}")]
+    Envelope(#[from] outlap_core::InterpError),
+    /// A drive unit uses a gridded efficiency map, which the point-mass tier cannot read yet (no
+    /// Rust sidecar-table reader). Use a constant `efficiency:` for T0, or run T1+ once maps land.
+    #[error("drive unit {unit} uses a map efficiency; T0 needs a constant `efficiency` (no map reader yet)")]
+    UnsupportedEfficiencyMap {
+        /// Index of the offending drive unit.
+        unit: usize,
+    },
+    /// The vehicle has no propulsion source T0 can use (no drive units and no ERS).
+    #[error("vehicle has no drive units or ERS — nothing to propel the point mass")]
+    NoDrive,
+    /// The aero block has no `constant` coefficients and `allow_degraded` was not set. T0 needs
+    /// constant CdA/CzA (the ride-height aero map is a T1 concern).
+    #[error("aero has no `constant` block; T0 needs constant CdA/CzA (set `allow_degraded` to run with zero aero)")]
+    NoConstantAero,
+}
