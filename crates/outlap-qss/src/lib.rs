@@ -1,2 +1,42 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! `outlap-qss` — placeholder crate; implemented in a later milestone.
+//! `outlap-qss` — the quasi-steady-state tier: the T0 point-mass lap solver (and, later, the T1
+//! g-g-g-v envelope generator).
+//!
+//! T0 is a **forward/backward velocity-profile solver** on the 3D road ribbon (§6.1, §11.2): it is
+//! not an ODE integration but a pair of arc-length sweeps over a constant-μ friction ellipse with a
+//! velocity-resolved tractive-force envelope, targeting a full lap in well under 50 ms.
+//!
+//! This crate is split into a cold **assembly** stage ([`vehicle`], allocations allowed) that
+//! reduces a [`ResolvedVehicle`](outlap_schema::ResolvedVehicle) + `conditions` into a compact
+//! [`T0Vehicle`], and a zero-allocation **solve** stage (added in a following increment) that runs
+//! the passes. It is wasm-clean: source access stays behind the `SourceLoader` trait.
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![allow(
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::module_name_repetitions,
+    // Physics kernels use single-letter symbols (v, s, m, g, μ) by convention (Decision #33).
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    // T0Error embeds the miette-annotated SchemaError (source text) on the cold error path.
+    clippy::result_large_err,
+    // Cold-path assembly + curve sampling: these casts are safe at drivetrain sizes.
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
+pub mod error;
+pub mod vehicle;
+
+pub use error::T0Error;
+pub use vehicle::{T0Options, T0Vehicle};
+
+/// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];
+/// no `sim.yaml` field carries it in M1 (that would be a MINOR schema bump — deferred).
+pub const DEFAULT_DS_M: f64 = 2.0;
+
+/// Standard gravity, m/s².
+pub const G: f64 = 9.806_65;
