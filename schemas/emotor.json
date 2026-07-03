@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Emotor",
+  "description": "A 2-node electric-machine thermal model.",
+  "type": "object",
+  "properties": {
+    "cooling": {
+      "description": "Cooling sink (liquid or air).",
+      "$ref": "#/$defs/Cooling"
+    },
+    "coupling": {
+      "description": "Inter-node and node-to-sink conductances.",
+      "$ref": "#/$defs/Coupling"
+    },
+    "loss_routing": {
+      "description": "Loss routing between nodes.",
+      "$ref": "#/$defs/LossRouting"
+    },
+    "meta": {
+      "description": "Provenance/metadata.",
+      "$ref": "#/$defs/EmotorMeta",
+      "default": {}
+    },
+    "nodes": {
+      "description": "The winding and case nodes.",
+      "$ref": "#/$defs/EmotorNodes"
+    },
+    "schema": {
+      "description": "Schema version, e.g. `emotor/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    }
+  },
+  "required": [
+    "schema",
+    "nodes",
+    "coupling",
+    "cooling",
+    "loss_routing"
+  ],
+  "$defs": {
+    "Cooling": {
+      "description": "Cooling sink.\n\nExternally tagged, so the wire form is `{liquid: {coolant_temp_c: 65}}` or\n`{air: {ambient_c: 25}}`.",
+      "oneOf": [
+        {
+          "description": "Liquid cooling at a fixed coolant temperature.",
+          "type": "object",
+          "properties": {
+            "liquid": {
+              "type": "object",
+              "properties": {
+                "coolant_temp_c": {
+                  "description": "Coolant temperature, °C.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "coolant_temp_c"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "liquid"
+          ]
+        },
+        {
+          "description": "Air cooling at a fixed ambient temperature.",
+          "type": "object",
+          "properties": {
+            "air": {
+              "type": "object",
+              "properties": {
+                "ambient_c": {
+                  "description": "Ambient temperature, °C.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "ambient_c"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "air"
+          ]
+        }
+      ]
+    },
+    "Coupling": {
+      "description": "Inter-node and node-to-sink conductances.",
+      "type": "object",
+      "properties": {
+        "g_cool_w_per_k": {
+          "description": "Case↔coolant/ambient conductance, W/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "g_wc_w_per_k": {
+          "description": "Winding↔case conductance, W/K.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "g_wc_w_per_k",
+        "g_cool_w_per_k"
+      ]
+    },
+    "EmotorMeta": {
+      "description": "Provenance/metadata for an emotor thermal model.",
+      "type": "object",
+      "properties": {
+        "notes": {
+          "description": "Free-form notes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Where the parameters came from.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmotorSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "EmotorNodes": {
+      "description": "The two thermal nodes.",
+      "type": "object",
+      "properties": {
+        "case": {
+          "description": "Case node.",
+          "$ref": "#/$defs/ThermalNode"
+        },
+        "winding": {
+          "description": "Winding node.",
+          "$ref": "#/$defs/ThermalNode"
+        }
+      },
+      "required": [
+        "winding",
+        "case"
+      ]
+    },
+    "EmotorSource": {
+      "description": "Source/provenance category for emotor parameters.",
+      "oneOf": [
+        {
+          "description": "From a manufacturer datasheet.",
+          "type": "string",
+          "const": "datasheet"
+        },
+        {
+          "description": "Estimated from mass-based heuristics.",
+          "type": "string",
+          "const": "estimated"
+        },
+        {
+          "description": "Distilled from a detailed PDT thermal model.",
+          "type": "string",
+          "const": "pdt_distilled"
+        }
+      ]
+    },
+    "LossRouting": {
+      "description": "How machine losses are routed into the thermal nodes.",
+      "type": "object",
+      "properties": {
+        "copper_alpha_per_k": {
+          "description": "Optional copper resistance-rise coefficient `α`, per K (omit to disable the feedback).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "winding_split": {
+          "description": "Fraction of total loss deposited in the winding node, 0..1.\nIgnored if the `.ptm` carries a loss breakdown (then computed per operating point).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "winding_split"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "ThermalNode": {
+      "description": "A single thermal node: capacity and temperature limits.",
+      "type": "object",
+      "properties": {
+        "c_j_per_k": {
+          "description": "Thermal capacity, J/K.",
+          "type": "number",
+          "format": "double"
+        },
+        "t_max_c": {
+          "description": "Maximum allowable temperature (derating cutoff), °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "t_warn_c": {
+          "description": "Warning temperature, °C.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "c_j_per_k",
+        "t_max_c",
+        "t_warn_c"
+      ]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Typo'd top-level key `chasis` — must be caught by the unknown-key walk with a did-you-mean hint.
+schema: vehicle/1.0
+name: "typo car"
+chasis:
+  mass_kg: 1000.0

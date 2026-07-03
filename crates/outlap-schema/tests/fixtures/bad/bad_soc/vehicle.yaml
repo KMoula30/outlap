@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# `soc_window` out of range / not ascending — must fail the semantic check.
+schema: vehicle/1.0
+name: "bad soc window"
+chassis:
+  mass_kg: 768.0
+  cg: [1.70, 0.0, 0.30]
+  inertia: [180.0, 950.0, 1000.0]
+  wheelbase_m: 3.40
+  track_m: [1.65, 1.60]
+aero:
+  map: aero/x.parquet
+  axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg]
+suspension:
+  model: lumped_kc
+  front: { ride_rate_n_per_m: 220000.0, roll_stiffness_share: 0.58, roll_center_height_m: 0.03 }
+  rear: { ride_rate_n_per_m: 240000.0, roll_stiffness_share: 0.42, roll_center_height_m: 0.06 }
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/ice_v6.ptm.yaml
+      path:
+        - gearbox: { ratios: [2.9, 2.2, 1.8], final_drive: 3.1, shift_time_s: 0.02 }
+        - diff: { type: lsd, preload_nm: 90.0 }
+      wheels: [RL, RR]
+ers:
+  mgu_k: ptm/mgu_k.ptm.yaml
+  es:
+    capacity_mj: 4.0
+    soc_window: [0.9, 0.2]
+  deployment:
+    power_limit_kw: 350.0
+    taper_vs_speed:
+      speed_kph: [0.0, 290.0, 345.0]
+      power_frac: [1.0, 1.0, 0.0]
+  recovery:
+    braking_power_limit_kw: 350.0
+    per_lap_harvest_mj: 8.5
+brakes:
+  balance_bar: 0.58
+  disc:
+    front: { thermal_capacity_j_per_k: 60000.0, cooling_area_m2: 0.14 }
+    rear: { thermal_capacity_j_per_k: 48000.0, cooling_area_m2: 0.11 }

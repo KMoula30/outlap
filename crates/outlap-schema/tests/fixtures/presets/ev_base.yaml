@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# A shipped class preset (a partial vehicle fragment); consumed only via `extends:`.
+schema: vehicle/1.0
+name: "EV base preset"
+chassis:
+  mass_kg: 1700.0
+  cg: [1.40, 0.0, 0.42]
+  inertia: [530.0, 2400.0, 2600.0]
+  wheelbase_m: 2.92
+  track_m: [1.63, 1.61]
+aero:
+  map: aero/ev_base.parquet
+  axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg]
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 46000.0
+    roll_stiffness_share: 0.53
+    roll_center_height_m: 0.05
+  rear:
+    ride_rate_n_per_m: 53000.0
+    roll_stiffness_share: 0.47
+    roll_center_height_m: 0.08
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+brakes:
+  balance_bar: 0.61
+  abs: true
+  disc:
+    front:
+      thermal_capacity_j_per_k: 43000.0
+      cooling_area_m2: 0.09
+    rear:
+      thermal_capacity_j_per_k: 35000.0
+      cooling_area_m2: 0.07

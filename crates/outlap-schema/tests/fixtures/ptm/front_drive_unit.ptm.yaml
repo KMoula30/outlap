@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC front drive-unit map.
+schema: ptm/1.0
+kind: drive_unit
+axes:
+  speed_rpm: [0.0, 3000.0, 6000.0, 9000.0, 12000.0]
+  load_axis:
+    load_fraction: [-1.0, -0.5, 0.0, 0.5, 1.0]
+  torque_nm: [-300.0, -150.0, 0.0, 150.0, 300.0]
+tables:
+  file: tables/front_drive_unit.parquet
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm: [0.0, 6000.0, 12000.0]
+    torque_nm: [320.0, 320.0, 160.0]
+inertia_kgm2: 0.038
+mass_kg: 71.0
+meta:
+  source: "synthetic drive unit"
+  dc_voltage_v: 800.0
+  upstream_ratio_applied: true

@@ -1,0 +1,991 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Vehicle",
+  "description": "A complete vehicle description.\n\n`extends` and `extensions` are the two contract-level affordances: inheritance is a single\n`extends:` parent chain (resolved to `None` in the loaded model), and `x-*` vendor keys are\ngathered into `extensions`. Whole optional subsystems (`ers`, `battery`) are `Option`; see the\ncrate docs for the required-vs-optional rule.",
+  "type": "object",
+  "properties": {
+    "aero": {
+      "description": "Aerodynamics (map reference + optional constant degenerate coefficients).",
+      "$ref": "#/$defs/Aero"
+    },
+    "battery": {
+      "description": "Battery equivalent-circuit model reference, if the car has one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Battery"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "brakes": {
+      "description": "Brakes (balance, discs, ABS, regen blending).",
+      "$ref": "#/$defs/Brakes"
+    },
+    "chassis": {
+      "description": "Chassis mass / geometry / inertia.",
+      "$ref": "#/$defs/Chassis"
+    },
+    "drivetrain": {
+      "description": "Drivetrain topology graph (sources → couplers → wheels) plus the control layer.",
+      "$ref": "#/$defs/Drivetrain"
+    },
+    "ers": {
+      "description": "Energy-recovery system (MGU-K + energy store), if the car has one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Ers"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "extends": {
+      "description": "Optional single preset this document inherits from (resolved away in the loaded model).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PresetRef"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "extensions": {
+      "description": "`x-*` extension keys (carried through, not interpreted).",
+      "$ref": "#/$defs/Extensions"
+    },
+    "name": {
+      "description": "Human-readable car name.",
+      "type": "string"
+    },
+    "schema": {
+      "description": "Schema version, e.g. `vehicle/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "suspension": {
+      "description": "Suspension kinematics & compliance (lumped K&C).",
+      "$ref": "#/$defs/Suspension"
+    },
+    "tires": {
+      "description": "Tire references (front/rear `.tyr`).",
+      "$ref": "#/$defs/Tires"
+    }
+  },
+  "required": [
+    "schema",
+    "name",
+    "chassis",
+    "aero",
+    "suspension",
+    "tires",
+    "drivetrain",
+    "brakes"
+  ],
+  "$defs": {
+    "Activation": {
+      "description": "Override activation policy.",
+      "oneOf": [
+        {
+          "description": "Activated by the energy-management strategy layer (default).",
+          "type": "string",
+          "const": "strategy"
+        },
+        {
+          "description": "Activated manually by the driver.",
+          "type": "string",
+          "const": "manual"
+        },
+        {
+          "description": "Always available where the regulations permit.",
+          "type": "string",
+          "const": "automatic"
+        }
+      ]
+    },
+    "Aero": {
+      "description": "Aerodynamics block.\n\nThe primary representation is a gridded map (sidecar parquet/CSV referenced by `map`) whose\naxes are named in `axes` (e.g. `[\"ride_height_f_mm\", \"ride_height_r_mm\", \"yaw_deg\"]`).\nA passenger car degenerates to constant `CdA`/`ClA`, given via `constant`.",
+      "type": "object",
+      "properties": {
+        "axes": {
+          "description": "Ordered names of the map's input axes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constant": {
+          "description": "Optional constant coefficients (the passenger-car degenerate case, §7.4).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AeroConstant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "map": {
+          "description": "Reference to the gridded aero map (parquet/CSV sidecar).",
+          "$ref": "#/$defs/MapRef"
+        }
+      },
+      "required": [
+        "map",
+        "axes"
+      ]
+    },
+    "AeroConstant": {
+      "description": "Constant aerodynamic coefficients × frontal area (the degenerate, non-mapped case).",
+      "type": "object",
+      "properties": {
+        "cx_a_m2": {
+          "description": "Drag area `C_x·A`, m².",
+          "type": "number",
+          "format": "double"
+        },
+        "cz_front_a_m2": {
+          "description": "Front downforce area `C_z,front·A`, m².",
+          "type": "number",
+          "format": "double"
+        },
+        "cz_rear_a_m2": {
+          "description": "Rear downforce area `C_z,rear·A`, m².",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "cx_a_m2",
+        "cz_front_a_m2",
+        "cz_rear_a_m2"
+      ]
+    },
+    "AxleKc": {
+      "description": "Per-axle kinematics & compliance.\n\n`anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**: when omitted, the\nestimation stage fills them from documented heuristics (kinematic angles → 0, maps → identity)\nand records a line in the loaded-model report.",
+      "type": "object",
+      "properties": {
+        "anti_dive": {
+          "description": "Anti-dive fraction (estimable).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "anti_squat": {
+          "description": "Anti-squat fraction (estimable).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "camber_map": {
+          "description": "Camber-vs-travel map reference (estimable → zero).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MapRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ride_rate_n_per_m": {
+          "description": "Vertical ride rate at the wheel, N/m.",
+          "type": "number",
+          "format": "double"
+        },
+        "roll_center_height_m": {
+          "description": "Roll-centre height, m.",
+          "type": "number",
+          "format": "double"
+        },
+        "roll_stiffness_share": {
+          "description": "Fraction of total roll stiffness carried by this axle, 0..1.",
+          "type": "number",
+          "format": "double"
+        },
+        "toe_map": {
+          "description": "Toe-vs-travel map reference (estimable → zero).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MapRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ride_rate_n_per_m",
+        "roll_stiffness_share",
+        "roll_center_height_m"
+      ]
+    },
+    "AxlePair": {
+      "description": "A generic front/rear pair.",
+      "type": "object",
+      "properties": {
+        "front": {
+          "description": "Front-axle value.",
+          "$ref": "#/$defs/BrakeDisc"
+        },
+        "rear": {
+          "description": "Rear-axle value.",
+          "$ref": "#/$defs/BrakeDisc"
+        }
+      },
+      "required": [
+        "front",
+        "rear"
+      ]
+    },
+    "Battery": {
+      "description": "Battery block: an equivalent-circuit model selector plus its parameter file.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "The equivalent-circuit model family.",
+          "$ref": "#/$defs/BatteryModel"
+        },
+        "params": {
+          "description": "Reference to the parameter file (Thevenin RC-pair parameters).",
+          "$ref": "#/$defs/BatteryRef"
+        }
+      },
+      "required": [
+        "model",
+        "params"
+      ]
+    },
+    "BatteryModel": {
+      "description": "Battery model family.",
+      "oneOf": [
+        {
+          "description": "Thevenin equivalent circuit with one or more RC pairs.",
+          "type": "string",
+          "const": "rc_pairs"
+        }
+      ]
+    },
+    "BatteryRef": {
+      "description": "Reference to a battery equivalent-circuit parameter file.",
+      "type": "string"
+    },
+    "BrakeDisc": {
+      "description": "A single brake disc's thermal properties.",
+      "type": "object",
+      "properties": {
+        "cooling_area_m2": {
+          "description": "Convective cooling area, m².",
+          "type": "number",
+          "format": "double"
+        },
+        "pad_mu_vs_temp": {
+          "description": "Optional pad friction-vs-temperature map reference.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MapRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thermal_capacity_j_per_k": {
+          "description": "Lumped thermal capacity, J/K.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "thermal_capacity_j_per_k",
+        "cooling_area_m2"
+      ]
+    },
+    "Brakes": {
+      "description": "Brake system.",
+      "type": "object",
+      "properties": {
+        "abs": {
+          "description": "Whether ABS is fitted.",
+          "type": "boolean",
+          "default": false
+        },
+        "balance_bar": {
+          "description": "Brake-balance bar: front bias fraction, 0..1.",
+          "type": "number",
+          "format": "double"
+        },
+        "disc": {
+          "description": "Front/rear brake discs.",
+          "$ref": "#/$defs/AxlePair"
+        },
+        "regen_blend": {
+          "description": "Optional regen/friction blending (present when an ERS/battery can recover braking energy).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RegenBlend"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "balance_bar",
+        "disc"
+      ]
+    },
+    "Chassis": {
+      "description": "Chassis bulk properties in the ISO 8855 body frame (x forward, y left, z up).\n\n`inertia` is a diagonal `[Ixx, Iyy, Izz]` for v1 (7/14-DOF tiers); products of inertia are an\nadditive MINOR field later.",
+      "type": "object",
+      "properties": {
+        "cg": {
+          "description": "Centre of gravity `[x, y, z]`, m, in the body frame.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "inertia": {
+          "description": "Diagonal moments of inertia `[Ixx, Iyy, Izz]`, kg·m².",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "mass_kg": {
+          "description": "Total sprung + unsprung mass, kg.",
+          "type": "number",
+          "format": "double"
+        },
+        "track_m": {
+          "description": "Track width `[front, rear]`, m.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "wheelbase_m": {
+          "description": "Wheelbase, m.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "mass_kg",
+        "cg",
+        "inertia",
+        "wheelbase_m",
+        "track_m"
+      ]
+    },
+    "Coupler": {
+      "description": "A coupler element on a drive path.\n\nExternally tagged (serde default), so the wire forms are `{gearbox: {...}}`, `{diff: {...}}`,\nand `{fixed_ratio: 2.4}`. A standalone clutch coupler is deferred; shift/clutch dynamics live\ninside [`Gearbox`].",
+      "oneOf": [
+        {
+          "description": "A multi-ratio gearbox with a final drive.",
+          "type": "object",
+          "properties": {
+            "gearbox": {
+              "$ref": "#/$defs/Gearbox"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "gearbox"
+          ]
+        },
+        {
+          "description": "A differential (open/locked/LSD/solid).",
+          "type": "object",
+          "properties": {
+            "diff": {
+              "$ref": "#/$defs/Diff"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "diff"
+          ]
+        },
+        {
+          "description": "A single fixed reduction ratio.",
+          "type": "object",
+          "properties": {
+            "fixed_ratio": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "fixed_ratio"
+          ]
+        }
+      ]
+    },
+    "Deployment": {
+      "description": "Deployment (discharge) rules.",
+      "type": "object",
+      "properties": {
+        "per_lap_deploy_mj": {
+          "description": "Optional per-lap deployment budget, MJ (estimable).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "power_limit_kw": {
+          "description": "Peak deployment power, kW.",
+          "type": "number",
+          "format": "double"
+        },
+        "taper_vs_speed": {
+          "description": "Power-vs-speed taper.",
+          "$ref": "#/$defs/SpeedTaper"
+        }
+      },
+      "required": [
+        "power_limit_kw",
+        "taper_vs_speed"
+      ]
+    },
+    "Diff": {
+      "description": "A differential.\n\n`preload_nm` is **conditionally required**: the semantic stage requires it for\n[`DiffKind::Lsd`] and [`DiffKind::Locked`]. `ramp` (`[accel, decel]`) applies to LSDs only.",
+      "type": "object",
+      "properties": {
+        "preload_nm": {
+          "description": "Preload torque, N·m (required for `lsd`/`locked`).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ramp": {
+          "description": "LSD ramp angles/fractions `[accel, decel]` (LSD only).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "type": {
+          "description": "The differential kind. On the wire this is the key `type`.",
+          "$ref": "#/$defs/DiffKind"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "DiffKind": {
+      "description": "Differential kind.",
+      "oneOf": [
+        {
+          "description": "Free differential.",
+          "type": "string",
+          "const": "open"
+        },
+        {
+          "description": "Fully locked differential.",
+          "type": "string",
+          "const": "locked"
+        },
+        {
+          "description": "Limited-slip differential (preload + ramp).",
+          "type": "string",
+          "const": "lsd"
+        },
+        {
+          "description": "Solid axle (locked-diff limit case; day-1 support for karts/live axles).",
+          "type": "string",
+          "const": "solid"
+        }
+      ]
+    },
+    "DriveControl": {
+      "description": "The rule-based control layer: static splits + torque vectoring.",
+      "type": "object",
+      "properties": {
+        "split": {
+          "description": "Static torque splits.",
+          "$ref": "#/$defs/Split",
+          "default": {}
+        },
+        "torque_vectoring": {
+          "description": "Yaw-moment torque vectoring.",
+          "$ref": "#/$defs/TorqueVectoring",
+          "default": {
+            "enabled": false,
+            "k_yaw": 0.0
+          }
+        }
+      }
+    },
+    "DriveUnit": {
+      "description": "A single torque source and the ordered coupler path from it to the wheels it drives.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Ordered couplers from the source shaft toward the wheels.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Coupler"
+          }
+        },
+        "source": {
+          "description": "The `.ptm` map for this source (ICE, electric machine, or lumped drive unit).",
+          "$ref": "#/$defs/PtmRef"
+        },
+        "thermal": {
+          "description": "Optional `.emotor` thermal model — electric machines only (§9.5).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EmotorRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wheels": {
+          "description": "The wheels this unit ultimately drives.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Wheel"
+          }
+        }
+      },
+      "required": [
+        "source",
+        "path",
+        "wheels"
+      ]
+    },
+    "Drivetrain": {
+      "description": "The drivetrain: one or more drive units plus the control layer.",
+      "type": "object",
+      "properties": {
+        "control": {
+          "description": "Static splits and torque-vectoring control (defaulted).",
+          "$ref": "#/$defs/DriveControl",
+          "default": {
+            "split": {},
+            "torque_vectoring": {
+              "enabled": false,
+              "k_yaw": 0.0
+            }
+          }
+        },
+        "units": {
+          "description": "Torque sources and the coupler paths from each to its wheels.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DriveUnit"
+          }
+        }
+      },
+      "required": [
+        "units"
+      ]
+    },
+    "Efficiency": {
+      "description": "Drivetrain efficiency: a single constant or a gridded map reference.",
+      "anyOf": [
+        {
+          "description": "A single constant efficiency, e.g. `0.985`.",
+          "type": "number",
+          "format": "double"
+        },
+        {
+          "description": "A gridded efficiency map (parquet/CSV sidecar), e.g. `{map: eff.parquet}`.",
+          "type": "object",
+          "properties": {
+            "map": {
+              "description": "The map reference.",
+              "$ref": "#/$defs/MapRef"
+            }
+          },
+          "required": [
+            "map"
+          ]
+        }
+      ]
+    },
+    "EmotorRef": {
+      "description": "Reference to an `.emotor` electric-machine thermal file.",
+      "type": "string"
+    },
+    "EnergyStore": {
+      "description": "Energy-store sizing and usable state-of-charge window.",
+      "type": "object",
+      "properties": {
+        "capacity_mj": {
+          "description": "Usable capacity, MJ.",
+          "type": "number",
+          "format": "double"
+        },
+        "soc_window": {
+          "description": "Usable SOC window `[min, max]`, each in 0..1, ascending.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      },
+      "required": [
+        "capacity_mj",
+        "soc_window"
+      ]
+    },
+    "Ers": {
+      "description": "Energy-recovery system.",
+      "type": "object",
+      "properties": {
+        "deployment": {
+          "description": "Deployment rules.",
+          "$ref": "#/$defs/Deployment"
+        },
+        "es": {
+          "description": "Energy store sizing/window (battery physics lives in the battery block).",
+          "$ref": "#/$defs/EnergyStore"
+        },
+        "mgu_k": {
+          "description": "The MGU-K machine (`.ptm`, bidirectional torque/speed/efficiency).",
+          "$ref": "#/$defs/PtmRef"
+        },
+        "override_mode": {
+          "description": "Optional manual override mode (2026 regs).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OverrideMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "description": "Recovery rules.",
+          "$ref": "#/$defs/Recovery"
+        }
+      },
+      "required": [
+        "mgu_k",
+        "es",
+        "deployment",
+        "recovery"
+      ]
+    },
+    "Extensions": {
+      "description": "The `x-*` extension bag: vendor/experimental keys that are carried through but not interpreted.\n\nOnly keys beginning `x-` may appear here; the unknown-key walk (stage 4) routes `x-*` keys into\nthis bag with a warning and rejects any other unknown key as a hard error (§9 versioning rule).",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Gearbox": {
+      "description": "A gearbox: ordered ratios, final drive, shift time, and efficiency.",
+      "type": "object",
+      "properties": {
+        "efficiency": {
+          "description": "Mechanical efficiency (constant or map). Defaults to a constant 0.985.",
+          "$ref": "#/$defs/Efficiency",
+          "default": 0.985
+        },
+        "final_drive": {
+          "description": "Final-drive ratio.",
+          "type": "number",
+          "format": "double"
+        },
+        "ratios": {
+          "description": "Forward gear ratios (index 0 = first gear).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "shift_time_s": {
+          "description": "Shift time, s.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "ratios",
+        "final_drive",
+        "shift_time_s"
+      ]
+    },
+    "MapRef": {
+      "description": "Reference to a numeric sidecar map table (parquet/CSV), e.g. an aero or K&C map.",
+      "type": "string"
+    },
+    "OverrideMode": {
+      "description": "Manual override mode: a separate deployment envelope with extra per-lap energy.\n\nA distinct type (not [`Deployment`]) because it carries `extra_energy_per_lap_mj` and an\n`activation` policy that base deployment lacks.",
+      "type": "object",
+      "properties": {
+        "activation": {
+          "description": "How override is activated.",
+          "$ref": "#/$defs/Activation",
+          "default": "strategy"
+        },
+        "extra_energy_per_lap_mj": {
+          "description": "Extra energy allowance per lap in override, MJ (estimable).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "power_limit_kw": {
+          "description": "Peak override power, kW.",
+          "type": "number",
+          "format": "double"
+        },
+        "taper_vs_speed": {
+          "description": "Override power-vs-speed taper (typically a higher-speed taper than base deployment).",
+          "$ref": "#/$defs/SpeedTaper"
+        }
+      },
+      "required": [
+        "power_limit_kw",
+        "taper_vs_speed"
+      ]
+    },
+    "PresetRef": {
+      "description": "Reference to a preset the document `extends:`, e.g. `presets/formula_base`.",
+      "type": "string"
+    },
+    "PtmRef": {
+      "description": "Reference to a `.ptm` neutral powertrain-map file.",
+      "type": "string"
+    },
+    "Recovery": {
+      "description": "Recovery (regen/harvest) rules.",
+      "type": "object",
+      "properties": {
+        "braking_power_limit_kw": {
+          "description": "Peak braking-recovery power, kW.",
+          "type": "number",
+          "format": "double"
+        },
+        "per_lap_harvest_mj": {
+          "description": "Per-lap harvest budget, MJ.",
+          "type": "number",
+          "format": "double"
+        },
+        "recharge_phases": {
+          "description": "Whether dedicated recharge phases (off-throttle harvesting) are modelled.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "braking_power_limit_kw",
+        "per_lap_harvest_mj"
+      ]
+    },
+    "RegenBlend": {
+      "description": "Regen/friction blending policy for recovered braking.",
+      "type": "object",
+      "properties": {
+        "front_bias": {
+          "description": "Optional front-axle regen bias fraction, 0..1 (defaults to the friction balance if omitted).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_regen_frac": {
+          "description": "Maximum fraction of total brake torque provided by regen, 0..1.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "max_regen_frac"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "SpeedTaper": {
+      "description": "A power-vs-speed taper table (paired equal-length arrays; monotone non-increasing power).",
+      "type": "object",
+      "properties": {
+        "power_frac": {
+          "description": "Power fraction at each breakpoint, 0..1.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "speed_kph": {
+          "description": "Speed breakpoints, km/h (ascending).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "required": [
+        "speed_kph",
+        "power_frac"
+      ]
+    },
+    "Split": {
+      "description": "Static torque splits. `front` is the front-axle share; `left` is the left-side share.",
+      "type": "object",
+      "properties": {
+        "front": {
+          "description": "Front-axle torque share, 0..1 (omit for single-axle cars).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "left": {
+          "description": "Left-side torque share, 0..1 (omit unless per-side allocation applies).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
+    },
+    "Suspension": {
+      "description": "Suspension block: a model selector plus front/rear axle K&C.",
+      "type": "object",
+      "properties": {
+        "front": {
+          "description": "Front axle K&C.",
+          "$ref": "#/$defs/AxleKc"
+        },
+        "model": {
+          "description": "Suspension model (v1: lumped K&C only).",
+          "$ref": "#/$defs/SuspensionModel"
+        },
+        "rear": {
+          "description": "Rear axle K&C.",
+          "$ref": "#/$defs/AxleKc"
+        }
+      },
+      "required": [
+        "model",
+        "front",
+        "rear"
+      ]
+    },
+    "SuspensionModel": {
+      "description": "Suspension model family.",
+      "oneOf": [
+        {
+          "description": "Lumped kinematics & compliance (ride/roll rates + geometry).",
+          "type": "string",
+          "const": "lumped_kc"
+        }
+      ]
+    },
+    "Tires": {
+      "description": "Front/rear tire references. Both are required (load-bearing, no sane default).",
+      "type": "object",
+      "properties": {
+        "front": {
+          "description": "Front-axle tire (`.tyr`).",
+          "$ref": "#/$defs/TyrRef"
+        },
+        "rear": {
+          "description": "Rear-axle tire (`.tyr`).",
+          "$ref": "#/$defs/TyrRef"
+        }
+      },
+      "required": [
+        "front",
+        "rear"
+      ]
+    },
+    "TorqueVectoring": {
+      "description": "Yaw-moment-proportional torque vectoring: `ΔM_z = k_yaw · (r_target − r)`.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether torque vectoring is enabled.",
+          "type": "boolean",
+          "default": false
+        },
+        "k_yaw": {
+          "description": "Yaw-rate feedback gain.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      }
+    },
+    "TyrRef": {
+      "description": "Reference to a `.tyr` tire file.",
+      "type": "string"
+    },
+    "Wheel": {
+      "description": "A wheel identifier. Serialized uppercase (`FL`, `FR`, `RL`, `RR`).",
+      "oneOf": [
+        {
+          "description": "Front-left.",
+          "type": "string",
+          "const": "FL"
+        },
+        {
+          "description": "Front-right.",
+          "type": "string",
+          "const": "FR"
+        },
+        {
+          "description": "Rear-left.",
+          "type": "string",
+          "const": "RL"
+        },
+        {
+          "description": "Rear-right.",
+          "type": "string",
+          "const": "RR"
+        }
+      ]
+    }
+  }
+}
