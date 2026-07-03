@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Synthetic PDT-importer output (regenerate: python -m outlap.importers.pdt_h5 …). NOT real PDT data.
+# Imported by outlap.importers.pdt_h5 from d.h5 (§10.3)
+# drive_unit map
+schema: ptm/1.0
+kind: drive_unit
+axes:
+  speed_rpm:
+  - 10.0
+  - 81.8
+  - 153.6
+  - 225.4
+  - 297.2
+  - 369.0
+  load_axis:
+    torque_nm:
+    - -150.0
+    - -112.5
+    - -75.0
+    - -37.5
+    - 0.0
+    - 42.0
+    - 84.0
+    - 126.0
+    - 168.0
+  torque_nm:
+  - -150.0
+  - -112.5
+  - -75.0
+  - -37.5
+  - 0.0
+  - 42.0
+  - 84.0
+  - 126.0
+  - 168.0
+tables:
+  file: d.ptm.maps.parquet
+  efficiency: true
+  loss_w: true
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm:
+    - 10.0
+    - 81.8
+    - 153.6
+    - 225.4
+    - 297.2
+    - 369.0
+    torque_nm:
+    - 168.0
+    - 168.0
+    - 168.0
+    - 168.0
+    - 168.0
+    - 168.0
+  cont_torque_nm_vs_speed:
+    speed_rpm:
+    - 10.0
+    - 81.8
+    - 153.6
+    - 225.4
+    - 297.2
+    - 369.0
+    torque_nm:
+    - 100.8
+    - 100.8
+    - 100.8
+    - 100.8
+    - 100.8
+    - 100.8
+  overload:
+    durations_s:
+    - 10.0
+    - 20.0
+    - 30.0
+    torque_nm_vs_speed:
+    - speed_rpm:
+      - 10.0
+      - 81.8
+      - 153.6
+      - 225.4
+      - 297.2
+      - 369.0
+      torque_nm:
+      - 151.2
+      - 151.2
+      - 151.2
+      - 151.2
+      - 151.2
+      - 151.2
+    - speed_rpm:
+      - 10.0
+      - 81.8
+      - 153.6
+      - 225.4
+      - 297.2
+      - 369.0
+      torque_nm:
+      - 134.4
+      - 134.4
+      - 134.4
+      - 134.4
+      - 134.4
+      - 134.4
+    - speed_rpm:
+      - 10.0
+      - 81.8
+      - 153.6
+      - 225.4
+      - 297.2
+      - 369.0
+      torque_nm:
+      - 117.6
+      - 117.6
+      - 117.6
+      - 117.6
+      - 117.6
+      - 117.6
+  drag_torque_nm_vs_speed:
+    speed_rpm:
+    - 10.0
+    - 81.8
+    - 153.6
+    - 225.4
+    - 297.2
+    - 369.0
+    torque_nm:
+    - -1.125
+    - -2.0225
+    - -2.92
+    - -3.8175
+    - -4.715
+    - -5.6125
+inertia_kgm2: 0.021
+mass_kg: 9.5
+meta:
+  source: PDT DriveUnit synth_du unknown (gear ratio 16.2489 applied at output shaft)
+  dc_voltage_v: 48.0
+  upstream_ratio_applied: true

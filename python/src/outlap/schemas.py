@@ -41,6 +41,8 @@ _FIXTURES: dict[str, list[str]] = {
         "ptm/front_drive_unit.ptm.yaml",
         "ptm/ice_v6.ptm.yaml",
         "ptm/mgu_k.ptm.yaml",
+        "ptm/pdt_synth_edrive.ptm.yaml",
+        "ptm/pdt_synth_du.ptm.yaml",
     ],
     "tyr": ["tyr/slick.tyr.yaml"],
     "emotor": ["emotor/rear.emotor.yaml"],
