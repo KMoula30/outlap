@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! First lap time on the real Catalunya track (§18 Day 5).
 //!
-//! Loads the f1_2026 reference vehicle + the imported Catalunya track, runs the T0 point-mass
-//! solver on the centerline, prints the lap time and top speed, and writes a CSV for `plot_lap.py`.
+//! Loads a vehicle + the imported Catalunya track, runs the T0 point-mass solver on the centerline,
+//! prints the lap time and top speed, and writes a CSV for `plot_lap.py`.
 //!
 //! ```text
-//! cargo run -p outlap-qss --example catalunya_lap [-- <out.csv>]
+//! cargo run -p outlap-qss --example catalunya_lap [-- --vehicle <dir>] [--out <csv>]
 //! ```
+//! `--vehicle` is a directory holding a `vehicle.yaml` (and its referenced `.ptm`/`.tyr` files),
+//! defaulting to the bundled `data/vehicles/f1_2026`.
 #![allow(clippy::doc_markdown)]
 
 use std::error::Error;
@@ -22,8 +24,27 @@ fn data(rel: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")).join(rel)
 }
 
+/// Parse `--vehicle <dir>` / `--out <csv>` flags (both optional).
+fn parse_args() -> (PathBuf, Option<PathBuf>) {
+    let mut veh_dir = data("vehicles/f1_2026");
+    let mut out = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--vehicle" => {
+                if let Some(v) = args.next() {
+                    veh_dir = PathBuf::from(v);
+                }
+            }
+            "--out" => out = args.next().map(PathBuf::from),
+            other => out = Some(PathBuf::from(other)), // bare positional = output csv
+        }
+    }
+    (veh_dir, out)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let veh_dir = data("vehicles/f1_2026");
+    let (veh_dir, out_arg) = parse_args();
     let track_dir = data("tracks/catalunya");
 
     let vl = FsLoader::new(&veh_dir);
@@ -56,17 +77,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Top speed:  {:.1} m/s ({:.0} km/h)", top, top * 3.6);
     println!("Stations:   {} at ds = {:.2} m", lap.s.len(), path.ds);
     println!(
-        "Note: point-mass T0 on the noisy imported centerline; the min-curvature line (M1) and"
+        "Note: point-mass T0 on the noisy imported centerline; the min-curvature line and higher"
     );
-    println!("      higher tiers close the gap to the real ~72–80 s. Sanity, not parity (§18).");
+    println!("      tiers go faster. This is a sanity magnitude, not a parity result (§18).");
     for n in &lap.notes {
         println!("  - {n}");
     }
 
-    let out = std::env::args().nth(1).map_or_else(
-        || data("../python/examples/output/catalunya_t0.csv"),
-        PathBuf::from,
-    );
+    let out = out_arg.unwrap_or_else(|| data("../python/examples/output/catalunya_t0.csv"));
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
