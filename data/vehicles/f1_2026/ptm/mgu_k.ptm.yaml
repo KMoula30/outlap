@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC MGU-K electric machine map (bare machine; a downstream ratio may apply).
+schema: ptm/1.0
+kind: electric_machine
+axes:
+  speed_rpm: [0.0, 12000.0, 24000.0, 40000.0, 50000.0]
+  load_axis:
+    load_fraction: [-1.0, -0.5, 0.0, 0.5, 1.0]
+  torque_nm: [-120.0, -60.0, 0.0, 60.0, 120.0]
+tables:
+  file: tables/mgu_k.parquet
+  loss_w: true
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm: [0.0, 24000.0, 50000.0]
+    torque_nm: [120.0, 120.0, 66.0]
+  cont_torque_nm_vs_speed:
+    speed_rpm: [0.0, 50000.0]
+    torque_nm: [80.0, 44.0]
+inertia_kgm2: 0.008
+mass_kg: 24.0
+meta:
+  source: "synthetic 2026 MGU-K"
+  dc_voltage_v: 800.0

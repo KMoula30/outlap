@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC ICE map (torque-axis load).
+schema: ptm/1.0
+kind: ice
+axes:
+  speed_rpm: [1000.0, 4000.0, 8000.0, 12000.0, 15000.0]
+  load_axis:
+    torque_nm: [0.0, 100.0, 200.0, 300.0, 400.0]
+  torque_nm: [0.0, 100.0, 200.0, 300.0, 400.0]
+tables:
+  file: tables/ice_v6.parquet
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm: [1000.0, 8000.0, 12000.0, 15000.0]
+    torque_nm: [280.0, 390.0, 400.0, 360.0]
+  drag_torque_nm_vs_speed:
+    speed_rpm: [1000.0, 15000.0]
+    torque_nm: [-20.0, -80.0]
+inertia_kgm2: 0.12
+mass_kg: 145.0
+meta:
+  source: "synthetic 1.6L V6 turbo"
