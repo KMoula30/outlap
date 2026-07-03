@@ -33,14 +33,19 @@ use outlap_core::{CubicSpline, MonotoneCubic};
 
 /// The three geometry splines (`x(s)`, `y(s)`, `z(s)`) plus the resulting track length.
 type Geometry = (CubicSpline<f64>, CubicSpline<f64>, CubicSpline<f64>, f64);
-use outlap_schema::centerline::{parse_centerline, Centerline, CenterlineError};
+use outlap_schema::centerline::{parse_centerline, Centerline, CenterlineError, CenterlineRow};
 use outlap_schema::io::SourceLoader;
-use outlap_schema::track::TrackDoc;
+use outlap_schema::refs::CenterlineRef;
+use outlap_schema::track::{TrackDoc, TrackMeta};
+use outlap_schema::SchemaVersion;
 
 /// Minimum centerline points needed to fit the geometry splines.
 const MIN_POINTS: usize = 4;
 /// Two centerline endpoints closer than this (metres) are treated as an explicit duplicate closure.
 const CLOSURE_COINCIDENT_TOL_M: f64 = 1e-6;
+/// Floor for an offset line's residual half-widths (metres), keeping the line's own width envelope
+/// positive even when the reference line is pushed to the track edge.
+const MIN_RESIDUAL_WIDTH_M: f64 = 0.1;
 
 /// An error building or loading a [`Track`].
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +78,20 @@ pub enum TrackError {
     /// A data-channel interpolant failed to build.
     #[error("channel fit failed: {0}")]
     Channel(#[from] outlap_core::InterpError),
+    /// `offset_track` was given `s` and `n` slices of different lengths.
+    #[error("offset arrays differ in length: s has {s}, n has {n}")]
+    MismatchedOffsets {
+        /// Length of the station array.
+        s: usize,
+        /// Length of the offset array.
+        n: usize,
+    },
+    /// Two consecutive offset points coincide, so the offset line has no arc length there.
+    #[error("offset line is degenerate at index {index} (consecutive points coincide)")]
+    DegenerateOffsetLine {
+        /// The offending index.
+        index: usize,
+    },
 }
 
 /// The ISO-8855 road frame at an arc-length station.
@@ -371,6 +390,77 @@ impl Track {
         }
         out
     }
+}
+
+/// Build a new [`Track`] by offsetting a parent track laterally by `n(s)` in its road plane.
+///
+/// `s` are stations along the *parent centerline* arc length and `n` the signed lateral offsets
+/// (metres, `+` = road-left, ISO 8855). Each offset point is `origin(s_i) + n_i·lateral(s_i)` in the
+/// banked road plane; banking and grip are inherited from the parent, the residual half-widths are
+/// the parent widths minus the offset, and the arc length is recomputed along the offset points.
+/// The result is a first-class [`Track`] — so a racing line has its own `κ(s)`, grade, and road
+/// frame, queried through the identical API. This is the substrate the T0 solver runs on for a
+/// generated or user-supplied line (§6.3).
+///
+/// # Errors
+/// [`TrackError`] if `s`/`n` differ in length, there are too few points, consecutive offset points
+/// coincide, or the resulting geometry fails to fit.
+pub fn offset_track(track: &Track, s: &[f64], n: &[f64], name: &str) -> Result<Track, TrackError> {
+    if s.len() != n.len() {
+        return Err(TrackError::MismatchedOffsets {
+            s: s.len(),
+            n: n.len(),
+        });
+    }
+    if s.len() < MIN_POINTS {
+        return Err(TrackError::TooFewPoints {
+            got: s.len(),
+            min: MIN_POINTS,
+        });
+    }
+
+    let m = s.len();
+    let mut pts: Vec<[f64; 3]> = Vec::with_capacity(m);
+    let mut rows: Vec<CenterlineRow> = Vec::with_capacity(m);
+    for (&si, &ni) in s.iter().zip(n) {
+        let frame = track.road_frame(si);
+        let p = add(frame.origin, scale(frame.lateral, ni));
+        let (wl, wr) = track.width(si);
+        rows.push(CenterlineRow {
+            s_m: 0.0, // filled below once the offset arc length is known
+            x_m: p[0],
+            y_m: p[1],
+            z_m: p[2],
+            banking_deg: frame.banking.to_degrees(),
+            width_left_m: (wl - ni).max(MIN_RESIDUAL_WIDTH_M),
+            width_right_m: (wr + ni).max(MIN_RESIDUAL_WIDTH_M),
+            grip_scale: track.grip_scale(si),
+        });
+        pts.push(p);
+    }
+
+    // Recompute arc length along the offset line (its own geometry, not the parent's s).
+    let mut acc = 0.0;
+    for i in 1..m {
+        let step = norm(sub(pts[i], pts[i - 1]));
+        acc += step;
+        // Positive test (not `<=`) also rejects a NaN arc length as degenerate.
+        let strictly_increasing = acc > rows[i - 1].s_m;
+        if !strictly_increasing {
+            return Err(TrackError::DegenerateOffsetLine { index: i });
+        }
+        rows[i].s_m = acc;
+    }
+
+    let doc = TrackDoc {
+        schema: SchemaVersion::new("track", 1, 0),
+        name: name.to_owned(),
+        closed: track.is_closed(),
+        centerline: CenterlineRef("<offset>".to_owned()),
+        banking_keypoints: Vec::new(),
+        meta: TrackMeta::default(),
+    };
+    Track::from_doc(&doc, &Centerline { rows })
 }
 
 /// Fit the three geometry splines for a closed loop, returning them plus the loop length.
