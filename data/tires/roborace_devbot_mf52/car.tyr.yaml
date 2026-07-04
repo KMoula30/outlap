@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# TUMFTM Roborace MF5.2 reference tyre — "sport focused road tire" (DevBot platform), ISO sign.
+#
+# MF5.2 coefficients transcribed VERBATIM from TUMFTM Open-Car-Dynamics (Apache-2.0),
+# config/OCD_Vehicle_RWD_LSD__PT1__DOUBLE_TRACK__MF52__DEFAULT.json at commit 0a92c686
+# (all four wheels carry the identical set), then mapped MF5.2 → MF6.1. Every coefficient's
+# source (verbatim / mapped / omitted) is tabulated in README.md. Key mapping facts:
+#  - No inflation-pressure model in the source (no NOMPRES/INFLPRES; PPY1–5 = 0). NOMPRES and
+#    all PP* are omitted, so the loader sets dpi ≡ 0 exactly — pressure has no effect.
+#  - Camber: the MF5.2 PHY3 route (PHY3 = 0.004, LGA*/LKYG = 1; live in the original
+#    sim_vehicle_dynamics implementation the set was fitted for, dead in the pinned OCD port) has
+#    no MF6.1 equivalent; it is folded into PKY6 by equating the small-camber Fy sensitivity at
+#    FNOMIN (README §camber, incl. the intentional divergence from the pinned OCD port).
+#  - No aligning-moment (QBZ*/QCZ*/QDZ*) or overturning (QSX*) coefficients in the source, so
+#    Mz ≡ 0 and Mx ≡ 0 for this tyre. Rolling resistance QSY1 maps from the source's
+#    tire.rolling_resistance_coefficient.
+#  - thermal/wear blocks are SYNTHETIC placeholders (those models land in M5); the load-bearing
+#    force coefficients are the published set.
+schema: tyr/1.0
+mf61:
+  # Structural / nominal.
+  FNOMIN: 3000.0
+  UNLOADED_RADIUS: 0.3
+  VERTICAL_STIFFNESS: 250000.0
+  # Longitudinal force, pure slip (Fx0).
+  PCX1: 1.6
+  PDX1: 1.5
+  PDX2: -0.04
+  PDX3: 0.1
+  PEX1: 0.7
+  PEX2: -0.17
+  PEX3: 0.023
+  PEX4: -0.14
+  PKX1: 30.7
+  PKX2: 0.27
+  PKX3: 0.13
+  PHX1: 0.0
+  PHX2: 0.0
+  PVX1: 0.0
+  PVX2: 0.0
+  # Longitudinal force, combined slip.
+  RBX1: 17.4
+  RBX2: 12.9
+  RBX3: 0.0
+  RCX1: 1.1
+  REX1: 0.0
+  REX2: 0.0
+  RHX1: 0.001
+  # Lateral force, pure slip (Fy0).
+  PCY1: 1.5
+  PDY1: 1.2
+  PDY2: -0.09
+  PDY3: 0.1
+  PEY1: 0.1
+  PEY2: -1.2
+  PEY3: 0.05
+  PEY4: -8.1
+  PEY5: 0.0
+  PKY1: -75.5
+  PKY2: 4.65
+  PKY3: -0.6
+  PKY4: 2.0
+  PKY5: 0.0
+  # PKY6 is MAPPED, not verbatim: MF5.2 camber route (PHY3) folded in by equating the
+  # small-camber Fy sensitivity at FNOMIN — see README.md for the equation and arithmetic.
+  PKY6: -1.0651
+  PKY7: 0.0
+  PHY1: 0.003
+  PHY2: -0.0006
+  PVY1: 0.04
+  PVY2: -0.02
+  PVY3: -0.97
+  PVY4: -0.41
+  # Lateral force, combined slip.
+  RBY1: 20.6
+  RBY2: -23.5
+  RBY3: 0.001
+  RBY4: 0.0
+  RCY1: 1.0
+  REY1: 0.0
+  REY2: 0.0
+  RHY1: -0.02
+  RHY2: 0.0
+  RVY1: 0.16
+  RVY2: 0.03
+  RVY3: 27.5
+  RVY4: -29.7
+  RVY5: 0.03
+  RVY6: 0.0
+  # Rolling resistance (My) — mapped from the source's tire.rolling_resistance_coefficient.
+  QSY1: 0.025
+  # First-order relaxation lengths (feed the §7.1 transient).
+  PTX1: 0.75
+  PTX2: 0.007
+  PTX3: -0.013
+  PTY1: 3.8
+  PTY2: 4.7
+  # Scaling factors — tabulated in the source; transcribed verbatim (LGAX/LGAY/LGAZ/LKYG are
+  # MF5.2-only camber scalings, all 1.0, retired with the PHY3 route — see README).
+  LFZO: 1.0
+  LCX: 1.0
+  LMUX: 0.97
+  LEX: 1.0
+  LKX: 1.0
+  LHX: 1.0
+  LVX: 1.0
+  LCY: 1.0
+  LMUY: 0.97
+  LEY: 1.0
+  LKY: 1.0
+  LHY: 1.0
+  LVY: 1.0
+  LTR: 1.0
+  LRES: 1.0
+  LXAL: 1.0
+  LYKA: 1.0
+  LVYKA: 1.0
+  LS: 1.0
+  LMX: 1.0
+  LMY: 1.0
+  LVMX: 1.0
+  LGYR: 1.0
+  LSGKP: 1.0
+  LSGAL: 1.0
+thermal:
+  # SYNTHETIC placeholder (racing-slick band, the schema slick-fixture recipe) — the thermal
+  # ring model lands in M5.
+  c_s: 8000.0
+  c_c: 22000.0
+  c_g: 1500.0
+  g_sc: 90.0
+  g_cg: 40.0
+  g_road: 250.0
+  h0: 15.0
+  h1: 5.5
+  p_t: 0.65
+  t_opt: 95.0
+  c_t: 2.2
+  k_c: 0.0015
+  t_c_ref: 80.0
+  p_cold: 138.0
+  t_cold: 20.0
+wear:
+  # SYNTHETIC placeholder (racing-slick band) — the wear/cliff model lands in M5.
+  k_w: 0.0009
+  w_max: 8.0
+  w_c: 2.0
+  tau_d: 600.0
+  t_deg: 120.0
+  delta_t_ref: 20.0
+  beta: 2.0
+  delta_c: 0.25
+  s_w: 0.5
+  delta_d: 0.30
+provenance:
+  citation: "TUMFTM Open-Car-Dynamics (Apache-2.0), python3/ocd_vehicle_models_py/config/OCD_Vehicle_RWD_LSD__PT1__DOUBLE_TRACK__MF52__DEFAULT.json, commit 0a92c6868bed61ddbdfd42587225178c3bec8930 (params originate in TUMFTM/sim_vehicle_dynamics, Roborace DevBot stack)"
+  source: "MF5.2 set transcribed verbatim and mapped to MF6.1 (PP*/NOMPRES omitted => dpi=0 exact; PKY6 folds the PHY3 camber route by matching dFy/dgamma at FNOMIN; QSY1 from rolling_resistance_coefficient; Mz/Mx not in source => 0). Per-coefficient table in README.md. thermal/wear blocks are synthetic placeholders pending the M5 models."
+  synthetic: false
