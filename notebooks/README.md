@@ -7,9 +7,16 @@ double as end-to-end tests of the whole stack.
 
 | Notebook | What it covers |
 |---|---|
-| [`00_tour_of_outlap.ipynb`](00_tour_of_outlap.ipynb) | The guided tour: the car-as-data contract, the 3D track, the min-curvature racing line, a T0 lap (speed profile, g-g diagram), the MF6.1 tyre model, and the ≤0.5 % oracle validation. Start here. |
+| [`00_tour_of_outlap.ipynb`](00_tour_of_outlap.ipynb) | The guided tour of everything. **Start here.** |
+| [`01_car_as_data.ipynb`](01_car_as_data.ipynb) | The input quartet, validation diagnostics, the loaded-model report, and the **what-if override API** (+ a lap-time sensitivity tornado and live sliders). |
+| [`02_track.ipynb`](02_track.ipynb) | The 3D ribbon: corridor, curvature, vertical curvature, widths, provenance — and a corner explorer. |
+| [`03_raceline.ipynb`](03_raceline.ipynb) | The min-curvature QP: offsets vs corridor bounds, curvature reduction, and a car-width sweep. |
+| [`04_t0_lap.ipynb`](04_t0_lap.ipynb) | Solver anatomy: acceleration populations, `ds` convergence, determinism, and session-conditions sweeps. |
+| [`05_tyre_mf61.ipynb`](05_tyre_mf61.ipynb) | MF6.1 in depth: load/camber families, the slip-plane force map, and per-channel oracle validation. |
+| [`06_powertrain_pdt.ipynb`](06_powertrain_pdt.ipynb) | The `.ptm` firewall, the PDT importer on synthetic HDF5, the distilled 2-node thermal model, and the battery pack. |
 
-Numbered deep-dives per subsystem land in a follow-up increment.
+Interactive panels (ipywidgets sliders driving the override API) are live in a running Jupyter;
+each has a static twin so the GitHub-rendered page tells the same story.
 
 ## Running them
 

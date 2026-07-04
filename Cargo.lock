@@ -612,6 +612,7 @@ version = "0.1.0"
 name = "outlap-py"
 version = "0.1.0"
 dependencies = [
+ "miette",
  "numpy",
  "outlap-qss",
  "outlap-raceline",
