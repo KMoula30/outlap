@@ -4,7 +4,23 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+# The Python extension module (import name `outlap_core`). cdylib-only: PyO3's
+# `extension-module` feature defers Python-symbol resolution to the host interpreter, so a Rust
+# test harness for this crate cannot link — Python-side pytest is the test surface (test = false).
+[lib]
+name = "outlap_core"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
 [dependencies]
+numpy = "0.29.0"
+pyo3 = { version = "0.29.0", features = ["abi3-py312", "extension-module"] }
+outlap-schema = { path = "../outlap-schema" }
+outlap-track = { path = "../outlap-track" }
+outlap-tire = { path = "../outlap-tire" }
+outlap-qss = { path = "../outlap-qss" }
+outlap-raceline = { path = "../outlap-raceline" }
 
 [lints]
 workspace = true

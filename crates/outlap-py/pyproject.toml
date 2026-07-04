@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "outlap-core"
+description = "outlap Rust core bindings (MF6.1 tyre model, 3D track, racing line, T0 lap solver)"
+license = "AGPL-3.0-only"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.0"]
+# Version is sourced from Cargo.toml (maturin) — one authority, no drift.
+dynamic = ["version"]
+
+[tool.maturin]
+# abi3 wheel (pyo3 abi3-py312): one wheel per platform, any Python >= 3.12.
+features = ["pyo3/extension-module"]
+module-name = "outlap_core"
+
+# uv rebuilds this directory source only when its cache keys change. The extension's real inputs
+# are the WORKSPACE Rust sources (the physics lives in sibling crates), so key on those too —
+# otherwise `uv sync` happily reinstalls a stale wheel after a Rust edit.
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "outlap_core.pyi" },
+    { file = "src/**/*.rs" },
+    { file = "../*/src/**/*.rs" },
+    { file = "../../Cargo.lock" },
+]
