@@ -15,7 +15,7 @@ clean-room from the published formulations below (never from the LGPL TUM source
 | `m` | vehicle mass (kg), `g` gravity |
 | `κ_h`, `κ_v` | plan-view and vertical curvature of the line (1/m) |
 | `θ_g`, `θ_b` | grade and banking (rad) |
-| `μ_x`, `μ_y` | longitudinal / lateral friction (MF6.1 `PDX1·LMUX`, `PDY1·LMUY`) |
+| `μ_x`, `μ_y` | longitudinal / lateral friction (MF6.1 pure-slip curve peaks, mean of axles) |
 | `γ` | grip scale `grip_scale(s)` |
 | `q_x`, `q_z` | ½ρ·CxA, ½ρ·CzA (aero, ρ from `conditions.air` by the ideal-gas law) |
 
@@ -67,7 +67,10 @@ amplifies into spurious curvature spikes; the solver applies a light centred mov
 
 ## Scope at T0 / M1
 
-Point-mass with 3D normal-load corrections; μ constant from the tyre peak factors; ERS as a power
+Point-mass with 3D normal-load corrections; μ constant, derived once at assembly from the MF6.1
+pure-slip curve peaks (`peak_mu_x`/`peak_mu_y` at `Fz = FNOMIN`, cold inflation pressure, `γ = 0`,
+mean of the two axles) rather than the raw `PD*·LMU*` factors, so the load- and pressure-shape
+factors are folded in; ERS as a power
 cap (per-lap energy budgets, override mode, and thermal derating are not enforced); braking is
 friction-limited (no brake-thermal or regen blend). These are recorded in the loaded-model notes.
 The magnitude is a sanity check against published lap records, **not** the ≤1% Limebeer parity gate

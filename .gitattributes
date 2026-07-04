@@ -1,0 +1,4 @@
+# Notebooks are documentation/tutorials, not core source. Exclude them from
+# GitHub's language statistics — committed cell outputs (base64 plot images)
+# otherwise dominate the byte count and swamp Rust/Python.
+notebooks/**.ipynb linguist-documentation

@@ -2,9 +2,10 @@
 //! Assembly stage: reduce a [`ResolvedVehicle`] + `conditions` into a compact [`T0Vehicle`].
 //!
 //! This is a cold path (allocations allowed): it re-loads the referenced `.ptm`/`.tyr` files,
-//! derives the constant friction coefficients from the tyre MF6.1 peak factors, lumps the aero
-//! coefficients with air density, and folds each drive unit's coupler path into a set of gears so
-//! the hot [`T0Vehicle::tractive_force`] query is allocation-free.
+//! derives the constant friction coefficients from the tyre MF6.1 pure-slip curve peaks (via the
+//! validated [`peak_mu_x`]/[`peak_mu_y`] extractors at `Fz = FNOMIN`, cold inflation pressure,
+//! `γ = 0`), lumps the aero coefficients with air density, and folds each drive unit's coupler
+//! path into a set of gears so the hot [`T0Vehicle::tractive_force`] query is allocation-free.
 
 use outlap_core::MonotoneCubic;
 use outlap_schema::conditions::Conditions;
@@ -14,6 +15,7 @@ use outlap_schema::ptm::TorqueCurve;
 use outlap_schema::tyr::Tyr;
 use outlap_schema::vehicle::{Coupler, Efficiency, Gearbox};
 use outlap_schema::ResolvedVehicle;
+use outlap_tire::{peak_mu_x, peak_mu_y, Mf61};
 
 use crate::error::T0Error;
 use crate::DEFAULT_DS_M;
@@ -57,9 +59,9 @@ impl Default for T0Options {
 pub struct T0Vehicle {
     /// Total mass, kg.
     pub mass_kg: f64,
-    /// Longitudinal friction coefficient (MF6.1 `PDX1·LMUX`, mean of axles).
+    /// Longitudinal friction coefficient (MF6.1 pure-slip `Fx` peak @ FNOMIN/p_cold, mean of axles).
     pub mu_x: f64,
-    /// Lateral friction coefficient (MF6.1 `PDY1·LMUY`, mean of axles).
+    /// Lateral friction coefficient (MF6.1 pure-slip `Fy` peak @ FNOMIN/p_cold, mean of axles).
     pub mu_y: f64,
     /// Lumped drag term `½·ρ·CxA` (N per (m/s)²).
     pub qx: f64,
@@ -116,10 +118,16 @@ impl T0Vehicle {
         let mut notes = Vec::new();
 
         // --- Tyres: friction coefficients (mean of axles) + driven-axle radii ---
+        // μ comes from the validated MF6.1 pure-slip curve peaks at the nominal load and the cold
+        // inflation pressure (γ = 0), not the raw PD*·LMU* factors: this folds in the load/pressure
+        // shape factors and matches the force the tyre model would actually produce at T0's design
+        // point. The peak extractors already fix γ = 0 and V_cx = LONGVL internally.
         let (front, _) = load_tyr(spec.tires.front.as_str(), loader)?;
         let (rear, _) = load_tyr(spec.tires.rear.as_str(), loader)?;
-        let mu_x = 0.5 * (mu(&front, "PDX1", "LMUX") + mu(&rear, "PDX1", "LMUX"));
-        let mu_y = 0.5 * (mu(&front, "PDY1", "LMUY") + mu(&rear, "PDY1", "LMUY"));
+        let (mf_front, _) = Mf61::<f64>::from_tyr(&front)?;
+        let (mf_rear, _) = Mf61::<f64>::from_tyr(&rear)?;
+        let mu_x = 0.5 * (axle_mu_x(&mf_front, &front) + axle_mu_x(&mf_rear, &rear));
+        let mu_y = 0.5 * (axle_mu_y(&mf_front, &front) + axle_mu_y(&mf_rear, &rear));
         let r_front = coeff(&front, "UNLOADED_RADIUS", 0.33);
         let r_rear = coeff(&rear, "UNLOADED_RADIUS", 0.33);
 
@@ -190,7 +198,8 @@ impl T0Vehicle {
         }
 
         notes.push(
-            "μ from tyre MF6.1 PD*·LMU* (mean of front/rear); braking is friction-limited only at T0"
+            "μ derived from MF6.1 pure-slip peak @ FNOMIN, p_cold (mean of front/rear); braking is \
+             friction-limited only at T0"
                 .to_owned(),
         );
 
@@ -238,9 +247,19 @@ impl T0Vehicle {
     }
 }
 
-/// A friction coefficient from a peak factor × its scaling factor (scaling defaults to 1.0).
-fn mu(tyr: &Tyr, peak: &str, scale: &str) -> f64 {
-    coeff(tyr, peak, 0.0) * coeff(tyr, scale, 1.0)
+/// Peak longitudinal μ from the MF6.1 pure-slip curve at the nominal load and cold pressure.
+fn axle_mu_x(model: &Mf61<f64>, tyr: &Tyr) -> f64 {
+    peak_mu_x(model, model.params().fnomin, cold_pressure_pa(tyr))
+}
+
+/// Peak lateral μ from the MF6.1 pure-slip curve at the nominal load and cold pressure.
+fn axle_mu_y(model: &Mf61<f64>, tyr: &Tyr) -> f64 {
+    peak_mu_y(model, model.params().fnomin, cold_pressure_pa(tyr))
+}
+
+/// The cold inflation pressure in Pa (schema stores `thermal.p_cold` in kPa; kPa→Pa at the seam).
+fn cold_pressure_pa(tyr: &Tyr) -> f64 {
+    1000.0 * tyr.thermal.p_cold
 }
 
 /// An MF6.1 coefficient, or `default` if absent.
