@@ -1,0 +1,5 @@
+$ SPDX-License-Identifier: CC-BY-SA-4.0
+$ SYNTHETIC — exercises the malformed-line hard error (no `=`).
+[LONGITUDINAL_COEFFICIENTS]
+PCX1 = 1.65
+this line has no equals sign

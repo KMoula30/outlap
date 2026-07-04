@@ -1,0 +1,61 @@
+$ SPDX-License-Identifier: CC-BY-SA-4.0
+$ SYNTHETIC tyre dataset — physically plausible, NOT measured and NOT TTC-derived.
+$ Hand-authored MF6.1 coefficients for a generic racing slick, for `.tir` codec testing only.
+$ Distributed under CC-BY-SA-4.0 as data (see schemas/ licensing).
+
+[MODEL]
+FITTYP                    = 61
+PROPERTY_FILE_FORMAT      = 'MF61'
+TYRESIDE                  = 'LEFT'          ! ignored metadata, carried through the doc
+
+[UNITS]
+LENGTH   = 'meter'
+FORCE    = 'newton'
+ANGLE    = 'radians'
+MASS     = 'kg'
+TIME     = 'second'
+
+[DIMENSION]
+UNLOADED_RADIUS = 0.33
+WIDTH           = 0.305
+RIM_RADIUS      = 0.2286
+
+[OPERATING_CONDITIONS]
+NOMPRES = 165000        $ nominal inflation pressure, Pa
+LONGVL  = 16.7
+VXLOW   = 1.0
+
+[VERTICAL]
+FNOMIN             = 4000.0
+VERTICAL_STIFFNESS = 260000
+
+[LONGITUDINAL_COEFFICIENTS]
+PCX1 = 1.65
+PDX1 = 1.30
+PDX2 = -0.08
+PEX1 = 0.10
+PKX1 = 22.0
+PHX1 = 0.0
+PVX1 = 0.0
+PTX1 = 2.3
+
+[LATERAL_COEFFICIENTS]
+PCY1 = 1.40
+PDY1 = 1.25
+PDY2 = -0.10
+PEY1 = -1.0
+PKY1 = -20.0
+PKY2 = 1.9
+PHY1 = 0.0
+PVY1 = 0.0
+PTY1 = 2.1
+
+[ALIGNING_COEFFICIENTS]
+QBZ1 = 10.0
+QCZ1 = 1.1
+QDZ1 = 0.1
+QEZ1 = -1.5
+
+[STRUCTURAL]
+LONGITUDINAL_STIFFNESS = 300000
+LATERAL_STIFFNESS      = 110000

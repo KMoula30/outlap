@@ -1,0 +1,5 @@
+$ SPDX-License-Identifier: CC-BY-SA-4.0
+$ SYNTHETIC — exercises the duplicate-key last-wins warning.
+[LONGITUDINAL_COEFFICIENTS]
+PDX1 = 1.30
+PDX1 = 1.45

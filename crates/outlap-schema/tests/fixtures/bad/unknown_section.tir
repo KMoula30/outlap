@@ -1,0 +1,4 @@
+$ SPDX-License-Identifier: CC-BY-SA-4.0
+$ SYNTHETIC — exercises the unknown-section did-you-mean warning.
+[LONGITUDNAL_COEFFICIENTS]
+PCX1 = 1.65

@@ -1,0 +1,8 @@
+$ SPDX-License-Identifier: CC-BY-SA-4.0
+$ SYNTHETIC — exercises the non-SI [UNITS] hard error.
+[UNITS]
+LENGTH = 'mm'
+FORCE  = 'newton'
+
+[DIMENSION]
+UNLOADED_RADIUS = 330

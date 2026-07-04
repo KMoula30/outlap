@@ -14,7 +14,11 @@ miette = { workspace = true }
 marked-yaml = { workspace = true }
 serde_path_to_error = { workspace = true }
 strsim = { workspace = true }
+ryu = { workspace = true }
 blake3 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [features]
 default = ["std"]
