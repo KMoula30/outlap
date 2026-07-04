@@ -212,3 +212,102 @@ proptest! {
         prop_assert!((mu - pdx1).abs() <= 1e-7 * pdx1, "μ {mu} vs PDX1 {pdx1}");
     }
 }
+
+/// A tyre with the full Mz camber family, the camber-dependent FORCE coefficients (PKY6/7, PVY3/4),
+/// and a longitudinal shift (PHX1 ⇒ Fx ≠ 0 at κ = 0) — the setup the two Mz fixes are about.
+fn mz_camber_base() -> BTreeMap<String, f64> {
+    let mut m = BTreeMap::new();
+    for (k, v) in [
+        ("FNOMIN", 4000.0),
+        ("UNLOADED_RADIUS", 0.33),
+        ("NOMPRES", P0),
+        ("PCX1", 1.6),
+        ("PDX1", 1.2),
+        ("PEX1", 0.1),
+        ("PKX1", 22.0),
+        ("PHX1", 0.003), // Fx ≠ 0 at κ = 0, so the s·Fx gate is observable.
+        ("PCY1", 1.3),
+        ("PDY1", -1.0),
+        ("PDY2", 0.1),
+        ("PEY1", -1.0),
+        ("PKY1", -18.0),
+        ("PKY2", 1.5),
+        ("PKY6", -0.9), // camber stiffness — affects cambered Fy, not the zero-camber trail.
+        ("PKY7", -0.2),
+        ("PVY1", 0.02),
+        ("PVY3", -0.3), // camber shift — same.
+        ("PVY4", 0.02),
+        ("QBZ1", 8.0),
+        ("QBZ2", -1.0),
+        ("QBZ3", -0.5),
+        ("QBZ4", 0.1),
+        ("QBZ5", -0.2),
+        ("QBZ9", 15.0),
+        ("QCZ1", 1.1),
+        ("QDZ1", 0.09),
+        ("QDZ3", 0.01),
+        ("QDZ4", 10.0),
+        ("QDZ6", -0.005),
+        ("QDZ8", -0.3),
+        ("QDZ9", -0.01),
+        ("QEZ1", -1.2),
+        ("QHZ1", 0.005),
+        ("QHZ3", 0.1),
+        ("SSZ1", 0.04),
+        ("SSZ2", 0.001),
+        ("SSZ3", 0.5),
+        ("SSZ4", -0.2),
+    ] {
+        insert(&mut m, k, v);
+    }
+    m
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Mz's lateral machinery is evaluated at ZERO camber (the trail acts on the slip-only force),
+    /// so at κ = 0 (no s·Fx) the aligning moment is invariant to a camber-only FORCE coefficient
+    /// (PDY3) even though Fy is not. The pre-fix code used the fully-cambered Fy in the trail, so
+    /// this would have failed.
+    #[test]
+    fn mz_uses_zero_camber_lateral(
+        gamma in 0.06..0.20,
+        alpha in 0.05..0.20,
+        fz in 3000.0..8000.0,
+        pdy3 in -8.0..-2.0,
+    ) {
+        let base = mz_camber_base();
+        let mut perturbed = base.clone();
+        insert(&mut perturbed, "PDY3", pdy3); // changes cambered μy only
+        let (m0, m1) = (model(&base), model(&perturbed));
+        let s = SlipState::new(0.0, alpha, gamma, fz, P0, VX); // κ = 0
+        let (f0, f1) = (m0.forces(&s), m1.forces(&s));
+        prop_assert!(
+            (f0.mz - f1.mz).abs() <= 1e-9 * f0.mz.abs().max(1.0),
+            "Mz moved with PDY3: {} vs {}", f0.mz, f1.mz
+        );
+        prop_assert!((f0.fy - f1.fy).abs() > 1.0, "Fy should move with PDY3 at camber");
+    }
+
+    /// The s·Fx lever is combined-slip only: at κ = 0 it is gated off, so Mz is invariant to the
+    /// SSZ coefficients there; at κ ≠ 0 (with Fx ≠ 0) it is not. Guards the s·Fx κ-gate.
+    #[test]
+    fn mz_s_fx_gated_at_zero_kappa(
+        alpha in -0.20..0.20,
+        fz in 3000.0..8000.0,
+        ssz1 in 0.10..0.50,
+    ) {
+        let base = mz_camber_base();
+        let mut perturbed = base.clone();
+        insert(&mut perturbed, "SSZ1", ssz1); // base SSZ1 = 0.04, always different
+        let (m0, m1) = (model(&base), model(&perturbed));
+        // κ = 0: s·Fx gated → Mz identical despite the different lever arm.
+        let s0 = SlipState::new(0.0, alpha, 0.0, fz, P0, VX);
+        let (z0, z1) = (m0.forces(&s0).mz, m1.forces(&s0).mz);
+        prop_assert!((z0 - z1).abs() <= 1e-9 * z0.abs().max(1.0), "Mz moved with SSZ1 at κ=0");
+        // κ ≠ 0 with Fx ≠ 0: s·Fx active → Mz differs.
+        let sk = SlipState::new(0.15, alpha, 0.0, fz, P0, VX);
+        prop_assert!((m0.forces(&sk).mz - m1.forces(&sk).mz).abs() > 1e-3, "s·Fx not active at κ≠0");
+    }
+}

@@ -4,3 +4,7 @@ __pycache__/
 *.egg-info/
 dist/
 .pytest_cache/
+
+# Reference literature (copyrighted — used for clean-room derivation, never redistributed).
+# Coefficient VALUES are facts we may use and cite; the source PDFs are not committed.
+**/*.pdf

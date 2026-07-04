@@ -24,6 +24,13 @@ from jsonschema import Draft202012Validator
 _ROOT = Path(__file__).resolve().parents[3]
 _SCHEMAS_DIR = _ROOT / "schemas"
 _FIXTURES_DIR = _ROOT / "crates" / "outlap-schema" / "tests" / "fixtures"
+_DATA_DIR = _ROOT / "data"
+
+# Committed reference data validated by glob (so new datasets are covered automatically), keyed by
+# the schema each `*.<suffix>.yaml` anywhere under `data/` must satisfy.
+_DATA_GLOBS: dict[str, str] = {
+    "tyr": "*.tyr.yaml",
+}
 
 # Which committed fixtures must validate against each schema. Only self-contained documents are
 # listed here — fixtures that rely on `extends:` merge are validated by the Rust pipeline instead.
@@ -64,32 +71,51 @@ def _load_yaml(path: Path) -> Any:
         return yaml.safe_load(f)
 
 
+def _validate_docs(
+    name: str, docs: list[tuple[str, Path]], errors: list[str]
+) -> int:
+    """Validate a list of ``(label, path)`` documents against schema ``name``.
+
+    Returns the number of documents validated (0 on a schema-level failure).
+    """
+    schema_path = _SCHEMAS_DIR / f"{name}.json"
+    if not schema_path.exists():
+        errors.append(f"missing schema: {schema_path}")
+        return 0
+    schema = load_schema(name)
+    # The schema must itself be a valid draft 2020-12 schema.
+    try:
+        Draft202012Validator.check_schema(schema)
+    except Exception as exc:  # noqa: BLE001 - surface any meta-schema failure
+        errors.append(f"{name}.json is not a valid draft 2020-12 schema: {exc}")
+        return 0
+    validator = Draft202012Validator(schema)
+    for label, path in docs:
+        if not path.exists():
+            errors.append(f"missing document: {path}")
+            continue
+        doc = _load_yaml(path)
+        for err in sorted(validator.iter_errors(doc), key=str):
+            loc = "/".join(str(p) for p in err.absolute_path) or "<root>"
+            errors.append(f"{label} [{name}] at {loc}: {err.message}")
+    return len(docs)
+
+
 def check() -> int:
-    """Validate every committed schema and its fixtures. Returns a process exit code."""
+    """Validate every committed schema, its fixtures, and the reference data. Exit code."""
     errors: list[str] = []
+    total = 0
 
     for name, fixtures in _FIXTURES.items():
-        schema_path = _SCHEMAS_DIR / f"{name}.json"
-        if not schema_path.exists():
-            errors.append(f"missing schema: {schema_path}")
-            continue
-        schema = load_schema(name)
-        # The schema must itself be a valid draft 2020-12 schema.
-        try:
-            Draft202012Validator.check_schema(schema)
-        except Exception as exc:  # noqa: BLE001 - surface any meta-schema failure
-            errors.append(f"{name}.json is not a valid draft 2020-12 schema: {exc}")
-            continue
-        validator = Draft202012Validator(schema)
-        for fixture in fixtures:
-            fpath = _FIXTURES_DIR / fixture
-            if not fpath.exists():
-                errors.append(f"missing fixture: {fpath}")
-                continue
-            doc = _load_yaml(fpath)
-            for err in sorted(validator.iter_errors(doc), key=str):
-                loc = "/".join(str(p) for p in err.absolute_path) or "<root>"
-                errors.append(f"{fixture} [{name}] at {loc}: {err.message}")
+        docs = [(f, _FIXTURES_DIR / f) for f in fixtures]
+        total += _validate_docs(name, docs, errors)
+
+    # Reference data anywhere under data/ (globbed so new datasets are covered without edits).
+    data_total = 0
+    for name, pattern in _DATA_GLOBS.items():
+        found = sorted(_DATA_DIR.rglob(pattern)) if _DATA_DIR.exists() else []
+        docs = [(str(p.relative_to(_ROOT)), p) for p in found]
+        data_total += _validate_docs(name, docs, errors)
 
     if errors:
         print("schema check FAILED:", file=sys.stderr)
@@ -97,8 +123,10 @@ def check() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 1
 
-    total = sum(len(v) for v in _FIXTURES.values())
-    print(f"schema check OK: {len(_FIXTURES)} schemas, {total} fixtures validated")
+    print(
+        f"schema check OK: {len(_FIXTURES)} schemas, "
+        f"{total} fixtures + {data_total} data files validated"
+    )
     return 0
 
 

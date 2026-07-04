@@ -22,6 +22,10 @@ use crate::mf61::params::Mf61Params;
 use crate::slip::sgn_pos;
 
 /// Evaluate the combined-slip aligning moment (eq. 4.E71).
+///
+/// `fy0` is the **zero-camber** pure-lateral bundle (the trail and residual use the slip-only
+/// lateral machinery); `fy_trail = G_yκ·Fy0|_{γ=0}` is the force the trail acts on (eq. 4.E74);
+/// `fy` is the full (cambered) lateral force, used only by the `s` lever arm (eq. 4.E76).
 #[allow(clippy::too_many_arguments)] // The Mz composition genuinely consumes all of these.
 pub(crate) fn mz<T: Float>(
     p: &Mf61Params<T>,
@@ -31,7 +35,7 @@ pub(crate) fn mz<T: Float>(
     fy0: &Fy0Out<T>,
     fx: T,
     fy: T,
-    sv_yk: T,
+    fy_trail: T,
 ) -> T {
     let one = T::one();
     let gs = n.gamma_star;
@@ -63,12 +67,14 @@ pub(crate) fn mz<T: Float>(
         * p.ltr
         * n.sgn_vcx;
 
-    // Trail t(x) (4.E33 ~/4.E44 ~): Et carries the (2/π)·atan(Bt·Ct·x) curvature term and the
-    // ≤ 1 clamp; the cos'α factor bounds the trail at large slip.
+    // Et (4.E44): the trail curvature factor is fixed from the BASE trail angle α_t (not the
+    // combined equivalent angle) so the pure and combined trails share one Et. Not clamped to 1
+    // (that clamp is for the force magic formulas, not the trail).
+    let et = (p.qez1 + p.qez2 * n.dfz + p.qez3 * n.dfz_sq)
+        * (one + (p.qez4 + p.qez5 * gs) * pre.two_over_pi * (bt * ct * alpha_t).atan());
+
+    // Trail t(x) (4.E33 ~): the cos'α factor bounds the trail at large slip.
     let trail = |x: T| -> T {
-        let et = ((p.qez1 + p.qez2 * n.dfz + p.qez3 * n.dfz_sq)
-            * (one + (p.qez4 + p.qez5 * gs) * pre.two_over_pi * (bt * ct * x).atan()))
-        .min(one);
         let arg = bt * x;
         dt * (ct * (arg - et * (arg - arg.atan())).atan()).cos() * n.cos_alpha
     };
@@ -87,10 +93,21 @@ pub(crate) fn mz<T: Float>(
         * n.cos_alpha;
     let mzr = |x: T| -> T { dr * (br * x).atan().cos() };
 
-    // Fx lever arm s (4.E76 ~) and the κ-free lateral force F'y (4.E74).
-    let s = p.r0 * (p.ssz1 + p.ssz2 * (fy * pre.inv_fz0p) + (p.ssz3 + p.ssz4 * n.dfz) * gs) * p.ls;
-    let fy_prime = fy - sv_yk;
+    // Fx lever arm s (4.E76). The camber term `(SSZ3 + SSZ4·dfz)·γ*` is evaluated at ZERO camber
+    // (γ_s = 0) — completing the "aligning-moment lateral machinery is slip-only" convention that
+    // the trail already follows. Book eq. 4.E76 writes γ*, but the operational MF6.1 (MFeval/teasit,
+    // which `.tir` data is fit against, and the ≤0.5% validation oracle) drops it; matching keeps
+    // the model interoperable. `SSZ3`/`SSZ4` are therefore accepted but unused.
+    let s = p.r0 * (p.ssz1 + p.ssz2 * (fy * pre.inv_fz0p)) * p.ls;
 
-    // Mz (4.E71).
-    -trail(alpha_t_eq) * fy_prime + mzr(alpha_r_eq) + s * fx
+    // The `s·Fx` moment belongs to combined slip only: at κ = 0 the pure aligning moment (eq.
+    // 4.E31) has no longitudinal term, and the small shift-induced Fx there is not a real lever.
+    let s_fx = if n.kappa == T::zero() {
+        T::zero()
+    } else {
+        s * fx
+    };
+
+    // Mz (4.E71): −t·F'y + Mzr + s·Fx.
+    -trail(alpha_t_eq) * fy_trail + mzr(alpha_r_eq) + s_fx
 }

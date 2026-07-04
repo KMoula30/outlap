@@ -95,6 +95,21 @@ pub(crate) struct Norm<T> {
     pub lmuy_prime: T,
 }
 
+impl<T: Float> Norm<T> {
+    /// A copy with camber zeroed — used for the `Mz` lateral side (the trail acts on the
+    /// slip-only force; camber enters `Mz` only via its own coefficients).
+    fn with_zero_camber(&self) -> Self {
+        Self {
+            gamma: T::zero(),
+            gamma_sq: T::zero(),
+            gamma_star: T::zero(),
+            gamma_star_sq: T::zero(),
+            gamma_star_abs: T::zero(),
+            ..*self
+        }
+    }
+}
+
 /// Sign-preserving singularity guard: `d + ε·sgn(d)` with `sgn(0) = +1`.
 ///
 /// Never cancels the denominator (unlike `d + ε`, which is zero at `d = −ε`).
@@ -163,7 +178,21 @@ impl<T: Float> Mf61<T> {
         let fx = g_xa * fx0.fx0;
         let fy = g_yk * fy0.fy0 + sv_yk;
 
-        let mz = mz::mz(p, pre, &n, fx0.k_xk, &fy0, fx, fy, sv_yk);
+        // The aligning moment's pneumatic trail acts on the SLIP-ONLY (zero-camber) lateral force
+        // `G_yκ·Fy0|_{γ=0}`, and its residual uses the zero-camber `Fy0` intermediates; camber
+        // enters `Mz` only through the Mz-specific coefficients (SHt, Bt, Dt, Dr, Et). See
+        // Pacejka 2012 eqs. 4.E72–4.E74. When γ = 0 the cambered bundle already IS the zero-camber
+        // one, so the second evaluation is skipped.
+        let (fy0_mz, fy_trail) = if n.gamma_star == T::zero() {
+            (fy0, g_yk * fy0.fy0)
+        } else {
+            let n0 = n.with_zero_camber();
+            let fy0_0 = fy::fy0(p, pre, &n0);
+            let (g_yk0, _) = combined::gy_kappa(p, pre, &n0, fy0_0.mu_y);
+            (fy0_0, g_yk0 * fy0_0.fy0)
+        };
+
+        let mz = mz::mz(p, pre, &n, fx0.k_xk, &fy0_mz, fx, fy, fy_trail);
         let mx = mxmy::mx(p, &n, fy);
         let my = mxmy::my(p, pre, &n, fx);
 

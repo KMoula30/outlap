@@ -48,12 +48,22 @@ My  = −sgn(V_cx)·R0·Fz·λ_My·{QSY1..QSY8}·(Fz/Fz0)^QSY7·(p/p₀)^QSY8   
   beyond it the curve folds back).
 - **Combined slip** uses the cosine-weighting (not friction-ellipse) formulation: normalized
   cosine magic formulas in the other slip quantity, plus the κ-induced ply-steer shift `SV_yκ`.
-- **Aligning moment** composes the pneumatic trail acting on the κ-free lateral force, the
-  residual torque `M_zr`, and the `s·Fx` lever arm from lateral carcass deflection; equivalent
-  slip angles (4.E77/4.E78) fold κ in via the stiffness ratio `K_xκ/K'_yα`. Trail and residual
-  carry a `cos α` weighting (the book's guarded `cos'α`) that keeps `Mz` bounded at large slip.
-- **`My` sign** (rolling resistance opposes rotation; ISO 8855 forward roll spins +y, hence
-  `My < 0` at `V_cx > 0`) is **provisional until pinned against the oracle goldens** (M2 PR2).
+- **Aligning moment** composes the pneumatic trail acting on the **slip-only (zero-camber)**
+  lateral force `G_yκ·Fy0|_{γ=0}` (eq. 4.E74), the residual torque `M_zr`, and the `s·Fx` lever
+  arm; equivalent slip angles (4.E77/4.E78) fold κ in via the stiffness ratio `K_xκ/K'_yα`. Two
+  subtleties the golden cross-check pinned down: the **entire aligning-moment lateral machinery**
+  (`By`, `Cy`, `Kyα`, `SHy`, `SVy`, `Fy0`, *and* the `s`-lever camber term of eq. 4.E76) is
+  evaluated at **zero camber** — camber enters `Mz` only through its own coefficients (SHt, Bt, Dt,
+  Dr, Et). The book writes `γ*` in `s` (eq. 4.E76), but the operational MF6.1 (MFeval/teasit, which
+  `.tir` data is fit against and the ≤0.5% oracle) drops it, so `SSZ3`/`SSZ4` are accepted-but-
+  unused — matching keeps the model interoperable. `Et`'s curvature factor is fixed from the *base*
+  trail angle `α_t` (shared by pure and combined). The `s·Fx` term is combined-slip only: at
+  `κ = 0` the pure aligning moment (4.E31) has no longitudinal term — a deliberate C⁰ step at
+  `κ = 0` that matches the standard/oracle (a measure-zero point in transient use; do not "smooth"
+  it, or the golden cross-check breaks). Trail and residual carry a `cos α` weighting (the book's
+  guarded `cos'α`) that bounds `Mz` at large slip.
+- **`My` sign**: rolling resistance opposes rotation; in ISO 8855 forward roll spins +y, so
+  `My < 0` at `V_cx > 0`. Confirmed against the oracle goldens.
 
 ## Turn-slip and other omissions (v1 scope)
 
@@ -82,9 +92,10 @@ pure), and every degradation is emitted as a note into the loaded-model report �
 Kernels are panic-free and finite for all finite inputs: `F_z ≤ 0` short-circuits to zero;
 `B = K/(C·D + ε)` uses the book's ε device implemented sign-preservingly (`d + ε·sgn(d)`, never
 cancelling); the combined-weighting normalizing cosines get a magnitude floor; `α` is clamped to
-±(π/2 − 10⁻³) before `tan`; `E ≤ 1` clamps throughout; the `My` pressure ratio is floored before
-its power law. Evaluation is pure, allocation-free (dhat-gated in CI) and generic over
-`f32`/`f64`.
+±(π/2 − 10⁻³) before `tan`; `E ≤ 1` is clamped on the force magic formulas (`Ex`, `Ey`, and the
+combined `Exα`/`Eyκ`) — the trail `Et` is deliberately not clamped, matching the standard; the
+`Kxκ` `exp` argument and the `My` pressure ratio are bounded before their exp/power. Evaluation is
+pure, allocation-free (dhat-gated in CI) and generic over `f32`/`f64`.
 
 ## Validation
 
@@ -92,8 +103,12 @@ its power law. Evaluation is pure, allocation-free (dhat-gated in CI) and generi
   (`G ∈ (0,1]` — only guaranteed at zero shifts and `C ≤ 1`; false in general with `RHX1 ≠ 0`),
   value continuity across `κ = 0`, `α = 0`, `V_cx = 0⁺`, peak scaling linearity, closed-form
   peak agreement (`μ = PD·LMU` when `C > 1`), finiteness over a hostile input box.
-- The ≤ 0.5% Fx/Fy/Mz gate against MFeval-generated golden CSVs (MATLAB/Octave outputs as data
-  only) lands with the goldens PR of this milestone (HANDOFF §12/§13).
+- Golden cross-check (HANDOFF §12/§13): all five channels of the Pacejka book reference tyre match
+  an independent Magic-Formula implementation (the GPL `teasit` library, run under Octave — its
+  numeric outputs used as data only, never its source) to **≤ 0.5%** over pure-longitudinal,
+  pure-lateral (incl. ±4° camber), and combined sweeps. The generation is documented and
+  reproducible in `tools/goldens/`. This cross-check is what caught the `Mz` camber/`s·Fx`
+  subtleties noted above.
 
 ## References
 
