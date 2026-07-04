@@ -19,6 +19,11 @@ AGPL-3.0.
 - No proprietary data: FSAE TTC data and fitted TTC parameter sets cannot be committed; raw F1
   telemetry cannot be committed. Synthetic/citable data only.
 
+## Use of AI
+- The use of AI is permitted, Claude Code w/ Opus 4.8 or Fable 5 was used for the majority of the development
+- The contributor should mention the use of AI coding tools when used
+- Any changes in the physics engine or in the assumptions of the models must be accompanied by test results, and references to scientific publications
+  
 ## PR checklist
 - [ ] `cargo fmt` / `clippy -D warnings` / `cargo test` green, wasm target builds
 - [ ] No new allocations in step paths (alloc-counter test green)
