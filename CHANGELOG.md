@@ -33,6 +33,16 @@ Milestone **M2** (tyre model) — in progress, not yet tagged.
   the provenance. Round-trip is byte-stable for `tir→doc→tir` and numeric-exact over the mapping
   table (coefficient + housekeeping) keys for `tir→tyr→tir`. No JSON Schema change (`.tir` is text,
   not a schemars type).
+- **fixtures**: **TUMFTM Roborace MF5.2 reference tyre** (`data/tires/roborace_devbot_mf52/`) —
+  transcribed verbatim from Open-Car-Dynamics (Apache-2.0, pinned commit) and mapped MF5.2→6.1
+  with a per-coefficient source table (no pressure model ⇒ `dpi ≡ 0` exact; camber `PHY3` route
+  folded into `PKY6` by matching small-camber Fy sensitivity at `FNOMIN`; `QSY1` from the source's
+  rolling-resistance coefficient; `Mz ≡ Mx ≡ 0`). Reference integration tests now glob every
+  `data/tires/**` dataset for warning-free load + `.tir` codec round-trip, with per-tyre physics
+  checks (class-plausible grip, signs, camber remap) alongside.
+  The planned Perantoni–Limebeer F1 tyre is deferred: its published model is a reduced similarity
+  form (no MF coefficient set) and the parameter appendix is not openly available — an MF6.1
+  derivation would break the transcription-only provenance rule.
 
 ## [0.1.0] - 2026-07-03
 
