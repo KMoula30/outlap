@@ -152,13 +152,19 @@ fn is_not_found(e: &outlap_schema::SchemaError) -> bool {
     )
 }
 
-/// Map a schema error to Python: missing file → `FileNotFoundError`, anything else → `ValueError`.
+/// Map a schema error to Python: missing file → `FileNotFoundError`, anything else →
+/// `ValueError` carrying the message **plus the diagnostic help line** (did-you-mean
+/// suggestions etc. — config errors are a product surface, and Display alone drops them).
 fn schema_err(e: outlap_schema::SchemaError) -> PyErr {
+    use miette::Diagnostic;
     if is_not_found(&e) {
-        PyFileNotFoundError::new_err(e.to_string())
-    } else {
-        err(e)
+        return PyFileNotFoundError::new_err(e.to_string());
     }
+    let msg = match e.help() {
+        Some(help) => format!("{e}\nhelp: {help}"),
+        None => e.to_string(),
+    };
+    PyValueError::new_err(msg)
 }
 
 /// Map a track error to Python, unwrapping the not-found case like [`schema_err`].
