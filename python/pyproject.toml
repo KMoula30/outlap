@@ -11,11 +11,17 @@ dependencies = [
     "h5py>=3.16.0",
     "jsonschema>=4.23.0",
     "numpy>=2.5.0",
+    "outlap-core",
     "pyarrow>=24.0.0",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.2",
     "xarray>=2026.4.0",
 ]
+
+# The Rust core bindings build from the workspace via maturin (needs a Rust toolchain; CI installs
+# one in the python job). `uv sync` compiles the extension automatically.
+[tool.uv.sources]
+outlap-core = { path = "../crates/outlap-py" }
 
 [project.optional-dependencies]
 # Tooling for the track importer + plot sanity (§9.3). Network + heavier deps, kept out of the
