@@ -589,6 +589,13 @@ dependencies = [
 [[package]]
 name = "outlap-tire"
 version = "0.1.0"
+dependencies = [
+ "dhat",
+ "num-traits",
+ "outlap-schema",
+ "proptest",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "outlap-track"

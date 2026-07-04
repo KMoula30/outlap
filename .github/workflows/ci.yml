@@ -19,6 +19,7 @@ jobs:
       - run: cargo run -p outlap-schema --bin gen_schemas -- --check   # schemas == committed
       - run: cargo build --target wasm32-unknown-unknown -p outlap-wasm --release
       - run: cargo build --target wasm32-unknown-unknown -p outlap-raceline   # clarabel is wasm-clean
+      - run: cargo build --target wasm32-unknown-unknown -p outlap-tire      # tire kernels stay wasm-clean
 
   python:
     runs-on: ubuntu-latest
