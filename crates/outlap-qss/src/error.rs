@@ -11,10 +11,11 @@ pub enum T0Error {
     /// should not happen after schema validation; surfaced defensively).
     #[error("could not fit a T0 envelope: {0}")]
     Envelope(#[from] outlap_core::InterpError),
-    /// An MF6.1 parameter set could not be extracted from a `.tyr` document (a required force key
-    /// is missing — should not happen after schema validation; surfaced defensively).
-    #[error("could not build the MF6.1 tyre model: {0}")]
-    TireBuild(#[from] outlap_tire::Mf61BuildError),
+    /// A tyre force model could not be built from a `.tyr` document (a required force key is
+    /// missing and no brush block is present — should not happen after schema validation;
+    /// surfaced defensively).
+    #[error("could not build the tyre force model: {0}")]
+    TireBuild(#[from] outlap_tire::TireBuildError),
     /// A drive unit uses a gridded efficiency map, which the point-mass tier cannot read yet (no
     /// Rust sidecar-table reader). Use a constant `efficiency:` for T0, or run T1+ once maps land.
     #[error("drive unit {unit} uses a map efficiency; T0 needs a constant `efficiency` (no map reader yet)")]

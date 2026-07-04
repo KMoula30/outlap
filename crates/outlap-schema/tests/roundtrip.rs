@@ -90,6 +90,29 @@ fn referenced_files_load_standalone() {
 }
 
 #[test]
+fn brush_tyres_load_and_round_trip() {
+    let l = loader();
+    // Brush-only (tyr/1.1): structural keys + brush block, no MF6.1 force core → no warnings.
+    let (brush, warnings) = load_tyr("tyr/brush_only.tyr.yaml", &l).unwrap();
+    assert!(
+        warnings.is_empty(),
+        "brush-only should be clean: {warnings:?}"
+    );
+    assert!(brush.brush.is_some(), "brush block should parse");
+    let back: outlap_schema::tyr::Tyr =
+        serde_json::from_str(&serde_json::to_string(&brush).unwrap()).unwrap();
+    assert_eq!(brush, back);
+
+    // Full MF6.1 core + brush block → also clean (both models available).
+    let (both, warnings) = load_tyr("tyr/brush_plus_mf61.tyr.yaml", &l).unwrap();
+    assert!(
+        warnings.is_empty(),
+        "mf61+brush should be clean: {warnings:?}"
+    );
+    assert!(both.brush.is_some() && both.mf61.0.contains_key("PDX1"));
+}
+
+#[test]
 fn extends_deep_merges_and_tracks_provenance() {
     use outlap_schema::load::Origin;
     let l = loader();

@@ -51,7 +51,11 @@ _FIXTURES: dict[str, list[str]] = {
         "ptm/pdt_synth_edrive.ptm.yaml",
         "ptm/pdt_synth_du.ptm.yaml",
     ],
-    "tyr": ["tyr/slick.tyr.yaml"],
+    "tyr": [
+        "tyr/slick.tyr.yaml",
+        "tyr/brush_only.tyr.yaml",
+        "tyr/brush_plus_mf61.tyr.yaml",
+    ],
     "emotor": ["emotor/rear.emotor.yaml", "emotor/pdt_synth.emotor.yaml"],
     "track": ["track/synthetic_oval.track.yaml"],
     "conditions": ["conditions/hot_dry.conditions.yaml"],

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC tire dataset — physically plausible, not measured. A brush-only tyre: no MF6.1 force
+# core, just the physical brush block (tyr/1.1). For schema/round-trip and T0 tier-selection tests.
+schema: tyr/1.1
+mf61:
+  FNOMIN: 4000.0
+  UNLOADED_RADIUS: 0.33
+brush:
+  c_kappa_n: 150000.0
+  c_alpha_n_per_rad: 120000.0
+  mu0: 1.20
+  patch_half_length_m: 0.10
+  pressure_profile: parabolic
+thermal:
+  c_s: 8000.0
+  c_c: 22000.0
+  c_g: 1500.0
+  g_sc: 90.0
+  g_cg: 40.0
+  g_road: 250.0
+  h0: 15.0
+  h1: 5.5
+  p_t: 0.65
+  t_opt: 95.0
+  c_t: 2.2
+  k_c: 0.0015
+  t_c_ref: 80.0
+  p_cold: 138.0
+  t_cold: 20.0
+wear:
+  k_w: 0.0009
+  w_max: 8.0
+  w_c: 2.0
+  tau_d: 600.0
+  t_deg: 120.0
+  delta_t_ref: 20.0
+  beta: 2.0
+  delta_c: 0.25
+  s_w: 0.5
+  delta_d: 0.30
+provenance:
+  citation: "Pacejka, Tire and Vehicle Dynamics, 3rd ed. (2012), ch. 3 (brush model)"
+  source: "synthetic — generic brush-model tyre"
+  synthetic: true

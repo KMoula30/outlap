@@ -4,6 +4,25 @@ All notable changes to outlap are documented here. This project follows
 [Conventional Commits](https://www.conventionalcommits.org) and
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+Milestone **M2** (tyre model) — in progress, not yet tagged.
+
+### Added
+
+- **tire**: physical **brush model** (Pacejka ch. 3, parabolic pressure) — a first-principles
+  force core (`F_x`, `F_y`, `M_z` with the closed-form pneumatic trail; `M_x = M_y = 0`) from the
+  two tread stiffnesses, base friction, and contact half-length. First-order **relaxation** helper
+  with the exact-exponential update and `PT*`/carcass-stiffness/last-resort relaxation lengths. A
+  static `TireModel` (`Mf61 | Brush`, no `dyn`) selects the force model at assembly. Theory pages
+  `docs/theory/brush-model.md` and the relaxation section of `mf61-steady-state.md`.
+- **schema** (`tyr/1.0 → 1.1`, MINOR): optional `brush:` block on `.tyr` documents (additive JSON
+  Schema change). The required-key rule now splits into always-required structural keys
+  (`FNOMIN`, `UNLOADED_RADIUS`) and the MF6.1 force core, which is required only when no `brush`
+  block is present; a brush block alongside a partial force set is a warning. New diagnostics: a
+  `brush` block under `tyr/1.0` warns, and an unknown key in a file declaring a newer schema MINOR
+  hints at the version.
+
 ## [0.1.0] - 2026-07-03
 
 First tagged milestone (**M1**): the full input-quartet file-format contract, the 3D track model

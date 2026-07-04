@@ -88,5 +88,7 @@ pub mod schema_name {
 
 /// The MAJOR version this build of the loader accepts for every schema (loaders accept same-major).
 pub const SCHEMA_MAJOR: u16 = 1;
-/// The MINOR version this build emits when serializing.
-pub const SCHEMA_MINOR: u16 = 0;
+/// The MINOR version this build emits when serializing, and the highest MINOR it fully understands
+/// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block; an
+/// unknown key in a file that declares a newer MINOR than this is flagged as possibly-newer-schema.
+pub const SCHEMA_MINOR: u16 = 1;

@@ -27,13 +27,22 @@
     clippy::doc_markdown
 )]
 
+pub mod brush;
 pub mod mf61;
+pub mod model;
+pub mod relax;
 pub mod slip;
 
+pub use brush::Brush;
 pub use mf61::params::{Mf61BuildError, Mf61Params};
 pub use mf61::peak::{peak_mu_x, peak_mu_y};
 pub use mf61::Mf61;
+pub use model::{TireBuildError, TireModel};
+pub use relax::{relax_step, Relaxation};
 pub use slip::{SlipState, TireForces};
+
+// Re-export the brush schema block so `outlap_tire::TyrBrush` is a one-stop force-model import.
+pub use outlap_schema::tyr::TyrBrush;
 
 /// The loaded-model report note type (re-exported from `outlap-schema`): parameter-extraction
 /// degradations are reported as these so they merge into the loaded-model report unchanged.

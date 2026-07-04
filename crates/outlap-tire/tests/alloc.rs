@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use outlap_tire::{Mf61, Mf61Params, SlipState};
+use outlap_tire::{relax_step, Brush, Mf61, Mf61Params, Relaxation, SlipState};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -64,18 +64,19 @@ fn full_map() -> BTreeMap<String, f64> {
     pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect()
 }
 
+/// All hot paths share ONE dhat profiler: the testing profiler is process-global, so separate
+/// `#[test]`s would race under the parallel test runner. Each path is measured in its own
+/// before/after window inside the single profiler.
 #[test]
-fn forces_do_not_allocate() {
+fn hot_paths_do_not_allocate() {
     let _profiler = dhat::Profiler::builder().testing().build();
 
+    // --- MF6.1 forces ---
     let (p, _notes) = Mf61Params::<f64>::from_coeffs(&full_map()).unwrap();
-    let model = Mf61::new(p);
-
-    // Warm-up evaluation.
-    let mut sink = model
+    let mf61 = Mf61::new(p);
+    let mut sink = mf61
         .forces(&SlipState::new(0.05, -0.03, 0.01, 4200.0, 210_000.0, 40.0))
         .fx;
-
     let before = dhat::HeapStats::get().total_blocks;
     for i in 0..16 {
         #[allow(clippy::cast_precision_loss)]
@@ -88,11 +89,70 @@ fn forces_do_not_allocate() {
             200_000.0 + 40_000.0 * t,
             5.0 + 60.0 * t,
         );
-        let f = model.forces(&s);
+        let f = mf61.forces(&s);
         sink += f.fx + f.fy + f.mz + f.mx + f.my;
     }
-    let after = dhat::HeapStats::get().total_blocks;
+    assert_eq!(
+        before,
+        dhat::HeapStats::get().total_blocks,
+        "Mf61::forces allocated on the heap"
+    );
 
-    assert_eq!(before, after, "Mf61::forces allocated on the heap");
-    assert!(sink.is_finite());
+    // --- Brush forces ---
+    let brush = Brush::<f64>::new(1.5e5, 1.2e5, 1.3, 0.10);
+    sink += brush
+        .forces(&SlipState::new(0.05, -0.03, 0.01, 4200.0, 210_000.0, 40.0))
+        .fx;
+    let before = dhat::HeapStats::get().total_blocks;
+    for i in 0..16 {
+        #[allow(clippy::cast_precision_loss)]
+        let t = f64::from(i) / 16.0;
+        let s = SlipState::new(
+            -0.2 + 0.4 * t,
+            0.15 - 0.3 * t,
+            0.02 * t,
+            3000.0 + 2000.0 * t,
+            210_000.0,
+            5.0 + 60.0 * t,
+        );
+        let f = brush.forces(&s);
+        sink += f.fx + f.fy + f.mz;
+    }
+    assert_eq!(
+        before,
+        dhat::HeapStats::get().total_blocks,
+        "Brush::forces allocated on the heap"
+    );
+
+    // --- Relaxation: sigma queries + relax_step ---
+    let relax_map: BTreeMap<String, f64> = [
+        ("FNOMIN", 4000.0),
+        ("UNLOADED_RADIUS", 0.33),
+        ("PTX1", 2.3),
+        ("PTX2", 1.9),
+        ("PTX3", 0.24),
+        ("PTY1", 2.1),
+        ("PTY2", 2.0),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_owned(), *v))
+    .collect();
+    let (rparams, _) = Mf61Params::<f64>::from_coeffs(&relax_map).unwrap();
+    let (relax, _) = Relaxation::from_params(&rparams);
+    let mut x = relax_step(0.0, 0.1, 30.0, 1e-3, relax.sigma_kappa(4000.0));
+    let before = dhat::HeapStats::get().total_blocks;
+    for i in 0..16 {
+        #[allow(clippy::cast_precision_loss)]
+        let t = f64::from(i) / 16.0;
+        let fz = 3000.0 + 2000.0 * t;
+        let sigma = relax.sigma_alpha(fz, 0.02 * t);
+        x = relax_step(x, 0.1, 30.0, 1e-3, sigma);
+    }
+    assert_eq!(
+        before,
+        dhat::HeapStats::get().total_blocks,
+        "relax_step / sigma queries allocated on the heap"
+    );
+
+    assert!(sink.is_finite() && x.is_finite());
 }
