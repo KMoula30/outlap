@@ -168,6 +168,20 @@ fn bom_and_crlf_are_tolerated() {
 // --- Round-trips ------------------------------------------------------------------------------
 
 #[test]
+fn canonical_fixture_is_pinned_byte_for_byte() {
+    // The committed canonical form of the synthetic slick — the shared cross-language contract:
+    // the Python codec (python/src/outlap/tir) must produce these exact bytes from the same
+    // input. Regenerate only together with the Python side and a PR note.
+    let content = read_fixture("tir/synthetic_slick.tir");
+    let (doc, _) = parse_tir("t", &content).unwrap();
+    assert_eq!(
+        write_tir(&doc),
+        read_fixture("tir/synthetic_slick.canonical.tir"),
+        "Rust writer no longer matches the committed canonical fixture"
+    );
+}
+
+#[test]
 fn write_then_parse_is_byte_stable() {
     // tir → doc → tir is byte-stable once through the canonical writer (comments/whitespace/order
     // are normalised on the first pass; every pass thereafter is identical).

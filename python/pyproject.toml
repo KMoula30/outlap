@@ -31,6 +31,11 @@ track-import = [
     "scipy>=1.14.0",
     "matplotlib>=3.9.0",
 ]
+# The MF6.1 fitting pipeline (`outlap.tirefit`). scipy is confined to this extra: the fit stages
+# import it lazily and raise an actionable error if absent. Enable with `uv sync --extra tire-fit`.
+tire-fit = [
+    "scipy>=1.14",
+]
 
 [project.scripts]
 outlap = "outlap:main"
@@ -53,3 +58,36 @@ notebooks = [
     "nbclient>=0.10.0",
     "nbformat>=5.10.0",
 ]
+
+[tool.ruff]
+# Existing code is formatted at ruff's default 88; keep it (only comments/strings run longer).
+line-length = 88
+
+[tool.ruff.lint]
+# Defaults (E4/E7/E9/F) plus import sorting, pyupgrade, and bugbear. CI runs
+# `ruff check` + `ruff format --check`.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+include = ["src", "tests"]
+# Curated allows (the Rust crates' "pedantic with curated allows" philosophy): h5py, scipy, and
+# jsonschema ship no stubs, so values crossing those boundaries are Unknown to pyright.
+reportMissingTypeStubs = false
+
+[[tool.pyright.executionEnvironments]]
+# The PDT HDF5 importer + its tests live at the h5py/numpy untyped boundary: silencing the
+# Unknown-type cascade HERE (and only here) keeps strict signal for the rest of the package.
+# Everything else — including all of `outlap.tir`/`outlap.tirefit` — is fully strict.
+root = "src/outlap/importers"
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportUnknownParameterType = false

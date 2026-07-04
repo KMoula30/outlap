@@ -75,9 +75,7 @@ def _load_yaml(path: Path) -> Any:
         return yaml.safe_load(f)
 
 
-def _validate_docs(
-    name: str, docs: list[tuple[str, Path]], errors: list[str]
-) -> int:
+def _validate_docs(name: str, docs: list[tuple[str, Path]], errors: list[str]) -> int:
     """Validate a list of ``(label, path)`` documents against schema ``name``.
 
     Returns the number of documents validated (0 on a schema-level failure).
@@ -99,7 +97,9 @@ def _validate_docs(
             errors.append(f"missing document: {path}")
             continue
         doc = _load_yaml(path)
-        for err in sorted(validator.iter_errors(doc), key=str):
+        # jsonschema's iter_errors overloads are partially untyped; the loop body only
+        # touches attributes we know exist on ValidationError.
+        for err in sorted(validator.iter_errors(doc), key=str):  # pyright: ignore[reportUnknownMemberType]
             loc = "/".join(str(p) for p in err.absolute_path) or "<root>"
             errors.append(f"{label} [{name}] at {loc}: {err.message}")
     return len(docs)

@@ -10,3 +10,7 @@ dist/
 # Reference literature (copyrighted — used for clean-room derivation, never redistributed).
 # Coefficient VALUES are facts we may use and cite; the source PDFs are not committed.
 **/*.pdf
+
+# Local FSAE TTC test data (membership-locked, NON-redistributable). The tirefit parsers read
+# from here; neither raw TTC files nor TTC-derived fitted parameter sets are ever committed.
+ttc-data/

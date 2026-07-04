@@ -15,8 +15,9 @@ Model (§8.5), with copper resistance-rise feedback ``k_cu(T_w) = 1 + α·(T_w �
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
@@ -34,7 +35,7 @@ class TwoNode:
     t_ref: float  # copper feedback reference temperature, °C
     t_cool: float  # coolant/ambient temperature, °C
 
-    def _system(self, power: float) -> tuple[np.ndarray, np.ndarray]:
+    def system(self, power: float) -> tuple[np.ndarray, np.ndarray]:
         """Linear system ``Ṫ = A·T + b`` for constant loss ``power``."""
         a = np.array(
             [
@@ -55,12 +56,12 @@ class TwoNode:
 
     def steady_state(self, power: float) -> np.ndarray:
         """Steady-state ``[T_w, T_c]`` for constant loss ``power`` (°C)."""
-        a, b = self._system(power)
+        a, b = self.system(power)
         return np.linalg.solve(a, -b)
 
     def transient(self, power: float, duration: float, t0: np.ndarray) -> np.ndarray:
         """``[T_w, T_c]`` after ``duration`` s of constant ``power`` from initial ``t0``."""
-        a, b = self._system(power)
+        a, b = self.system(power)
         t_ss = np.linalg.solve(a, -b)
         return t_ss + _expm2(a * duration) @ (t0 - t_ss)
 
@@ -122,7 +123,7 @@ def _objective(theta_log: np.ndarray, base: TwoNode, tg: ThermalTargets) -> floa
         return 1e6
     try:
         model = _safe_model(theta_log, base)
-        a, _ = model._system(float(tg.p_cont.max()))
+        a, _ = model.system(float(tg.p_cont.max()))
         if (
             not np.all(np.isfinite(a)) or a[0, 0] + a[1, 1] >= 0.0
         ):  # non-finite / unstable

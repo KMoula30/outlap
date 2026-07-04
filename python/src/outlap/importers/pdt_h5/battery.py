@@ -144,7 +144,7 @@ def validate_battery_doc(doc: dict[str, Any]) -> None:
         )
     soc = doc["ecm"]["axes"]["soc"]
     temp = doc["ecm"]["axes"]["temp_c"]
-    if any(b <= a for a, b in zip(soc, soc[1:])):
+    if any(b <= a for a, b in zip(soc, soc[1:], strict=False)):
         raise c.PdtImportError("battery soc axis must be strictly ascending")
-    if any(b <= a for a, b in zip(temp, temp[1:])):
+    if any(b <= a for a, b in zip(temp, temp[1:], strict=False)):
         raise c.PdtImportError("battery temp_c axis must be strictly ascending")

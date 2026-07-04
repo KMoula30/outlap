@@ -6,11 +6,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pdt_fixtures as fx
 import pyarrow.parquet as pq
 import pytest
 import yaml
 
-import pdt_fixtures as fx
 from outlap.importers.pdt_h5 import (
     PdtImportError,
     convert_batterypack,
@@ -49,7 +49,7 @@ def test_edrive_converts_and_validates(tmp_path: Path):
     assert doc["axes"]["load_axis"]["torque_nm"] == doc["axes"]["torque_nm"]
     # Speed axis strictly ascending; meta carries alias + hash + vdc.
     sp = doc["axes"]["speed_rpm"]
-    assert all(b > a for a, b in zip(sp, sp[1:]))
+    assert all(b > a for a, b in zip(sp, sp[1:], strict=False))
     assert (
         "synth_edrive" in doc["meta"]["source"]
         and "abcdef123456" in doc["meta"]["source"]
@@ -67,7 +67,7 @@ def test_edrive_spot_efficiencies_reproduce_to_1e6(tmp_path: Path):
     convert_edrive(src, out, vdc=400.0, torque_points=41)
     doc = yaml.safe_load(out.read_text())
     ns, nt = len(doc["axes"]["speed_rpm"]), len(doc["axes"]["torque_nm"])
-    speeds, torques, eff = _read_map(out.with_suffix(".maps.parquet"), ns, nt)
+    _, torques, eff = _read_map(out.with_suffix(".maps.parquet"), ns, nt)
 
     iv = list(truth.vdc).index(400.0)
     checked = 0
@@ -197,7 +197,7 @@ def test_two_node_forward_model():
     assert abs(tw - (tc + 0.7 * p / 6.0)) < 1e-6
     # Transient vs a dense explicit-Euler reference.
     t0 = np.array([65.0, 65.0])
-    a, b = m._system(p)
+    a, b = m.system(p)
     t = t0.copy()
     dt = 1e-3
     for _ in range(int(20.0 / dt)):
@@ -208,7 +208,7 @@ def test_two_node_forward_model():
 def test_nelder_mead_rosenbrock():
     from outlap.importers.pdt_h5.thermal_fit import nelder_mead
 
-    def rosen(x):
+    def rosen(x: np.ndarray) -> float:
         return float((1 - x[0]) ** 2 + 100 * (x[1] - x[0] ** 2) ** 2)
 
     x = nelder_mead(rosen, np.array([-1.2, 1.0]), max_iter=2000)
@@ -260,7 +260,9 @@ def test_cli_all_subcommands(tmp_path: Path):
     assert (tmp_path / "e.ptm.yaml").exists()
 
 
-def test_cli_missing_dataset_errors_cleanly(tmp_path: Path, capsys):
+def test_cli_missing_dataset_errors_cleanly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
     import h5py
 
     bad = tmp_path / "bad.h5"
