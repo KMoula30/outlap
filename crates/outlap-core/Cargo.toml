@@ -9,6 +9,8 @@ num-traits = { workspace = true, features = ["libm"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
+dhat = { workspace = true }
 
 [lints]
 workspace = true

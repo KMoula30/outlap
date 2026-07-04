@@ -49,6 +49,8 @@ pub mod io;
 pub mod load;
 pub mod ptm;
 pub mod refs;
+#[cfg(feature = "parquet")]
+pub mod sidecar;
 pub mod sim;
 pub mod tir;
 pub mod track;
