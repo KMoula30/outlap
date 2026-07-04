@@ -630,6 +630,7 @@ dependencies = [
  "dhat",
  "outlap-core",
  "outlap-schema",
+ "outlap-tire",
  "outlap-track",
  "proptest",
  "thiserror 2.0.18",
