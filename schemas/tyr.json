@@ -4,6 +4,17 @@
   "description": "A tire model.",
   "type": "object",
   "properties": {
+    "brush": {
+      "description": "Optional physical brush-model block (`tyr/1.1`, §7.1). When present, T0 may build a brush\ntire from it; when the MF6.1 force core is also complete, both models are available and the\ntier picks MF6.1. A `brush` block with only a partial MF6.1 force set is a warning, not an\nerror — see [`crate::load::semantic::check_tyr`].",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TyrBrush"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "mf61": {
       "description": "MF6.1 coefficient block (superset of `.tir`, round-trippable).",
       "$ref": "#/$defs/Mf61Coeffs"
@@ -13,7 +24,7 @@
       "$ref": "#/$defs/TyrProvenance"
     },
     "schema": {
-      "description": "Schema version, e.g. `tyr/1.0`.",
+      "description": "Schema version, e.g. `tyr/1.0` (the `brush` block below requires `tyr/1.1`).",
       "$ref": "#/$defs/SchemaVersion"
     },
     "thermal": {
@@ -33,8 +44,18 @@
     "provenance"
   ],
   "$defs": {
+    "BrushPressureProfile": {
+      "description": "The contact-pressure distribution assumed by the brush model along the contact length.",
+      "oneOf": [
+        {
+          "description": "Parabolic pressure `p(x) ∝ 1 − (x/a)²` — the classic brush assumption (the only option).",
+          "type": "string",
+          "const": "parabolic"
+        }
+      ]
+    },
     "Mf61Coeffs": {
-      "description": "MF6.1 (Pacejka 2012) coefficients keyed by their standard `.tir` names, e.g. `PCX1`, `PKY1`.\n\nValidated in the semantic stage: unknown coefficient names produce a did-you-mean warning\n(the spec is silent on the full set, so unknown keys are non-fatal), and any missing member of\n[`REQUIRED_MF61_KEYS`] is a semantic error.",
+      "description": "MF6.1 (Pacejka 2012) coefficients keyed by their standard `.tir` names, e.g. `PCX1`, `PKY1`.\n\nValidated in the semantic stage: unknown coefficient names produce a did-you-mean warning\n(the spec is silent on the full set, so unknown keys are non-fatal); the [`REQUIRED_STRUCTURAL_KEYS`]\nare always mandatory, and the [`REQUIRED_FORCE_KEYS`] are mandatory unless a [`TyrBrush`] block\nsupplies the force model instead.",
       "type": "object",
       "additionalProperties": {
         "type": "number",
@@ -48,6 +69,43 @@
         "vehicle/1.0"
       ],
       "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "TyrBrush": {
+      "description": "Physical brush-model parameters (Pacejka 2012, ch. 3): a first-principles alternative to the\nempirical MF6.1 force core, parameterised by tread stiffnesses, a base friction, and the\ncontact half-length. Introduced at `tyr/1.1`.",
+      "type": "object",
+      "properties": {
+        "c_alpha_n_per_rad": {
+          "description": "Lateral (cornering) tread stiffness `C_α`, N/rad (force per unit slip-angle at the origin).",
+          "type": "number",
+          "format": "double"
+        },
+        "c_kappa_n": {
+          "description": "Longitudinal tread stiffness `C_κ`, N (force per unit slip-ratio at the origin).",
+          "type": "number",
+          "format": "double"
+        },
+        "mu0": {
+          "description": "Base sliding friction coefficient `μ0` (dimensionless; scaled at runtime by `mu_scale_*`).",
+          "type": "number",
+          "format": "double"
+        },
+        "patch_half_length_m": {
+          "description": "Contact-patch half-length `a`, m (sets the closed-form pneumatic trail `t(0) = a/3`).",
+          "type": "number",
+          "format": "double"
+        },
+        "pressure_profile": {
+          "description": "Contact-pressure profile along the patch. Only the classic parabolic profile is modelled.",
+          "$ref": "#/$defs/BrushPressureProfile",
+          "default": "parabolic"
+        }
+      },
+      "required": [
+        "c_kappa_n",
+        "c_alpha_n_per_rad",
+        "mu0",
+        "patch_half_length_m"
+      ]
     },
     "TyrProvenance": {
       "description": "Provenance / citation for a tire dataset.",

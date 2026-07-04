@@ -98,6 +98,94 @@ fn unknown_mf61_coefficient_is_a_warning_not_an_error() {
     );
 }
 
+/// A `.tyr` document with the given schema string, MF6.1 body, and optional brush block. The
+/// thermal/wear/provenance blocks are fixed boilerplate (the brush/force logic is what varies).
+fn tyr_doc(schema: &str, mf61_body: &str, brush_block: &str) -> String {
+    format!(
+        "schema: {schema}\nmf61:\n{mf61_body}{brush_block}thermal:\n  c_s: 8000.0\n  c_c: 22000.0\n  \
+         c_g: 1500.0\n  g_sc: 90.0\n  g_cg: 40.0\n  g_road: 250.0\n  h0: 15.0\n  h1: 5.5\n  \
+         p_t: 0.65\n  t_opt: 95.0\n  c_t: 2.2\n  k_c: 0.0015\n  t_c_ref: 80.0\n  p_cold: 138.0\n  \
+         t_cold: 20.0\nwear:\n  k_w: 0.0009\n  w_max: 8.0\n  w_c: 2.0\n  tau_d: 600.0\n  \
+         t_deg: 120.0\n  delta_t_ref: 20.0\n  beta: 2.0\n  delta_c: 0.25\n  s_w: 0.5\n  \
+         delta_d: 0.30\nprovenance:\n  citation: \"x\"\n  source: \"y\"\n  synthetic: true\n"
+    )
+}
+
+const BRUSH_BLOCK: &str = "brush:\n  c_kappa_n: 150000.0\n  c_alpha_n_per_rad: 120000.0\n  \
+                           mu0: 1.2\n  patch_half_length_m: 0.1\n";
+
+#[test]
+fn brush_under_tyr_1_0_warns() {
+    // A brush block is a tyr/1.1 feature; declaring tyr/1.0 is a warning, not an error.
+    let yaml = tyr_doc(
+        "tyr/1.0",
+        "  FNOMIN: 4000.0\n  UNLOADED_RADIUS: 0.33\n",
+        BRUSH_BLOCK,
+    );
+    let l = MemLoader::new().with("t.tyr.yaml", yaml);
+    let (_, warnings) = load_tyr("t.tyr.yaml", &l).expect("brush under 1.0 still loads");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.detail.contains("requires schema `tyr/1.1`")),
+        "expected a brush-minor warning: {warnings:?}"
+    );
+}
+
+#[test]
+fn partial_force_core_with_brush_warns() {
+    // A brush block plus a partial (incomplete) MF6.1 force set → warning, and the brush is used.
+    let yaml = tyr_doc(
+        "tyr/1.1",
+        "  FNOMIN: 4000.0\n  UNLOADED_RADIUS: 0.33\n  PCX1: 1.6\n  PDX1: 1.3\n",
+        BRUSH_BLOCK,
+    );
+    let l = MemLoader::new().with("t.tyr.yaml", yaml);
+    let (_, warnings) = load_tyr("t.tyr.yaml", &l).expect("partial force + brush still loads");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.detail.contains("partial MF6.1 force")),
+        "expected a partial-force warning: {warnings:?}"
+    );
+}
+
+#[test]
+fn partial_force_core_without_brush_is_an_error() {
+    // The same partial force set WITHOUT a brush block is a hard semantic error.
+    let yaml = tyr_doc(
+        "tyr/1.1",
+        "  FNOMIN: 4000.0\n  UNLOADED_RADIUS: 0.33\n  PCX1: 1.6\n  PDX1: 1.3\n",
+        "",
+    );
+    let l = MemLoader::new().with("t.tyr.yaml", yaml);
+    match load_tyr("t.tyr.yaml", &l).unwrap_err() {
+        SchemaError::Semantic { message, .. } => {
+            assert!(
+                message.contains("PEX1") || message.contains("PCY1"),
+                "message: {message}"
+            );
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_key_in_newer_minor_hints_at_schema_version() {
+    // An unknown top-level key in a file that declares a newer MINOR than this build supports:
+    // the error hint should point at the newer schema version rather than a bogus did-you-mean.
+    let yaml = "schema: tyr/1.9\nwibble: 3\nmf61:\n  FNOMIN: 4000.0\n";
+    let l = MemLoader::new().with("t.tyr.yaml", yaml);
+    match load_tyr("t.tyr.yaml", &l).unwrap_err() {
+        SchemaError::UnknownField { field, help, .. } => {
+            assert_eq!(field, "wibble");
+            let help = help.expect("a hint");
+            assert!(help.contains("newer schema"), "help: {help}");
+        }
+        other => panic!("expected UnknownField, got {other:?}"),
+    }
+}
+
 #[test]
 fn type_mismatch_reports_path_and_span() {
     // mass_kg is a string where a number is required.

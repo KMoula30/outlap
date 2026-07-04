@@ -110,11 +110,47 @@ pure, allocation-free (dhat-gated in CI) and generic over `f32`/`f64`.
   reproducible in `tools/goldens/`. This cross-check is what caught the `Mz` camber/`s·Fx`
   subtleties noted above.
 
+## First-order relaxation (transient lag)
+
+A tyre does not reach its steady-state slip force instantly: the contact patch must roll a
+*relaxation length* `σ` before the deflection catches up, so each slip channel `x ∈ {κ, α}` obeys
+
+```
+σ·ẋ + |V_x|·x = |V_x|·x_ss
+```
+
+(Pacejka 2012 §7.2 / §8.5). `outlap-tire`'s `relax` module advances this with the
+**exact-exponential** update (HANDOFF §11.2), which is unconditionally stable at every speed and
+needs no implicit solve — the single most important integrator decision:
+
+```
+x ← x_ss + (x − x_ss)·exp(−|V_x|·dt/σ)
+```
+
+The relaxation lengths come from the MF5.2 `PT*` transient coefficients when present (forms marked
+`(~)`, to be re-checked against the book):
+
+```
+σ_κ = F_z·(PTX1 + PTX2·dfz)·exp(−PTX3·dfz)·(R0/FNOMIN)·λσκ
+σ_α = PTY1·sin(2·atan(F_z/(PTY2·F'_z0)))·(1 − PKY3·|γ*|)·R0·λFz0·λσα
+```
+
+If the `PT*` set is absent, they fall back to the carcass-stiffness identity `σ = K_slip / C_carcass`
+(`LONGITUDINAL_STIFFNESS`/`LATERAL_STIFFNESS`), and, failing even that, to a loud last-resort
+`0.5·R0` recorded in the loaded-model report. Every length is floored at `σ_min = 10⁻³ m` and the
+caller passes `|V_x|.max(VXLOW)` so a standstill still relaxes. Property tests pin the update as a
+contraction (`|x − x_ss|` never grows for `dt ≥ 0`), exact against the analytic ratio, and
+composable (two half-steps equal one full step); the `relax_step` and length queries are
+dhat-gated allocation-free. Consumed by the transient tiers (T2/T3); the QSS tiers use the
+steady-state forces directly.
+
 ## References
 
 - H. B. Pacejka, *Tire and Vehicle Dynamics*, 3rd ed., Butterworth-Heinemann, 2012 — Chapter 4
   §4.3.2 "Full set of equations" (4.E1–4.E78): the complete MF6.1 steady-state model, including
-  the inflation-pressure extensions.
+  the inflation-pressure extensions. Chapter 7 (§7.2) / Chapter 8 (§8.5): first-order relaxation
+  and the relaxation-length coefficients. Chapter 3: the physical brush model (see
+  [`brush-model.md`](brush-model.md)).
 - I. J. M. Besselink, A. J. C. Schmeitz, H. B. Pacejka, *An improved Magic Formula/Swift tyre
   model that can handle inflation pressure changes*, Vehicle System Dynamics 48(S1), 2010 — the
   pressure terms (`PPX*`, `PPY*`, `PPZ*`, `PPMX1`) folded into MF6.1.

@@ -19,10 +19,16 @@ use crate::version::SchemaVersion;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Tyr {
-    /// Schema version, e.g. `tyr/1.0`.
+    /// Schema version, e.g. `tyr/1.0` (the `brush` block below requires `tyr/1.1`).
     pub schema: SchemaVersion,
     /// MF6.1 coefficient block (superset of `.tir`, round-trippable).
     pub mf61: Mf61Coeffs,
+    /// Optional physical brush-model block (`tyr/1.1`, §7.1). When present, T0 may build a brush
+    /// tire from it; when the MF6.1 force core is also complete, both models are available and the
+    /// tier picks MF6.1. A `brush` block with only a partial MF6.1 force set is a warning, not an
+    /// error — see [`crate::load::semantic::check_tyr`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brush: Option<TyrBrush>,
     /// Thermal-ring parameters (§7.2).
     pub thermal: TyrThermal,
     /// Wear/cliff parameters (§7.3).
@@ -31,11 +37,40 @@ pub struct Tyr {
     pub provenance: TyrProvenance,
 }
 
+/// Physical brush-model parameters (Pacejka 2012, ch. 3): a first-principles alternative to the
+/// empirical MF6.1 force core, parameterised by tread stiffnesses, a base friction, and the
+/// contact half-length. Introduced at `tyr/1.1`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TyrBrush {
+    /// Longitudinal tread stiffness `C_κ`, N (force per unit slip-ratio at the origin).
+    pub c_kappa_n: f64,
+    /// Lateral (cornering) tread stiffness `C_α`, N/rad (force per unit slip-angle at the origin).
+    pub c_alpha_n_per_rad: f64,
+    /// Base sliding friction coefficient `μ0` (dimensionless; scaled at runtime by `mu_scale_*`).
+    pub mu0: f64,
+    /// Contact-patch half-length `a`, m (sets the closed-form pneumatic trail `t(0) = a/3`).
+    pub patch_half_length_m: f64,
+    /// Contact-pressure profile along the patch. Only the classic parabolic profile is modelled.
+    #[serde(default)]
+    pub pressure_profile: BrushPressureProfile,
+}
+
+/// The contact-pressure distribution assumed by the brush model along the contact length.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrushPressureProfile {
+    /// Parabolic pressure `p(x) ∝ 1 − (x/a)²` — the classic brush assumption (the only option).
+    #[default]
+    Parabolic,
+}
+
 /// MF6.1 (Pacejka 2012) coefficients keyed by their standard `.tir` names, e.g. `PCX1`, `PKY1`.
 ///
 /// Validated in the semantic stage: unknown coefficient names produce a did-you-mean warning
-/// (the spec is silent on the full set, so unknown keys are non-fatal), and any missing member of
-/// [`REQUIRED_MF61_KEYS`] is a semantic error.
+/// (the spec is silent on the full set, so unknown keys are non-fatal); the [`REQUIRED_STRUCTURAL_KEYS`]
+/// are always mandatory, and the [`REQUIRED_FORCE_KEYS`] are mandatory unless a [`TyrBrush`] block
+/// supplies the force model instead.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct Mf61Coeffs(pub BTreeMap<String, f64>);
@@ -115,23 +150,22 @@ pub struct TyrProvenance {
     pub synthetic: bool,
 }
 
-/// The required-core MF6.1 coefficients: a document missing any of these is a semantic error.
-///
-/// These are the minimal Pacejka pure-slip shape/peak/stiffness coefficients plus the nominal
-/// operating point without which no force can be evaluated.
-pub const REQUIRED_MF61_KEYS: &[&str] = &[
-    "FNOMIN",
-    "UNLOADED_RADIUS",
+/// The `tyr` MINOR version at which the optional [`TyrBrush`] block was introduced. A file that
+/// carries a `brush` block but declares an older MINOR (e.g. `tyr/1.0`) gets a warning.
+pub const TYR_MINOR_BRUSH: u16 = 1;
+
+/// Structural coefficients required of *every* `.tyr` document — the nominal load and radius that
+/// both the MF6.1 and brush models need. A document missing either is a semantic error.
+pub const REQUIRED_STRUCTURAL_KEYS: &[&str] = &["FNOMIN", "UNLOADED_RADIUS"];
+
+/// The MF6.1 pure-slip force core (shape/peak/curvature/stiffness for `Fx0` and `Fy0`). Required
+/// only when no [`TyrBrush`] block is present: a brush-only tire evaluates forces without them.
+/// A file that carries a `brush` block *and* a partial (non-empty, incomplete) force set is a
+/// warning — the brush model is used and the stray coefficients are ignored.
+pub const REQUIRED_FORCE_KEYS: &[&str] = &[
     // Longitudinal pure slip (Fx0).
-    "PCX1",
-    "PDX1",
-    "PEX1",
-    "PKX1",
-    // Lateral pure slip (Fy0).
-    "PCY1",
-    "PDY1",
-    "PEY1",
-    "PKY1",
+    "PCX1", "PDX1", "PEX1", "PKX1", // Lateral pure slip (Fy0).
+    "PCY1", "PDY1", "PEY1", "PKY1",
 ];
 
 /// The full set of MF6.1 coefficient names recognized by this loader (Pacejka 2012 / `.tir`).

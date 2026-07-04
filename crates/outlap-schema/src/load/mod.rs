@@ -78,10 +78,18 @@ pub fn load_vehicle_with(
     let root_tree =
         tree::parse(root_id, &sources).map_err(|e| merge::parse_to_error(e, &sources))?;
     // Stage 2: version gate (root must be a vehicle of this major).
-    version_gate(&root_tree, schema_name::VEHICLE, root_id, &sources)?;
+    let version = version_gate(&root_tree, schema_name::VEHICLE, root_id, &sources)?;
     // Stage 3: resolve extends chain + merge + overrides + provenance.
     let (merged, provenance) = merge::resolve(root_tree, root_id, overrides, loader, &mut sources)?;
-    finish(&merged, root_id, provenance, loader, &mut sources, options)
+    finish(
+        &merged,
+        root_id,
+        version.minor,
+        provenance,
+        loader,
+        &mut sources,
+        options,
+    )
 }
 
 /// Resolve an in-memory [`Vehicle`] with dotted-path overrides, running stages 3–9. The `extends`
@@ -104,7 +112,16 @@ pub fn resolve_vehicle(
     let root_id = sources.add("<in-memory>", value.to_string());
     let tree = merge::value_to_tree(&value, root_id);
     let (merged, provenance) = merge::resolve(tree, root_id, overrides, loader, &mut sources)?;
-    finish(&merged, root_id, provenance, loader, &mut sources, options)
+    // An in-memory doc carries no version string; it is by construction this build's MINOR.
+    finish(
+        &merged,
+        root_id,
+        crate::SCHEMA_MINOR,
+        provenance,
+        loader,
+        &mut sources,
+        options,
+    )
 }
 
 /// Stages 4–9: unknown-key walk → deserialize → semantic → referenced files → topology →
@@ -112,6 +129,7 @@ pub fn resolve_vehicle(
 fn finish(
     merged: &Tree,
     root_id: SourceId,
+    root_minor: u16,
     mut provenance: ProvenanceMap,
     loader: &dyn SourceLoader,
     sources: &mut Sources,
@@ -121,7 +139,14 @@ fn finish(
 
     // Stage 4/5: value + spans, capture extensions, unknown walk, deserialize.
     let (mut value, index) = tree::to_value(merged);
-    unknown::check::<Vehicle>(&value, &index, sources, root_id, &mut report.warnings)?;
+    unknown::check::<Vehicle>(
+        &value,
+        &index,
+        sources,
+        root_id,
+        root_minor,
+        &mut report.warnings,
+    )?;
     unknown::capture_top_level_extensions(&mut value);
     let mut spec: Vehicle = deserialize(&value, &index, sources, root_id)?;
 
@@ -207,16 +232,22 @@ fn load_typed<T: DeserializeOwned + schemars::JsonSchema>(
     let content = merge::load_with_fallback(path, loader)?;
     let id = sources.add(path, content);
     let tree = tree::parse(id, sources).map_err(|e| merge::parse_to_error(e, sources))?;
-    version_gate(&tree, expected_schema, id, sources)?;
+    let version = version_gate(&tree, expected_schema, id, sources)?;
     let (value, index) = tree::to_value(&tree);
     let mut warnings = Vec::new();
-    unknown::check::<T>(&value, &index, sources, id, &mut warnings)?;
+    unknown::check::<T>(&value, &index, sources, id, version.minor, &mut warnings)?;
     let typed: T = deserialize(&value, &index, sources, id)?;
     Ok((typed, id, index, value))
 }
 
-/// Stage 2 — read the `schema:` version from a parsed tree and check name + major.
-fn version_gate(tree: &Tree, expected_name: &str, id: SourceId, sources: &Sources) -> Result<()> {
+/// Stage 2 — read the `schema:` version from a parsed tree and check name + major. Returns the
+/// parsed version so callers can use its MINOR (e.g. to flag unknown keys as possibly-newer-schema).
+fn version_gate(
+    tree: &Tree,
+    expected_name: &str,
+    id: SourceId,
+    sources: &Sources,
+) -> Result<crate::version::SchemaVersion> {
     let entry = tree.get("schema").ok_or_else(|| {
         SchemaError::version(
             sources,
@@ -272,7 +303,7 @@ fn version_gate(tree: &Tree, expected_name: &str, id: SourceId, sources: &Source
             Some("run `outlap migrate` to update the file".into()),
         ));
     }
-    Ok(())
+    Ok(version)
 }
 
 /// Stage 5 — deserialize a value into `T`, mapping any error path to a source span.

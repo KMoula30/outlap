@@ -21,11 +21,15 @@ use crate::load::report::ReportEntry;
 use crate::tree::SpanIndex;
 
 /// Walk `value` (a document of type `T`) against `T`'s JSON Schema, reporting unknown keys.
+///
+/// `doc_minor` is the file's declared schema MINOR; when it exceeds [`crate::SCHEMA_MINOR`] an
+/// unknown-key error gains a hint that the key may be a field added in a newer schema version.
 pub fn check<T: JsonSchema>(
     value: &Value,
     index: &SpanIndex,
     sources: &Sources,
     file: SourceId,
+    doc_minor: u16,
     warnings: &mut Vec<ReportEntry>,
 ) -> Result<()> {
     let root = schemars::schema_for!(T).to_value();
@@ -39,6 +43,7 @@ pub fn check<T: JsonSchema>(
         index,
         sources,
         file,
+        doc_minor,
     };
     ctx.walk(value, &root, "")?;
     // Collect x-* warnings on a second, cheap pass at every object level.
@@ -51,6 +56,7 @@ struct Ctx<'a> {
     index: &'a SpanIndex,
     sources: &'a Sources,
     file: SourceId,
+    doc_minor: u16,
 }
 
 impl Ctx<'_> {
@@ -58,6 +64,19 @@ impl Ctx<'_> {
         self.index
             .span_for(pointer)
             .unwrap_or_else(|| SrcSpan::blank(self.file))
+    }
+
+    /// A hint for the case where the file declares a newer schema MINOR than this build supports —
+    /// an unknown key may simply be a field added in that newer version.
+    fn newer_schema_hint(&self) -> Option<String> {
+        (self.doc_minor > crate::SCHEMA_MINOR).then(|| {
+            format!(
+                "the file declares schema minor {} but this build supports up to minor {}; this key \
+                 may be a field added in a newer schema version",
+                self.doc_minor,
+                crate::SCHEMA_MINOR,
+            )
+        })
     }
 
     fn resolve<'s>(&'s self, schema: &'s Value) -> &'s Value {
@@ -89,7 +108,8 @@ impl Ctx<'_> {
                                 key,
                                 allowed.iter().map(String::as_str),
                             )
-                            .map(|s| format!("did you mean `{s}`?"));
+                            .map(|s| format!("did you mean `{s}`?"))
+                            .or_else(|| self.newer_schema_hint());
                             let child_ptr =
                                 format!("{pointer}/{}", crate::tree::escape_pointer(key));
                             return Err(SchemaError::unknown_field(

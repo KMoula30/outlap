@@ -317,7 +317,8 @@ pub fn check_ptm(
     Ok(())
 }
 
-/// Semantic checks for a `.tyr` document. Returns non-fatal warnings (unknown MF6.1 keys).
+/// Semantic checks for a `.tyr` document. Returns non-fatal warnings (unknown MF6.1 keys, a brush
+/// block under an old MINOR, a partial MF6.1 force set alongside a brush block).
 pub fn check_tyr(
     t: &crate::tyr::Tyr,
     index: &SpanIndex,
@@ -326,8 +327,8 @@ pub fn check_tyr(
     warnings: &mut Vec<ReportEntry>,
 ) -> Result<()> {
     let s = Spans { index, file };
-    // Required-core coefficients.
-    for key in tyr::REQUIRED_MF61_KEYS {
+    // Structural coefficients are always required.
+    for key in tyr::REQUIRED_STRUCTURAL_KEYS {
         if !t.mf61.0.contains_key(*key) {
             return Err(SchemaError::semantic(
                 sources,
@@ -336,6 +337,72 @@ pub fn check_tyr(
                 None,
             ));
         }
+    }
+    // The MF6.1 force core is required unless a brush block supplies the force model instead.
+    let force_present = tyr::REQUIRED_FORCE_KEYS
+        .iter()
+        .filter(|k| t.mf61.0.contains_key(**k))
+        .count();
+    let force_full = force_present == tyr::REQUIRED_FORCE_KEYS.len();
+    match (&t.brush, force_full) {
+        // No brush and an incomplete force core → hard error (an MF6.1 tire needs all of it).
+        (None, false) => {
+            let missing = tyr::REQUIRED_FORCE_KEYS
+                .iter()
+                .find(|k| !t.mf61.0.contains_key(**k))
+                .expect("force set is incomplete");
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/mf61"),
+                format!("MF6.1 block is missing required coefficient `{missing}`"),
+                Some("a force-model tire needs the full pure-slip core, or add a `brush:` block for a brush-model tire".into()),
+            ));
+        }
+        // Brush present with a partial (non-empty, incomplete) force core → warning.
+        (Some(_), false) if force_present > 0 => {
+            warnings.push(ReportEntry::new(
+                "/mf61",
+                "partial MF6.1 force coefficients alongside a `brush` block — the brush model is \
+                 used and the incomplete MF6.1 set is ignored",
+            ));
+        }
+        _ => {}
+    }
+    // A brush block requires `tyr/1.1`; warn if the file declares an older MINOR.
+    if t.brush.is_some() && t.schema.minor < tyr::TYR_MINOR_BRUSH {
+        warnings.push(ReportEntry::new(
+            "/brush",
+            format!(
+                "`brush` block requires schema `tyr/1.{}` but the file declares `{}`",
+                tyr::TYR_MINOR_BRUSH,
+                t.schema
+            ),
+        ));
+    }
+    // Brush field ranges (a present block must be physical).
+    if let Some(b) = &t.brush {
+        positive(
+            b.c_kappa_n,
+            "brush.c_kappa_n",
+            "/brush/c_kappa_n",
+            &s,
+            sources,
+        )?;
+        positive(
+            b.c_alpha_n_per_rad,
+            "brush.c_alpha_n_per_rad",
+            "/brush/c_alpha_n_per_rad",
+            &s,
+            sources,
+        )?;
+        positive(b.mu0, "brush.mu0", "/brush/mu0", &s, sources)?;
+        positive(
+            b.patch_half_length_m,
+            "brush.patch_half_length_m",
+            "/brush/patch_half_length_m",
+            &s,
+            sources,
+        )?;
     }
     // Unknown coefficients → warning with did-you-mean.
     for name in t.mf61.0.keys() {

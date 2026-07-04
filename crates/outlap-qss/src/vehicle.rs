@@ -15,7 +15,7 @@ use outlap_schema::ptm::TorqueCurve;
 use outlap_schema::tyr::Tyr;
 use outlap_schema::vehicle::{Coupler, Efficiency, Gearbox};
 use outlap_schema::ResolvedVehicle;
-use outlap_tire::{peak_mu_x, peak_mu_y, Mf61};
+use outlap_tire::TireModel;
 
 use crate::error::T0Error;
 use crate::DEFAULT_DS_M;
@@ -118,16 +118,23 @@ impl T0Vehicle {
         let mut notes = Vec::new();
 
         // --- Tyres: friction coefficients (mean of axles) + driven-axle radii ---
-        // μ comes from the validated MF6.1 pure-slip curve peaks at the nominal load and the cold
-        // inflation pressure (γ = 0), not the raw PD*·LMU* factors: this folds in the load/pressure
-        // shape factors and matches the force the tyre model would actually produce at T0's design
-        // point. The peak extractors already fix γ = 0 and V_cx = LONGVL internally.
+        // μ comes from the validated tyre force model at the nominal load and cold inflation
+        // pressure (γ = 0), not the raw PD*·LMU* factors: for MF6.1 the pure-slip curve peaks fold
+        // in the load/pressure shape factors (the extractors fix γ = 0 and V_cx = LONGVL); for a
+        // brush-only tyre the peak is the base friction μ0. Partial force sets never reach here —
+        // schema validation rejects an incomplete MF6.1 core without a `brush` block.
         let (front, _) = load_tyr(spec.tires.front.as_str(), loader)?;
         let (rear, _) = load_tyr(spec.tires.rear.as_str(), loader)?;
-        let (mf_front, _) = Mf61::<f64>::from_tyr(&front)?;
-        let (mf_rear, _) = Mf61::<f64>::from_tyr(&rear)?;
-        let mu_x = 0.5 * (axle_mu_x(&mf_front, &front) + axle_mu_x(&mf_rear, &rear));
-        let mu_y = 0.5 * (axle_mu_y(&mf_front, &front) + axle_mu_y(&mf_rear, &rear));
+        let (tm_front, front_notes) = TireModel::<f64>::from_tyr(&front)?;
+        let (tm_rear, rear_notes) = TireModel::<f64>::from_tyr(&rear)?;
+        let mu_x = 0.5 * (axle_mu_x(&tm_front, &front) + axle_mu_x(&tm_rear, &rear));
+        let mu_y = 0.5 * (axle_mu_y(&tm_front, &front) + axle_mu_y(&tm_rear, &rear));
+        // Surface any tyre-model notes (e.g. a brush tyre's Mx=My=0 / ignored camber) once.
+        for n in front_notes.iter().chain(&rear_notes) {
+            if !notes.contains(&n.detail) {
+                notes.push(n.detail.clone());
+            }
+        }
         let r_front = coeff(&front, "UNLOADED_RADIUS", 0.33);
         let r_rear = coeff(&rear, "UNLOADED_RADIUS", 0.33);
 
@@ -247,14 +254,15 @@ impl T0Vehicle {
     }
 }
 
-/// Peak longitudinal μ from the MF6.1 pure-slip curve at the nominal load and cold pressure.
-fn axle_mu_x(model: &Mf61<f64>, tyr: &Tyr) -> f64 {
-    peak_mu_x(model, model.params().fnomin, cold_pressure_pa(tyr))
+/// Peak longitudinal μ from the tyre force model at the nominal load and cold pressure (MF6.1:
+/// pure-slip curve peak; brush: the base friction μ0, which ignores load/pressure).
+fn axle_mu_x(model: &TireModel<f64>, tyr: &Tyr) -> f64 {
+    model.peak_mu_x(coeff(tyr, "FNOMIN", 0.0), cold_pressure_pa(tyr))
 }
 
-/// Peak lateral μ from the MF6.1 pure-slip curve at the nominal load and cold pressure.
-fn axle_mu_y(model: &Mf61<f64>, tyr: &Tyr) -> f64 {
-    peak_mu_y(model, model.params().fnomin, cold_pressure_pa(tyr))
+/// Peak lateral μ from the tyre force model at the nominal load and cold pressure.
+fn axle_mu_y(model: &TireModel<f64>, tyr: &Tyr) -> f64 {
+    model.peak_mu_y(coeff(tyr, "FNOMIN", 0.0), cold_pressure_pa(tyr))
 }
 
 /// The cold inflation pressure in Pa (schema stores `thermal.p_cold` in kPa; kPa→Pa at the seam).

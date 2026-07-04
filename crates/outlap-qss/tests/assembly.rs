@@ -49,6 +49,9 @@ fn assembles_f1_2026() {
 // is reused from the schema fixtures (all MF6.1 required keys); only the vehicle + a flat ptm are
 // authored here.
 const SLICK: &str = include_str!("../../outlap-schema/tests/fixtures/tyr/slick.tyr.yaml");
+const BRUSH_ONLY: &str = include_str!("../../outlap-schema/tests/fixtures/tyr/brush_only.tyr.yaml");
+const BRUSH_PLUS_MF61: &str =
+    include_str!("../../outlap-schema/tests/fixtures/tyr/brush_plus_mf61.tyr.yaml");
 
 const FLAT_PTM: &str = "\
 schema: ptm/1.0
@@ -198,6 +201,54 @@ fn pressure_sensitive_tyre_mu_differs_from_pdx1() {
     );
     assert!(close(t0.mu_x, expect_mu_x, 1e-6), "μx {}", t0.mu_x);
     assert!(close(t0.mu_y, expect_mu_y, 1e-6), "μy {}", t0.mu_y);
+}
+
+#[test]
+fn brush_only_tyre_uses_mu0() {
+    let vehicle = EV_VEHICLE.replace("tyr/slick.tyr.yaml", "tyr/brush.tyr.yaml");
+    let loader = MemLoader::new()
+        .with("vehicle.yaml", &vehicle)
+        .with("ptm/flat.ptm.yaml", FLAT_PTM)
+        .with("tyr/brush.tyr.yaml", BRUSH_ONLY);
+    let v = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
+    let t0 =
+        T0Vehicle::assemble(&v, &Conditions::default(), &loader, &T0Options::default()).unwrap();
+
+    // Brush-only: no MF6.1 force core, so μx = μy = μ0 (1.20) — not a curve scan.
+    assert!(close(t0.mu_x, 1.20, 1e-9), "mu_x {}", t0.mu_x);
+    assert!(close(t0.mu_y, 1.20, 1e-9), "mu_y {}", t0.mu_y);
+    // The brush tier surfaces its Mx = My = 0 / ignored-camber note.
+    assert!(
+        t0.notes().iter().any(|n| n.contains("brush force model")),
+        "brush note missing: {:?}",
+        t0.notes()
+    );
+}
+
+#[test]
+fn brush_plus_mf61_tyre_prefers_mf61() {
+    let vehicle = EV_VEHICLE.replace("tyr/slick.tyr.yaml", "tyr/both.tyr.yaml");
+    let loader = MemLoader::new()
+        .with("vehicle.yaml", &vehicle)
+        .with("ptm/flat.ptm.yaml", FLAT_PTM)
+        .with("tyr/both.tyr.yaml", BRUSH_PLUS_MF61);
+    let v = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
+    let t0 =
+        T0Vehicle::assemble(&v, &Conditions::default(), &loader, &T0Options::default()).unwrap();
+
+    // Full MF6.1 core present ⇒ tier picks MF6.1 (peak μ = PDX1/PDY1), NOT the brush μ0 = 0.90.
+    assert!(
+        close(t0.mu_x, 1.30, 1e-9),
+        "mu_x {} (should be MF6.1 peak, not brush μ0)",
+        t0.mu_x
+    );
+    assert!(close(t0.mu_y, 1.25, 1e-9), "mu_y {}", t0.mu_y);
+    // No brush note: the brush block is present but unused at this tier.
+    assert!(
+        !t0.notes().iter().any(|n| n.contains("brush force model")),
+        "brush model should be unused: {:?}",
+        t0.notes()
+    );
 }
 
 #[test]
