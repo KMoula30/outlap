@@ -6,6 +6,7 @@ license.workspace = true
 description = "outlap file-format contract: serde + schemars types and the vehicle load/validation pipeline"
 
 [dependencies]
+outlap-core = { path = "../outlap-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
@@ -16,14 +17,21 @@ serde_path_to_error = { workspace = true }
 strsim = { workspace = true }
 ryu = { workspace = true }
 blake3 = { workspace = true }
+# Binary-sidecar (parquet) decode is opt-in and NOT wasm-clean, so it is gated behind the
+# `parquet` feature (off for the wasm builds of raceline/tire). Minimal features: SNAPPY only —
+# the importers write snappy-compressed DOUBLE columns and nothing else.
+parquet = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 
 [features]
-default = ["std"]
+default = ["std", "parquet"]
 # `std` gates the filesystem SourceLoader; the crate is otherwise wasm-clean.
 std = []
+# `parquet` gates the binary-sidecar decoder (`sidecar` module). Implies `std`.
+parquet = ["dep:parquet", "dep:bytes", "std"]
 
 [[bin]]
 name = "gen_schemas"

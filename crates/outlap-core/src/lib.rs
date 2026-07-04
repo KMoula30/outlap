@@ -16,8 +16,10 @@
     clippy::similar_names
 )]
 
+pub mod gridmap;
 pub mod interp;
 pub mod spline;
 
+pub use gridmap::{EvalFlags, GridMapError, GriddedMapN, GriddedTable, OutOfDomain, MAX_DIMS};
 pub use interp::{InterpError, MonotoneCubic};
 pub use spline::{CubicSpline, SplineError};

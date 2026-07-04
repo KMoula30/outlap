@@ -124,7 +124,11 @@ impl<T: Float> MonotoneCubic<T> {
 }
 
 /// Fritsch–Carlson (1980) monotone tangent computation.
-fn fritsch_carlson_tangents<T: Float>(xs: &[T], ys: &[T]) -> Vec<T> {
+///
+/// Shared with the N-D tensor-product interpolant ([`crate::gridmap`], Decision #30): the same
+/// tangent limiter computes the per-axis node tangents (and, applied recursively, the mixed
+/// partials) of an [`crate::gridmap::GriddedMapN`].
+pub(crate) fn fritsch_carlson_tangents<T: Float>(xs: &[T], ys: &[T]) -> Vec<T> {
     let n = xs.len();
     // Secant slopes Δ_k on each interval.
     let mut delta = Vec::with_capacity(n - 1);
@@ -171,7 +175,7 @@ fn fritsch_carlson_tangents<T: Float>(xs: &[T], ys: &[T]) -> Vec<T> {
 }
 
 /// Cubic Hermite basis on the unit interval: `(h00, h10, h01, h11)`.
-fn hermite_basis<T: Float>(t: T) -> (T, T, T, T) {
+pub(crate) fn hermite_basis<T: Float>(t: T) -> (T, T, T, T) {
     let t2 = t * t;
     let t3 = t2 * t;
     let two = T::from(2).unwrap();
@@ -184,7 +188,7 @@ fn hermite_basis<T: Float>(t: T) -> (T, T, T, T) {
 }
 
 /// Derivatives w.r.t. `t` of the cubic Hermite basis: `(h00', h10', h01', h11')`.
-fn hermite_basis_deriv<T: Float>(t: T) -> (T, T, T, T) {
+pub(crate) fn hermite_basis_deriv<T: Float>(t: T) -> (T, T, T, T) {
     let t2 = t * t;
     let two = T::from(2).unwrap();
     let three = T::from(3).unwrap();
