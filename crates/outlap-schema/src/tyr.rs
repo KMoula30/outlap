@@ -137,8 +137,11 @@ pub const REQUIRED_MF61_KEYS: &[&str] = &[
 /// The full set of MF6.1 coefficient names recognized by this loader (Pacejka 2012 / `.tir`).
 ///
 /// Coefficients outside this set are accepted but flagged with a did-you-mean warning, since the
-/// spec does not fix the complete list. This set covers the standard structural, longitudinal,
-/// lateral, aligning-moment, overturning, rolling-resistance, and scaling families.
+/// spec does not fix the complete list. This set covers the MF6.1 model coefficient families:
+/// structural/nominal, longitudinal, lateral, aligning-moment, overturning, rolling-resistance,
+/// first-order relaxation, carcass stiffness, and scaling. The non-coefficient `.tir` housekeeping
+/// keys (dimensions, inertia, vertical, operating ranges) are the `.tir` codec's concern and are
+/// recognized there, not here.
 pub const KNOWN_MF61_KEYS: &[&str] = &[
     // Structural / nominal.
     "FNOMIN",
@@ -148,6 +151,7 @@ pub const KNOWN_MF61_KEYS: &[&str] = &[
     "VERTICAL_STIFFNESS",
     "NOMPRES",
     "LONGVL",
+    "VXLOW",
     // Longitudinal force, pure slip (Fx0).
     "PCX1",
     "PDX1",
@@ -267,6 +271,7 @@ pub const KNOWN_MF61_KEYS: &[&str] = &[
     "QSX9",
     "QSX10",
     "QSX11",
+    "PPMX1",
     // Rolling resistance (My).
     "QSY1",
     "QSY2",
@@ -276,6 +281,21 @@ pub const KNOWN_MF61_KEYS: &[&str] = &[
     "QSY6",
     "QSY7",
     "QSY8",
+    // First-order relaxation lengths (σ_κ / σ_α transients, §7.1).
+    "PTX1",
+    "PTX2",
+    "PTX3",
+    "PTY1",
+    "PTY2",
+    // Carcass / structural stiffness (`.tir [STRUCTURAL]`; σ fallback route).
+    "LONGITUDINAL_STIFFNESS",
+    "LATERAL_STIFFNESS",
+    "PCFX1",
+    "PCFX2",
+    "PCFX3",
+    "PCFY1",
+    "PCFY2",
+    "PCFY3",
     // Scaling factors.
     "LFZO",
     "LCX",
@@ -302,4 +322,6 @@ pub const KNOWN_MF61_KEYS: &[&str] = &[
     "LMY",
     "LVMX",
     "LGYR",
+    "LSGKP",
+    "LSGAL",
 ];

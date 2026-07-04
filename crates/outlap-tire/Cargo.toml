@@ -5,6 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+num-traits = { workspace = true, features = ["libm"] }
+thiserror = { workspace = true }
+# default-features = false keeps outlap-tire wasm-clean; tests bring the std FsLoader.
+outlap-schema = { path = "../outlap-schema", default-features = false }
+
+[dev-dependencies]
+outlap-schema = { path = "../outlap-schema" }
+proptest = { workspace = true }
+dhat = { workspace = true }
 
 [lints]
 workspace = true
