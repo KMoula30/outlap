@@ -6,6 +6,11 @@
 //! by the single canonical [`format_number`] routine. There is no clock, no filesystem access, and
 //! no alignment padding — so a `.tir` the writer produces is byte-stable and PR7's Python codec can
 //! reproduce it byte-for-byte.
+//!
+//! Known limitation (shared with the Python codec, tracked for a follow-up): text values are
+//! emitted single-quoted but NOT escaped — a value containing a quote, `$`/`!`, or a newline is
+//! not representable and will not survive a write→parse round trip. Coefficient data is numeric,
+//! and the regenerated `[MODEL]`/`[UNITS]` metadata is fixed, so canonical documents are safe.
 
 use super::map::SECTIONS;
 use super::{TirDoc, TirEntry, TirSection, TirValue};

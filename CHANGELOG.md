@@ -43,6 +43,21 @@ Milestone **M2** (tyre model) — in progress, not yet tagged.
   The planned Perantoni–Limebeer F1 tyre is deferred: its published model is a reduced similarity
   form (no MF coefficient set) and the parameter appendix is not openly available — an MF6.1
   derivation would break the transcription-only provenance rule.
+- **python**: **`.tir` codec** (`outlap.tir`, stdlib+pyyaml; `python -m outlap.tir
+  {to-tyr, from-tyr}`) — grammar-identical to the Rust codec, **byte-parity** with the Rust
+  writer pinned by a committed canonical fixture asserted from both languages (CPython `repr`
+  digits match the Rust writer's `ryu` round-half-to-even digits; fuzz-validated). **MF6.1
+  fitting pipeline** (`outlap.tirefit`; `python -m outlap.tirefit {fit, synth}`): TTC
+  `.mat`/`.dat`/`.csv` readers to SI/ISO-8855 with a documented SAE→ISO sign map (parsers yes —
+  redistribution of TTC data or TTC-derived sets, no; `ttc-data/` gitignored); a vectorized
+  numpy MF6.1 forward model validated against the same golden CSVs and ≤0.5% rule as the Rust
+  kernels; a deterministic staged fit (nominals → pure Fx0 → pure Fy0 → combined → Mz → Mx/My)
+  with documented init/bounds tables and signal gates; JSON+MD fit reports (no plots in M2);
+  seeded synthetic-data generation. scipy is confined to the `tire-fit` extra (lazy import,
+  actionable error). Synthetic recovery gate: book tyre + 1% noise → pure curves ≤1%.
+- **python**: ruff (+import-sort/pyupgrade/bugbear) and **pyright strict** configured in
+  `pyproject.toml` with curated allows at the untyped h5py/scipy boundary; CI python job now
+  gates `ruff check`, `ruff format --check`, and `pyright`, and syncs `--extra tire-fit`.
 
 ## [0.1.0] - 2026-07-03
 
