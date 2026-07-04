@@ -118,7 +118,7 @@ def _longest_way(osm: dict[str, Any]) -> list[int]:
         ns = [nodes[i] for i in w["nodes"] if i in nodes]
         return sum(
             _haversine(a["lat"], a["lon"], b["lat"], b["lon"])
-            for a, b in zip(ns, ns[1:])
+            for a, b in zip(ns, ns[1:], strict=False)
         )
 
     return max(ways, key=way_length)["nodes"]
@@ -204,7 +204,7 @@ def fetch_dem_elevation(
     """Sample elevation from the first available open DEM dataset, throttled to the free tier."""
     import time
 
-    pairs = list(zip(lats, lons))
+    pairs = list(zip(lats, lons, strict=True))
     batch = 100
     for dataset in _DEM_DATASETS:
         try:

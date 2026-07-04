@@ -15,7 +15,6 @@ from typing import NamedTuple
 import numpy as np
 import xarray as xr
 from numpy.typing import ArrayLike, NDArray
-
 from outlap_core import (
     DEFAULT_DS_M,
     Lap,
