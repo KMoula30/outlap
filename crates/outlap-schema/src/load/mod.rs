@@ -59,6 +59,18 @@ pub fn load_vehicle(
     loader: &dyn SourceLoader,
     options: &LoadOptions,
 ) -> Result<ResolvedVehicle> {
+    load_vehicle_with(root, loader, options, &Overrides::default())
+}
+
+/// Like [`load_vehicle`], but applying dotted-path [`Overrides`] (Decision #35) between the
+/// extends-merge and validation stages — overridden values are schema-validated after the merge
+/// and recorded in the provenance map like any other value source.
+pub fn load_vehicle_with(
+    root: &str,
+    loader: &dyn SourceLoader,
+    options: &LoadOptions,
+    overrides: &Overrides,
+) -> Result<ResolvedVehicle> {
     let mut sources = Sources::new();
     // Stage 0/1: load + parse the root document.
     let content = merge::load_with_fallback(root, loader)?;
@@ -67,14 +79,8 @@ pub fn load_vehicle(
         tree::parse(root_id, &sources).map_err(|e| merge::parse_to_error(e, &sources))?;
     // Stage 2: version gate (root must be a vehicle of this major).
     version_gate(&root_tree, schema_name::VEHICLE, root_id, &sources)?;
-    // Stage 3: resolve extends chain + merge + provenance.
-    let (merged, provenance) = merge::resolve(
-        root_tree,
-        root_id,
-        &Overrides::default(),
-        loader,
-        &mut sources,
-    )?;
+    // Stage 3: resolve extends chain + merge + overrides + provenance.
+    let (merged, provenance) = merge::resolve(root_tree, root_id, overrides, loader, &mut sources)?;
     finish(&merged, root_id, provenance, loader, &mut sources, options)
 }
 

@@ -21,6 +21,7 @@ outlap-track = { path = "../outlap-track" }
 outlap-tire = { path = "../outlap-tire" }
 outlap-qss = { path = "../outlap-qss" }
 outlap-raceline = { path = "../outlap-raceline" }
+serde_json = "1"
 
 [lints]
 workspace = true

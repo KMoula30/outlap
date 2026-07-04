@@ -60,8 +60,8 @@ pub use centerline::{parse_centerline, Centerline};
 pub use conditions::Conditions;
 pub use error::SchemaError;
 pub use load::{
-    load_conditions, load_sim, load_track_doc, load_vehicle, resolve_vehicle, LoadOptions,
-    Overrides, ResolvedVehicle,
+    load_conditions, load_sim, load_track_doc, load_vehicle, load_vehicle_with, resolve_vehicle,
+    LoadOptions, Overrides, ResolvedVehicle,
 };
 pub use sim::Sim;
 pub use track::TrackDoc;

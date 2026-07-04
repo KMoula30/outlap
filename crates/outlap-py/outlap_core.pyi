@@ -70,5 +70,10 @@ def solve_lap(
     track: Track,
     ds_m: float = ...,
     raceline_ds_m: float | None = None,
+    overrides: dict[str, bool | int | float | str] | None = None,
+    conditions: dict[str, object] | None = None,
 ) -> Lap: ...
-def vehicle_report(vehicle_dir: str) -> dict[str, object]: ...
+def vehicle_report(
+    vehicle_dir: str,
+    overrides: dict[str, bool | int | float | str] | None = None,
+) -> dict[str, object]: ...
