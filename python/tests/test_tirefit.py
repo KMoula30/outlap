@@ -257,6 +257,24 @@ def test_load_csv_iso_passthrough(tmp_path: Path) -> None:
 # --- CLI --------------------------------------------------------------------------------------
 
 
+def test_synth_csv_is_sae_signed(tmp_path: Path) -> None:
+    # `synth` must emit a faithful SAE-signed TTC mock (Fz logged negative), so the same
+    # sign convention serves both the synth round-trip and a real measured CSV. `load_csv`'s
+    # SAE default then recovers ISO (Fz > 0).
+    from outlap.tirefit.__main__ import main as tirefit_main
+
+    csv_out = tmp_path / "synth.csv"
+    assert tirefit_main(["synth", str(_PACEJKA), "-o", str(csv_out)]) == 0
+    header, first = csv_out.read_text().splitlines()[:2]
+    fz_col = header.split(",").index("FZ")
+    assert float(first.split(",")[fz_col]) < 0.0, (
+        "synth CSV must be SAE-signed (Fz < 0)"
+    )
+
+    iso = load_csv(csv_out)  # SAE default → ISO
+    assert np.all(iso.fz_n > 0.0)
+
+
 def test_cli_synth_then_fit(tmp_path: Path) -> None:
     pytest.importorskip("scipy")
     from outlap.tirefit.__main__ import main as tirefit_main

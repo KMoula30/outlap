@@ -68,10 +68,11 @@ def _load_any(path: Path) -> TireTestData:
     if suffix == ".dat":
         return load_dat(path)
     if suffix == ".csv":
-        # The synth CLI writes ISO signs; measured TTC CSV exports are SAE — the fit CLI
-        # standardises on our own synth format here, so ISO. Use the library API directly
-        # for SAE-signed CSVs.
-        return load_csv(path, sae_signs=False)
+        # One sign convention across all CLI formats: SAE in, ISO out. A measured TTC CSV
+        # export is SAE-signed (like .mat/.dat), and `synth` writes a faithful SAE mock, so
+        # `load_csv`'s SAE default is correct for both. (For an already-ISO CSV, call the
+        # library `load_csv(path, sae_signs=False)` directly.)
+        return load_csv(path)
     raise ValueError(f"unsupported test-data format: {path}")
 
 
@@ -140,6 +141,10 @@ def _synth(args: argparse.Namespace) -> int:
     coeffs = {str(k): float(v) for k, v in mf61_map.items()}
     data = synthesize(coeffs, seed=args.seed, noise=args.noise)
 
+    # Emit a FAITHFUL SAE-signed TTC-format mock: SAE signs (Fz logged negative; SA/IA/Fy/Mz
+    # flipped from ISO) in TTC units (deg/kPa/kph). This is what a real measured export looks
+    # like, so `outlap.tirefit fit` (and any TTC-format tool) reads it back correctly — the
+    # synth→fit round trip and a measured CSV now share one sign convention.
     header = "SR,SA,IA,FZ,P,V,FX,FY,MZ,MX"
     columns = np.column_stack(
         [
@@ -155,9 +160,10 @@ def _synth(args: argparse.Namespace) -> int:
             data.mx_nm,
         ]
     )
-    # ISO signs and SI units throughout (this is our own format, not a TTC export); loaded
-    # back with `load_csv(..., sae_signs=False)` after undoing the unit factors — so write
-    # the channels in the reader's expected units instead: deg, kPa, kph.
+    # ISO → SAE: negate the five SAE-negative channels (the inverse of `data.sae_to_iso`,
+    # which flips exactly these) — SA(1), IA(2), FZ(3), FY(7), MZ(8); SR/FX/MX keep their sign.
+    columns[:, [1, 2, 3, 7, 8]] *= -1.0
+    # SI → TTC units: angles to degrees, pressure to kPa, speed to kph.
     columns[:, 1] = np.degrees(columns[:, 1])
     columns[:, 2] = np.degrees(columns[:, 2])
     columns[:, 4] = columns[:, 4] / 1000.0
