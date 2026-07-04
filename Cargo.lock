@@ -619,6 +619,7 @@ dependencies = [
  "outlap-tire",
  "outlap-track",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

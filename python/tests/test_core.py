@@ -164,6 +164,51 @@ def test_bad_ds_raises_not_panics(catalunya: Track) -> None:
             min_curvature(catalunya, 1.1, ds_m=bad)
 
 
+def test_override_mass_slows_the_lap(catalunya: Track) -> None:
+    base = solve_lap_dataset(F1_DIR, catalunya)
+    heavy = solve_lap_dataset(F1_DIR, catalunya, overrides={"chassis.mass_kg": 968.0})
+    assert heavy.attrs["lap_time_s"] > base.attrs["lap_time_s"]
+    # The overridden car is a different resolved spec — provenance hash must change.
+    assert heavy.attrs["resolved_hash"] != base.attrs["resolved_hash"]
+
+
+def test_override_bad_path_fails_loudly(catalunya: Track) -> None:
+    with pytest.raises(ValueError, match="mas_kg"):
+        solve_lap_dataset(F1_DIR, catalunya, overrides={"chassis.mas_kg": 900.0})
+
+
+def test_override_bad_type_fails_loudly(catalunya: Track) -> None:
+    with pytest.raises(ValueError):
+        solve_lap_dataset(F1_DIR, catalunya, overrides={"chassis.mass_kg": "heavy"})
+
+
+def test_conditions_change_the_lap(catalunya: Track) -> None:
+    cold = solve_lap_dataset(
+        F1_DIR, catalunya, conditions={"air": {"temperature_c": 0.0}}
+    )
+    hot = solve_lap_dataset(
+        F1_DIR, catalunya, conditions={"air": {"temperature_c": 45.0}}
+    )
+    # Air density changes drag AND downforce; the laps must differ measurably.
+    assert cold.attrs["lap_time_s"] != hot.attrs["lap_time_s"]
+    assert abs(cold.attrs["lap_time_s"] - hot.attrs["lap_time_s"]) > 0.05
+
+
+def test_conditions_typo_fails_loudly(catalunya: Track) -> None:
+    # A misspelled conditions field must never be silently dropped.
+    with pytest.raises(ValueError, match="air.temp_c"):
+        solve_lap_dataset(F1_DIR, catalunya, conditions={"air": {"temp_c": 30.0}})
+
+
+def test_vehicle_report_echoes_overrides() -> None:
+    rep = vehicle_report(F1_DIR, overrides={"chassis.mass_kg": 800.0})
+    applied = rep["overrides"]
+    assert isinstance(applied, list)
+    assert ("chassis.mass_kg", "800.0") in applied
+    base = vehicle_report(F1_DIR)
+    assert rep["resolved_hash"] != base["resolved_hash"]
+
+
 def test_malformed_conditions_is_an_error(tmp_path: Path) -> None:
     # Copy the f1_2026 vehicle dir and plant a broken conditions.yaml: solve_lap must raise,
     # never silently fall back to ISA defaults (nothing silent).

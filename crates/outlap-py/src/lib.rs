@@ -37,12 +37,111 @@ use outlap_raceline::{min_curvature_line, RacelineOptions};
 use outlap_schema::io::FsLoader;
 use outlap_schema::load::load_tyr;
 use outlap_schema::load::report::ReportEntry;
-use outlap_schema::{load_conditions, load_vehicle, Conditions, LoadOptions};
+use outlap_schema::{
+    load_conditions, load_vehicle_with, Conditions, LoadOptions, Overrides, ResolvedVehicle,
+};
 use outlap_tire::{peak_mu_x, peak_mu_y, Mf61, SlipState};
 
 /// Map any core error to a Python `ValueError` carrying its display text.
 fn err<E: std::fmt::Display>(e: E) -> PyErr {
     PyValueError::new_err(e.to_string())
+}
+
+/// Convert a Python value to JSON for the override/conditions machinery.
+///
+/// `bool` is checked before `int` (Python bools are ints) so `True` stays a boolean.
+fn py_to_json(v: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    if v.is_none() {
+        Ok(serde_json::Value::Null)
+    } else if let Ok(b) = v.extract::<bool>() {
+        Ok(b.into())
+    } else if let Ok(i) = v.extract::<i64>() {
+        Ok(i.into())
+    } else if let Ok(f) = v.extract::<f64>() {
+        Ok(f.into())
+    } else if let Ok(s) = v.extract::<String>() {
+        Ok(s.into())
+    } else if let Ok(d) = v.cast::<pyo3::types::PyDict>() {
+        let mut m = serde_json::Map::new();
+        for (k, val) in d.iter() {
+            m.insert(k.extract::<String>()?, py_to_json(&val)?);
+        }
+        Ok(serde_json::Value::Object(m))
+    } else if let Ok(l) = v.cast::<pyo3::types::PyList>() {
+        let mut arr = Vec::with_capacity(l.len());
+        for item in l.iter() {
+            arr.push(py_to_json(&item)?);
+        }
+        Ok(serde_json::Value::Array(arr))
+    } else {
+        Err(PyValueError::new_err(format!(
+            "unsupported value type in overrides: {}",
+            v.get_type().name()?
+        )))
+    }
+}
+
+/// Build the vehicle-pipeline [`Overrides`] from a `{dotted.path: value}` dict.
+fn overrides_from(d: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Overrides> {
+    let mut o = Overrides::new();
+    if let Some(d) = d {
+        for (k, v) in d.iter() {
+            o = o.with(k.extract::<String>()?, py_to_json(&v)?);
+        }
+    }
+    Ok(o)
+}
+
+/// Load + resolve a vehicle with optional dotted-path overrides (through the real pipeline:
+/// schema-validated after the merge, recorded in provenance — Decision #35).
+fn resolve_with_overrides(
+    vehicle_dir: &str,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<(FsLoader, ResolvedVehicle)> {
+    let vl = FsLoader::new(vehicle_dir);
+    let ov = overrides_from(overrides)?;
+    let resolved =
+        load_vehicle_with("vehicle.yaml", &vl, &LoadOptions::default(), &ov).map_err(schema_err)?;
+    Ok((vl, resolved))
+}
+
+/// Deep-merge a JSON patch onto typed [`Conditions`]: objects merge recursively, scalars replace.
+///
+/// The base serialization carries **every** field (a concrete struct), so a patch key that does
+/// not already exist is a typo — rejected loudly with its dotted path, never silently ignored
+/// (serde without `deny_unknown_fields` would otherwise drop it). Re-deserializing catches type
+/// errors.
+fn merge_conditions(base: Conditions, patch: &serde_json::Value) -> PyResult<Conditions> {
+    fn merge(value: &mut serde_json::Value, patch: &serde_json::Value, path: &str) -> PyResult<()> {
+        match (value, patch) {
+            (serde_json::Value::Object(v), serde_json::Value::Object(p)) => {
+                for (k, pv) in p {
+                    let sub = if path.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{path}.{k}")
+                    };
+                    if let Some(slot) = v.get_mut(k) {
+                        merge(slot, pv, &sub)?;
+                    } else {
+                        let known: Vec<&String> = v.keys().collect();
+                        return Err(PyValueError::new_err(format!(
+                            "unknown conditions field `{sub}` (known fields here: {known:?})"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+            (slot, p) => {
+                *slot = p.clone();
+                Ok(())
+            }
+        }
+    }
+    let mut value = serde_json::to_value(&base).map_err(err)?;
+    merge(&mut value, patch, "")?;
+    serde_json::from_value(value)
+        .map_err(|e| PyValueError::new_err(format!("invalid conditions override: {e}")))
 }
 
 /// Whether a schema error is "the file does not exist" (as opposed to a malformed file).
@@ -390,26 +489,35 @@ impl Lap {
 /// silently ignored). When `track` is a generated racing line, pass `raceline_ds_m` (the step the
 /// line was generated with, `Raceline.ds_m`) so the result records honest line provenance.
 ///
+/// What-if experiments (Decision #35): `overrides` is a `{dotted.path: value}` dict patched onto
+/// the vehicle between merge and validation (e.g. `{"chassis.mass_kg": 750.0}`) — invalid paths
+/// or types fail loudly; `conditions` is a nested dict deep-merged onto the session conditions
+/// (e.g. `{"air": {"temp_c": 35.0}}`).
+///
 /// The call holds the GIL for its duration (~tens of ms per lap); releasing it is deferred to the
 /// batch/sweep API milestone.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, overrides = None, conditions = None))]
 fn solve_lap(
     vehicle_dir: &str,
     track: &Track,
     ds_m: f64,
     raceline_ds_m: Option<f64>,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<Lap> {
     check_ds(ds_m)?;
-    let vl = FsLoader::new(vehicle_dir);
-    let resolved =
-        load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).map_err(schema_err)?;
+    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
     // Missing conditions.yaml → ISA defaults; a PRESENT-but-broken one is a real error
     // (config errors are a product surface — nothing silent).
-    let conditions = match load_conditions("conditions.yaml", &vl) {
+    let base_conditions = match load_conditions("conditions.yaml", &vl) {
         Ok(c) => c,
         Err(e) if is_not_found(&e) => Conditions::default(),
         Err(e) => return Err(schema_err(e)),
+    };
+    let conditions = match conditions {
+        Some(patch) => merge_conditions(base_conditions, &py_to_json(patch.as_any())?)?,
+        None => base_conditions,
     };
     let opts = T0Options {
         ds_m,
@@ -462,16 +570,26 @@ fn solve_lap(
 }
 
 /// Load and resolve a vehicle, returning its loaded-model report as a dict:
-/// `{name, resolved_hash, inherited, estimated, degraded, warnings}` (entry lists are
+/// `{name, resolved_hash, inherited, estimated, degraded, warnings, overrides}` (entry lists are
 /// `(json_pointer, detail)` pairs). Nothing silent (Decision #41).
+///
+/// `overrides` is the same `{dotted.path: value}` what-if dict as [`solve_lap`]'s; the applied
+/// paths are echoed back under the `overrides` key, and the `resolved_hash` reflects them.
 #[pyfunction]
+#[pyo3(signature = (vehicle_dir, overrides = None))]
 fn vehicle_report<'py>(
     py: Python<'py>,
     vehicle_dir: &str,
+    overrides: Option<&Bound<'py, pyo3::types::PyDict>>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    let vl = FsLoader::new(vehicle_dir);
-    let resolved =
-        load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).map_err(schema_err)?;
+    let applied: Vec<(String, String)> = match overrides {
+        Some(d) => d
+            .iter()
+            .map(|(k, v)| Ok((k.extract::<String>()?, v.str()?.to_string())))
+            .collect::<PyResult<_>>()?,
+        None => Vec::new(),
+    };
+    let (_vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
     let d = pyo3::types::PyDict::new(py);
     d.set_item("name", &resolved.spec.name)?;
     d.set_item("resolved_hash", &resolved.report.resolved_hash)?;
@@ -479,6 +597,7 @@ fn vehicle_report<'py>(
     d.set_item("estimated", entries_to_pairs(&resolved.report.estimated))?;
     d.set_item("degraded", entries_to_pairs(&resolved.report.degraded))?;
     d.set_item("warnings", entries_to_pairs(&resolved.report.warnings))?;
+    d.set_item("overrides", applied)?;
     Ok(d)
 }
 

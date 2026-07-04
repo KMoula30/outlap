@@ -117,16 +117,32 @@ def solve_lap_dataset(
     line: Track | Raceline,
     *,
     ds_m: float = DEFAULT_DS_M,
+    overrides: dict[str, bool | int | float | str] | None = None,
+    conditions: dict[str, object] | None = None,
 ) -> xr.Dataset:
     """Solve a T0 lap and return it directly as a labelled dataset (see :func:`lap_dataset`).
 
     ``line`` may be a plain :class:`Track` (a lap of its centerline) or a :class:`Raceline`
     (a lap of the generated line, with its generation step recorded in the result provenance).
+
+    What-if experiments: ``overrides`` patches dotted paths onto the vehicle through the real
+    validation pipeline (e.g. ``{"chassis.mass_kg": 750.0}``), and ``conditions`` deep-merges
+    onto the session conditions (e.g. ``{"air": {"temp_c": 35.0}}``) — invalid paths or types
+    fail loudly, never silently.
     """
     if isinstance(line, Raceline):
-        lap = solve_lap(vehicle_dir, line.line(), ds_m=ds_m, raceline_ds_m=line.ds_m)
+        lap = solve_lap(
+            vehicle_dir,
+            line.line(),
+            ds_m=ds_m,
+            raceline_ds_m=line.ds_m,
+            overrides=overrides,
+            conditions=conditions,
+        )
     else:
-        lap = solve_lap(vehicle_dir, line, ds_m=ds_m)
+        lap = solve_lap(
+            vehicle_dir, line, ds_m=ds_m, overrides=overrides, conditions=conditions
+        )
     return lap_dataset(lap)
 
 
