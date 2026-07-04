@@ -50,6 +50,7 @@ pub mod load;
 pub mod ptm;
 pub mod refs;
 pub mod sim;
+pub mod tir;
 pub mod track;
 pub mod tree;
 pub mod tyr;
@@ -64,6 +65,10 @@ pub use load::{
     LoadOptions, Overrides, ResolvedVehicle,
 };
 pub use sim::Sim;
+pub use tir::{
+    load_tir, parse_tir, tir_to_tyr, tyr_to_tir, ThermalWearPolicy, TirDoc, TirEntry,
+    TirToTyrOptions, TirValue,
+};
 pub use track::TrackDoc;
 pub use vehicle::Vehicle;
 pub use version::SchemaVersion;

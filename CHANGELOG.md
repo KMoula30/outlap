@@ -22,6 +22,17 @@ Milestone **M2** (tyre model) — in progress, not yet tagged.
   block is present; a brush block alongside a partial force set is a warning. New diagnostics: a
   `brush` block under `tyr/1.0` warns, and an unknown key in a file declaring a newer schema MINOR
   hints at the version.
+- **schema**: `.tir` (TNO MF-Tyre text format) **parser/writer/codec** in `outlap-schema::tir`,
+  round-trippable with `.tyr`. String-in/string-out (wasm-clean); `load_tir` is the only IO entry,
+  behind the `SourceLoader` trait. Grammar: `[SECTION]` headers, `KEY = value`, `$`/`!` comments,
+  quoted strings, BOM/CRLF tolerant, duplicate-key last-wins with a warning. Non-SI `[UNITS]` is a
+  hard error; the writer always emits SI. One canonical `f64` text format with documented
+  exponent-switch thresholds (plain for decimal exponent `−4..=15`, else Python-`repr`-style
+  scientific) so the PR7 Python codec can reproduce it byte-for-byte. `tir_to_tyr` synthesises the
+  `thermal`/`wear` blocks `.tir` does not carry (`synthetic | from-donor | none` policy) and records
+  the provenance. Round-trip is byte-stable for `tir→doc→tir` and numeric-exact over the mapping
+  table (coefficient + housekeeping) keys for `tir→tyr→tir`. No JSON Schema change (`.tir` is text,
+  not a schemars type).
 
 ## [0.1.0] - 2026-07-03
 
