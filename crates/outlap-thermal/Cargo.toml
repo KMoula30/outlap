@@ -1,0 +1,20 @@
+[package]
+name = "outlap-thermal"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Machine lumped-parameter thermal network (LPTN): heat-transfer correlations, geometry-driven
+# conductance assembly, and the Crank–Nicolson transient integrator advanced over the QSS solution.
+# wasm-clean (pure math; no filesystem/threads/clock) — the assembly of a network from an `.emotor`
+# document lives in `outlap-qss`, keeping this crate free of the schema layer.
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+dhat = { workspace = true }
+
+[lints]
+workspace = true

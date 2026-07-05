@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 
 use outlap_qss::path::T0Path;
 use outlap_qss::solver::solve_into;
-use outlap_qss::{T0Options, T0Vehicle, T0Workspace, T1Vehicle, TrimInput};
+use outlap_qss::{MachineThermal, T0Options, T0Vehicle, T0Workspace, T1Vehicle, TrimInput};
 use outlap_schema::centerline::{Centerline, CenterlineRow};
 use outlap_schema::io::MemLoader;
 use outlap_schema::refs::CenterlineRef;
@@ -185,4 +185,77 @@ fn hot_paths_are_zero_alloc() {
         "T1Vehicle::trim (mapped aero) allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
+
+    // --- Machine thermal slow-state advance (Crank–Nicolson step) ---
+    let mut thermal = setup_thermal();
+    let _ = thermal.step(3000.0, |_| None, 800.0, 0.1); // warm
+
+    let before = dhat::HeapStats::get();
+    for _ in 0..16 {
+        let _ = thermal.step(3000.0, |_| None, 800.0, 0.1);
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "MachineThermal::step allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+}
+
+/// A winding + housing + coolant + ambient lumped network (cold assembly; allocations allowed here).
+fn setup_thermal() -> MachineThermal {
+    use outlap_schema::emotor::{
+        Conductance, CoolantSpec, Cooling, Emotor, EmotorMeta, NodeRole, ThermalNode,
+    };
+    use outlap_schema::version::SchemaVersion;
+
+    let node = |name: &str, role: NodeRole, c: Option<f64>, lim: Option<(f64, f64)>| ThermalNode {
+        name: name.into(),
+        role: Some(role),
+        c_j_per_k: c,
+        t_warn_c: lim.map(|l| l.0),
+        t_max_c: lim.map(|l| l.1),
+    };
+    let em = Emotor {
+        schema: SchemaVersion::new("emotor", 1, 1),
+        nodes: vec![
+            node(
+                "winding",
+                NodeRole::Winding,
+                Some(9000.0),
+                Some((160.0, 180.0)),
+            ),
+            node("housing", NodeRole::Housing, Some(32000.0), None),
+            node("coolant", NodeRole::Coolant, None, None),
+            node("ambient", NodeRole::Ambient, None, None),
+        ],
+        conductances: vec![
+            Conductance {
+                between: ("winding".into(), "housing".into()),
+                w_per_k: Some(12.0),
+            },
+            Conductance {
+                between: ("housing".into(), "coolant".into()),
+                w_per_k: Some(45.0),
+            },
+        ],
+        convection: vec![],
+        loss_routing: vec![],
+        cooling: Cooling {
+            ambient_node: "ambient".into(),
+            ambient_fixed_c: None,
+            jacket: None,
+            air_gap: None,
+            coolant: Some(CoolantSpec {
+                node: "coolant".into(),
+                inlet_c: 65.0,
+                rho_cp_mdot_w_per_k: 900.0,
+            }),
+        },
+        cu_feedback: None,
+        initial_temp: None,
+        meta: EmotorMeta::default(),
+    };
+    MachineThermal::assemble(&em, &Conditions::default(), 45.0).unwrap()
 }

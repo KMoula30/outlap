@@ -211,29 +211,56 @@ def build_emotor_doc(
     notes: str,
     copper_feedback: bool = True,
 ) -> dict[str, Any]:
-    """Assemble an ``emotor/1.0`` document from a fitted model (wire-exact for the Rust schema)."""
-    loss_routing: dict[str, Any] = {"winding_split": round(float(model.s_w), 4)}
-    if copper_feedback:
-        loss_routing["copper_alpha_per_k"] = round(float(model.alpha), 6)
-    return {
-        "schema": "emotor/1.0",
-        "nodes": {
-            "winding": {
-                "c_j_per_k": round(float(model.c_w), 2),
-                "t_max_c": round(float(t_max_w), 1),
-                "t_warn_c": round(float(t_warn_w), 1),
-            },
-            "case": {
-                "c_j_per_k": round(float(model.c_c), 2),
-                "t_max_c": round(float(t_max_c), 1),
-                "t_warn_c": round(float(t_warn_c), 1),
-            },
+    """Assemble an ``emotor/1.1`` **lumped** document from a fitted 2-node model (wire-exact for the
+    Rust schema).
+
+    The fit yields ``(C_w, C_c, G_wc, G_cool)`` for a winding↔case↔sink chain; that maps directly onto
+    the reduced lumped node menu — ``winding`` + ``case`` (role ``housing``) + a pinned ``ambient`` node
+    held at the coolant temperature (the fit's fixed sink). The full FEA-resolved *detailed* import
+    (geometry → convection edges) is a separate step; this keeps a peak-envelope-only import valid and
+    conservative.
+    """
+    nodes: list[dict[str, Any]] = [
+        {
+            "name": "winding",
+            "role": "winding",
+            "c_j_per_k": round(float(model.c_w), 2),
+            "t_warn_c": round(float(t_warn_w), 1),
+            "t_max_c": round(float(t_max_w), 1),
         },
-        "coupling": {
-            "g_wc_w_per_k": round(float(model.g_wc), 4),
-            "g_cool_w_per_k": round(float(model.g_cool), 4),
+        {
+            "name": "case",
+            "role": "housing",
+            "c_j_per_k": round(float(model.c_c), 2),
+            "t_warn_c": round(float(t_warn_c), 1),
+            "t_max_c": round(float(t_max_c), 1),
         },
-        "cooling": {"liquid": {"coolant_temp_c": round(float(model.t_cool), 3)}},
-        "loss_routing": loss_routing,
-        "meta": {"source": "pdt_distilled", "notes": notes},
+        {"name": "ambient", "role": "ambient"},
+    ]
+    doc: dict[str, Any] = {
+        "schema": "emotor/1.1",
+        "nodes": nodes,
+        "conductances": [
+            {"between": ["winding", "case"], "w_per_k": round(float(model.g_wc), 4)},
+            {"between": ["case", "ambient"], "w_per_k": round(float(model.g_cool), 4)},
+        ],
+        "loss_routing": [
+            {"node": "winding", "fraction": round(float(model.s_w), 4)},
+            {"node": "case", "fraction": round(float(1.0 - model.s_w), 4)},
+        ],
+        # The 2-node fit's fixed sink is a regulated coolant temperature → pin ambient there.
+        "cooling": {
+            "ambient_node": "ambient",
+            "ambient_fixed_c": round(float(model.t_cool), 3),
+        },
+        "meta": {"source": "pdt_imported", "notes": notes},
     }
+    if copper_feedback:
+        # Copper R(T) is referenced to the winding temperature the loss maps were solved at
+        # (PDT `T_ref_winding_C`, class-typical 60 °C) — not the coolant sink.
+        doc["cu_feedback"] = {
+            "nodes": ["winding"],
+            "t_ref_c": 60.0,
+            "alpha_per_k": round(float(model.alpha), 6),
+        }
+    return doc

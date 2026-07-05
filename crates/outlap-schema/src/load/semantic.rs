@@ -529,32 +529,336 @@ pub fn check_sim(
     Ok(())
 }
 
-/// Semantic checks for an `.emotor` document.
+/// Semantic checks for an `.emotor` document (the data-declared N-node LPTN, §9.5).
 pub fn check_emotor(
     e: &Emotor,
     index: &SpanIndex,
     sources: &Sources,
     file: crate::diagnostics::SourceId,
 ) -> Result<()> {
+    use crate::emotor::{ConvModel, InitialTemp, NodeRole};
+
     let s = Spans { index, file };
-    unit_interval(
-        e.loss_routing.winding_split,
-        "loss_routing.winding_split",
-        "/loss_routing/winding_split",
-        &s,
-        sources,
-    )?;
-    for (label, node, base) in [
-        ("winding", &e.nodes.winding, "/nodes/winding"),
-        ("case", &e.nodes.case, "/nodes/case"),
-    ] {
-        if node.t_warn_c > node.t_max_c {
-            return Err(SchemaError::semantic(
+    let err = |ptr: &str, msg: String| Err(SchemaError::semantic(sources, s.at(ptr), msg, None));
+
+    // --- Nodes: ≥2, unique names, valid capacities and limit pairs, exactly one winding. ------
+    if e.nodes.len() < 2 {
+        return err(
+            "/nodes",
+            format!(
+                "a thermal network needs at least 2 nodes, got {}",
+                e.nodes.len()
+            ),
+        );
+    }
+    let mut names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut n_winding = 0;
+    for (i, node) in e.nodes.iter().enumerate() {
+        let ptr = format!("/nodes/{i}");
+        if node.name.trim().is_empty() {
+            return err(&ptr, "node `name` must not be empty".into());
+        }
+        if !names.insert(node.name.as_str()) {
+            return err(&ptr, format!("duplicate node name `{}`", node.name));
+        }
+        if let Some(c) = node.c_j_per_k {
+            positive(c, "c_j_per_k", &format!("{ptr}/c_j_per_k"), &s, sources)?;
+        }
+        match (node.t_warn_c, node.t_max_c) {
+            (Some(w), Some(m)) if w > m => {
+                return err(
+                    &ptr,
+                    format!("`{}.t_warn_c` must not exceed `t_max_c`", node.name),
+                );
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return err(
+                    &ptr,
+                    format!(
+                        "node `{}` sets only one of t_warn_c/t_max_c — set both (to derate) or neither",
+                        node.name
+                    ),
+                );
+            }
+            _ => {}
+        }
+        if node.role == Some(NodeRole::Winding) {
+            n_winding += 1;
+        }
+    }
+    if n_winding == 0 {
+        return err(
+            "/nodes",
+            "at least one node must have `role: winding` — it is the required loss target and binds \
+             the torque derate"
+                .into(),
+        );
+    }
+    let known = |name: &str| names.contains(name);
+
+    // --- Ambient / coolant boundary. ----------------------------------------------------------
+    if !known(&e.cooling.ambient_node) {
+        return err(
+            "/cooling/ambient_node",
+            format!("unknown ambient node `{}`", e.cooling.ambient_node),
+        );
+    }
+    if let Some(c) = &e.cooling.coolant {
+        if !known(&c.node) {
+            return err(
+                "/cooling/coolant/node",
+                format!("unknown coolant node `{}`", c.node),
+            );
+        }
+        if c.node == e.cooling.ambient_node {
+            return err(
+                "/cooling/coolant/node",
+                "coolant node must differ from the ambient node".into(),
+            );
+        }
+        positive(
+            c.rho_cp_mdot_w_per_k,
+            "coolant.rho_cp_mdot_w_per_k",
+            "/cooling/coolant/rho_cp_mdot_w_per_k",
+            &s,
+            sources,
+        )?;
+    }
+    if e.cooling.coolant.is_some() && e.cooling.jacket.is_some() {
+        return err(
+            "/cooling/jacket",
+            "declare either `cooling.coolant` or `cooling.jacket`, not both".into(),
+        );
+    }
+    if let Some(j) = &e.cooling.jacket {
+        for (label, node) in [
+            ("housing_node", &j.housing_node),
+            ("coolant_node", &j.coolant_node),
+        ] {
+            if !known(node) {
+                return err(
+                    &format!("/cooling/jacket/{label}"),
+                    format!("jacket references unknown node `{node}`"),
+                );
+            }
+        }
+        if j.coolant_node == e.cooling.ambient_node {
+            return err(
+                "/cooling/jacket/coolant_node",
+                "coolant node must differ from ambient".into(),
+            );
+        }
+        for (v, label) in [
+            (j.flow_rate_lps, "flow_rate_lps"),
+            (j.channel_width_mm, "channel_width_mm"),
+            (j.channel_height_mm, "channel_height_mm"),
+            (j.wetted_area_m2, "wetted_area_m2"),
+        ] {
+            positive(
+                v,
+                &format!("jacket.{label}"),
+                &format!("/cooling/jacket/{label}"),
+                &s,
                 sources,
-                s.at(base),
-                format!("`{label}.t_warn_c` must not exceed `t_max_c`"),
-                None,
-            ));
+            )?;
+        }
+        if j.channel_count == 0 {
+            return err(
+                "/cooling/jacket/channel_count",
+                "channel_count must be at least 1".into(),
+            );
+        }
+    }
+    if let Some(a) = &e.cooling.air_gap {
+        for node in [&a.between.0, &a.between.1] {
+            if !known(node) {
+                return err(
+                    "/cooling/air_gap/between",
+                    format!("air-gap references unknown node `{node}`"),
+                );
+            }
+        }
+        if a.between.0 == a.between.1 {
+            return err(
+                "/cooling/air_gap/between",
+                "air-gap must couple two distinct nodes".into(),
+            );
+        }
+        for (v, label) in [
+            (a.rotor_outer_radius_mm, "rotor_outer_radius_mm"),
+            (a.gap_mm, "gap_mm"),
+            (a.stack_length_mm, "stack_length_mm"),
+        ] {
+            positive(
+                v,
+                &format!("air_gap.{label}"),
+                &format!("/cooling/air_gap/{label}"),
+                &s,
+                sources,
+            )?;
+        }
+    }
+
+    // --- Constant conductance edges. ----------------------------------------------------------
+    for (i, edge) in e.conductances.iter().enumerate() {
+        let ptr = format!("/conductances/{i}");
+        let (a, b) = (&edge.between.0, &edge.between.1);
+        if !known(a) || !known(b) {
+            return err(
+                &ptr,
+                format!("conductance references unknown node(s) `{a}`/`{b}`"),
+            );
+        }
+        if a == b {
+            return err(&ptr, format!("conductance connects node `{a}` to itself"));
+        }
+        if let Some(g) = edge.w_per_k {
+            positive(g, "w_per_k", &format!("{ptr}/w_per_k"), &s, sources)?;
+        }
+    }
+
+    // --- Convection edges. --------------------------------------------------------------------
+    for (i, ce) in e.convection.iter().enumerate() {
+        let ptr = format!("/convection/{i}");
+        let (a, b) = (&ce.between.0, &ce.between.1);
+        if !known(a) || !known(b) {
+            return err(
+                &ptr,
+                format!("convection edge references unknown node(s) `{a}`/`{b}`"),
+            );
+        }
+        if a == b {
+            return err(
+                &ptr,
+                format!("convection edge connects node `{a}` to itself"),
+            );
+        }
+        positive(
+            ce.area_m2,
+            "area_m2",
+            &format!("{ptr}/area_m2"),
+            &s,
+            sources,
+        )?;
+        // Guard the correlation geometry parameters that would divide/degenerate.
+        match &ce.model {
+            ConvModel::AirGap {
+                r_gap_m, gap0_m, ..
+            } => {
+                positive(
+                    *r_gap_m,
+                    "r_gap_m",
+                    &format!("{ptr}/model/air_gap/r_gap_m"),
+                    &s,
+                    sources,
+                )?;
+                positive(
+                    *gap0_m,
+                    "gap0_m",
+                    &format!("{ptr}/model/air_gap/gap0_m"),
+                    &s,
+                    sources,
+                )?;
+            }
+            ConvModel::RotorAir { r_rotor_m, .. } => {
+                positive(
+                    *r_rotor_m,
+                    "r_rotor_m",
+                    &format!("{ptr}/model/rotor_air/r_rotor_m"),
+                    &s,
+                    sources,
+                )?;
+            }
+            ConvModel::ShaftExternal { d_shaft_m } => {
+                positive(
+                    *d_shaft_m,
+                    "d_shaft_m",
+                    &format!("{ptr}/model/shaft_external/d_shaft_m"),
+                    &s,
+                    sources,
+                )?;
+            }
+            ConvModel::LiquidChannel {
+                hydraulic_diameter_m,
+                fluid,
+                ..
+            } => {
+                positive(
+                    *hydraulic_diameter_m,
+                    "hydraulic_diameter_m",
+                    &format!("{ptr}/model/liquid_channel/hydraulic_diameter_m"),
+                    &s,
+                    sources,
+                )?;
+                positive(
+                    fluid.nu,
+                    "fluid.nu",
+                    &format!("{ptr}/model/liquid_channel/fluid/nu"),
+                    &s,
+                    sources,
+                )?;
+            }
+            ConvModel::FreeConvection { char_length_m, .. } => {
+                positive(
+                    *char_length_m,
+                    "char_length_m",
+                    &format!("{ptr}/model/free_convection/char_length_m"),
+                    &s,
+                    sources,
+                )?;
+            }
+        }
+    }
+
+    // --- Loss routing: destination nodes exist, fractions in [0, 1]. --------------------------
+    for (i, route) in e.loss_routing.iter().enumerate() {
+        let ptr = format!("/loss_routing/{i}");
+        if !known(&route.node) {
+            return err(
+                &ptr,
+                format!("loss route targets unknown node `{}`", route.node),
+            );
+        }
+        unit_interval(
+            route.fraction,
+            "fraction",
+            &format!("{ptr}/fraction"),
+            &s,
+            sources,
+        )?;
+    }
+
+    // --- Copper feedback + initial temperatures reference existing nodes. ----------------------
+    if let Some(cu) = &e.cu_feedback {
+        if cu.nodes.is_empty() {
+            return err(
+                "/cu_feedback/nodes",
+                "list at least one winding node for Cu feedback".into(),
+            );
+        }
+        for (i, nd) in cu.nodes.iter().enumerate() {
+            if !known(nd) {
+                return err(
+                    &format!("/cu_feedback/nodes/{i}"),
+                    format!("unknown Cu-feedback node `{nd}`"),
+                );
+            }
+        }
+        if !cu.alpha_per_k.is_finite() {
+            return err(
+                "/cu_feedback/alpha_per_k",
+                "alpha_per_k must be finite".into(),
+            );
+        }
+    }
+    if let Some(InitialTemp::PerNodeC(temps)) = &e.initial_temp {
+        for (i, nt) in temps.iter().enumerate() {
+            if !known(&nt.node) {
+                return err(
+                    &format!("/initial_temp/per_node_c/{i}"),
+                    format!("initial temperature targets unknown node `{}`", nt.node),
+                );
+            }
         }
     }
     Ok(())

@@ -8,6 +8,7 @@ license.workspace = true
 outlap-core = { path = "../outlap-core" }
 outlap-tire = { path = "../outlap-tire" }
 outlap-track = { path = "../outlap-track" }
+outlap-thermal = { path = "../outlap-thermal" }
 # default-features = false keeps outlap-qss wasm-clean; the example/tests bring the std FsLoader.
 outlap-schema = { path = "../outlap-schema", default-features = false }
 thiserror = { workspace = true }

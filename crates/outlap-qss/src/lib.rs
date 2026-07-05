@@ -44,8 +44,8 @@ pub use path::T0Path;
 pub use result::{LapResult, LineDescriptor, T0Workspace};
 pub use solver::{solve_into, solve_lap};
 pub use t1::{
-    AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint, PrimaryDiff, T1Powertrain, T1Vehicle,
-    TrimInput, TrimOutcome, TrimState,
+    AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint, MachineThermal, PrimaryDiff,
+    T1Powertrain, T1Vehicle, TrimInput, TrimOutcome, TrimState,
 };
 pub use vehicle::{T0Options, T0Vehicle};
 

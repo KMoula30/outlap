@@ -1,24 +1,41 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# SYNTHETIC 2-node emotor thermal model.
-schema: emotor/1.0
+# Hand-authored lumped machine-thermal network — the reduced manual menu (§9.5) with the high-level
+# cooling block: outlap derives the housing↔coolant channel edge and the rotor↔stator air-gap film
+# from raw settings a user reads off a datasheet. Winding-limited; liquid-jacket cooled.
+schema: emotor/1.1
 nodes:
-  winding:
-    c_j_per_k: 9000.0
-    t_max_c: 180.0
-    t_warn_c: 160.0
-  case:
-    c_j_per_k: 32000.0
-    t_max_c: 120.0
-    t_warn_c: 105.0
-coupling:
-  g_wc_w_per_k: 12.0
-  g_cool_w_per_k: 45.0
+  - { name: winding, role: winding, c_j_per_k: 8000.0, t_warn_c: 160.0, t_max_c: 180.0 }
+  - { name: stator_iron, role: stator_iron, c_j_per_k: 12000.0 }
+  - { name: rotor, role: rotor, c_j_per_k: 6000.0, t_warn_c: 150.0, t_max_c: 180.0 }
+  - { name: housing, role: housing, c_j_per_k: 30000.0 }
+  - { name: coolant, role: coolant }
+  - { name: ambient, role: ambient }
+conductances:
+  - { between: [winding, stator_iron], w_per_k: 25.0 }
+  - { between: [stator_iron, housing], w_per_k: 60.0 }
+  - { between: [housing, ambient], w_per_k: 5.0 } # residual natural convection / radiation
 cooling:
-  liquid:
-    coolant_temp_c: 65.0
+  ambient_node: ambient
+  jacket:
+    housing_node: housing
+    coolant_node: coolant
+    inlet_c: 65.0
+    flow_rate_lps: 0.25
+    channel_count: 8
+    channel_width_mm: 8.0
+    channel_height_mm: 10.0
+    wetted_area_m2: 0.025
+    fluid: { named: ethylene_glycol_50 }
+  air_gap:
+    between: [stator_iron, rotor]
+    rotor_outer_radius_mm: 74.55
+    gap_mm: 1.15
+    stack_length_mm: 121.0
 loss_routing:
-  winding_split: 0.7
-  copper_alpha_per_k: 0.0039
+  - { node: winding, fraction: 0.6 } # of the .ptm total loss (loss_w)
+  - { node: stator_iron, fraction: 0.25 }
+  - { node: rotor, fraction: 0.15 }
+cu_feedback: { nodes: [winding], t_ref_c: 60.0, alpha_per_k: 0.0039 }
 meta:
   source: estimated
-  notes: "mass-based estimate"
+  notes: manual reduced-menu; jacket + air-gap cooling derived from raw settings
