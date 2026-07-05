@@ -6,11 +6,15 @@ Drives the figure from the **real** ``GgvEnvelope`` generator: it runs the commi
 Decision #31 corrections on a committed fixture) and plots its CSV output. Nothing here re-implements
 the model.
 
-Four panels:
-  (a) g-g sections a_y(a_x) at three speeds (flat ground) — the classical friction diagram.
-  (b) the apparent-gravity axis: pure-lateral grip vs g_normal (banking / crest / compression).
-  (c) speed dependence: pure-lateral grip rises with v as downforce loads the tyres.
-  (d) the Decision #31 correction to +15% tyre grip vs a full envelope re-solve (the truth).
+Two figures:
+  ggv_envelope.png (four panels):
+    (a) g-g sections a_y(a_x) at three speeds (flat ground) — the classical friction diagram.
+    (b) the apparent-gravity axis: pure-lateral grip vs g_normal (banking / crest / compression).
+    (c) speed dependence: pure-lateral grip rises with v as downforce loads the tyres.
+    (d) the Decision #31 correction to +15% tyre grip vs a full envelope re-solve (the truth).
+  ggv_envelope_3d.png:
+    the 4-D g-g-g-v funnel — lateral × longitudinal acceleration in the plane, speed up the z-axis,
+    one surface per apparent-gravity a_z (a mild crest 8 m/s² and a compression 15 m/s²).
 
 Run from anywhere:  python python/tools/plot_ggv_envelope.py
 """
@@ -22,14 +26,16 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import Patch
 
 plt.style.use("seaborn-v0_8-darkgrid")
 
 _ROOT = Path(__file__).resolve().parents[2]
 _OUT = _ROOT / "docs" / "theory" / "img" / "ggv_envelope.png"
+_OUT_3D = _ROOT / "docs" / "theory" / "img" / "ggv_envelope_3d.png"
 
 
-def _run_traces() -> dict[str, list[tuple[float, float, float]]]:
+def _run_traces() -> dict[str, list[tuple[float, float, float, float]]]:
     """Run the Rust example (release) and group its CSV rows by section."""
     proc = subprocess.run(
         ["cargo", "run", "--release", "-q", "-p", "outlap-qss", "--example", "ggv_traces"],
@@ -38,12 +44,12 @@ def _run_traces() -> dict[str, list[tuple[float, float, float]]]:
         text=True,
         check=True,
     )
-    rows: dict[str, list[tuple[float, float, float]]] = {}
+    rows: dict[str, list[tuple[float, float, float, float]]] = {}
     for line in proc.stdout.splitlines():
         if not line or line.startswith("#") or line.startswith("section"):
             continue
-        sec, x, a, b = (line.split(",") + ["0"])[:4]
-        rows.setdefault(sec, []).append((float(x), float(a), float(b)))
+        sec, x, a, b, c = (line.split(",") + ["0", "0"])[:5]
+        rows.setdefault(sec, []).append((float(x), float(a), float(b), float(c)))
     return rows
 
 
@@ -115,6 +121,47 @@ def main() -> None:
     _OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(_OUT, dpi=130)
     print(f"wrote {_OUT}")
+
+    _plot_3d(rows)
+
+
+def _plot_3d(rows: dict[str, list[tuple[float, float, float, float]]]) -> None:
+    """The 4-D g-g-g-v funnel: lateral × longitudinal acceleration in the plane, speed up the
+    z-axis, one translucent surface per apparent-gravity a_z."""
+    gggv = rows["gggv"]
+    azs = sorted({r[3] for r in gggv})
+    colors = ["tab:blue", "tab:orange", "tab:green"]
+    fig = plt.figure(figsize=(9.5, 8.0))
+    ax = fig.add_subplot(111, projection="3d")
+    proxies = []
+    for az, color in zip(azs, colors):
+        pts = [r for r in gggv if r[3] == az]
+        vs = sorted({r[0] for r in pts})
+        big_x, big_y, big_z = [], [], []
+        for v in vs:
+            ring = [r for r in pts if abs(r[0] - v) < 1e-6]  # emission order: â_x = −1 … 1
+            ax_up = [r[1] for r in ring]
+            ay_up = [r[2] for r in ring]
+            # Close the ring: the upper (+a_y) half then the lower (−a_y) half reversed.
+            loop_ay = ay_up + [-a for a in reversed(ay_up)]
+            loop_ax = ax_up + list(reversed(ax_up))
+            big_x.append(loop_ay)
+            big_y.append(loop_ax)
+            big_z.append([v] * len(loop_ay))
+        mx, my, mz = np.array(big_x), np.array(big_y), np.array(big_z)
+        ax.plot_surface(mx, my, mz, color=color, alpha=0.30, linewidth=0, antialiased=True)
+        for i in range(mx.shape[0]):
+            ax.plot(mx[i], my[i], mz[i], color=color, lw=0.8, alpha=0.9)
+        proxies.append(Patch(color=color, alpha=0.6, label=f"$a_z$ = {az:.0f} m/s²"))
+    ax.set_xlabel("lateral $a_y$ [m/s²]")
+    ax.set_ylabel("longitudinal $a_x$ [m/s²]")
+    ax.set_zlabel("speed $v$ [m/s]")
+    ax.set_title("g-g-g-v funnel — achievable acceleration vs speed (outlap-qss GgvEnvelope)")
+    ax.legend(handles=proxies, loc="upper left")
+    ax.view_init(elev=20, azim=-58)
+    fig.tight_layout()
+    fig.savefig(_OUT_3D, dpi=130)
+    print(f"wrote {_OUT_3D}")
 
 
 if __name__ == "__main__":

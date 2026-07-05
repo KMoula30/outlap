@@ -67,7 +67,9 @@
 //! multiplicative factor cannot MOVE the shoulder) it is magnitude-clamped, not accurate. CI
 //! validates it against full-T1 re-solves at sampled off-reference states in the lateral-grip region.
 //!
-//! # References (clean-room from published literature — no simulator source was read)
+//! # References (clean-room from published literature; no code copied — the GPL-3.0
+//! TUM-AVS/GGGVDiagrams repo, the reference implementation of Werner et al. 2025, was consulted for
+//! approach only and re-authored from the papers)
 //!
 //! * F. Werner, S. Sagmeister, M. Piccinini, J. Betz, "A Quasi-Steady-State Black Box Simulation
 //!   Approach for the Generation of g-g-g-v Diagrams," 2025, arXiv:2504.10225 (virtual-inertial-force
