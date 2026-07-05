@@ -65,16 +65,21 @@ def main() -> None:
     ax.set(xlabel="time [s]", ylabel="winding node [°C]", title="(a) integrator vs analytic")
     ax.legend(loc="lower right")
 
-    # (b) Stint on rear.emotor.yaml: winding temperature + torque derate.
+    # (b) Synthetic constant-power stint on rear.emotor.yaml, at in-lap resolution: the winding
+    # temperature and the torque derate that closes the loop (loss = base·derate).
     laps = [r[0] for r in rows["stint"]]
     wind = [r[1] for r in rows["stint"]]
     der = [r[2] for r in rows["stint"]]
     ax = axes[1]
-    ax.plot(laps, wind, "-o", ms=3, color="tab:red", label="winding [°C]")
-    ax.axhspan(160, 180, color="tab:orange", alpha=0.15, label="derate band")
-    ax.set(xlabel="lap", ylabel="winding temperature [°C]", title="(b) stint heat-soak → derate")
+    ax.plot(laps, wind, "-", lw=2.0, color="tab:red", label="winding [°C]")
+    ax.axhspan(160, 180, color="tab:orange", alpha=0.15, label="winding warn→max")
+    ax.set(
+        xlabel="lap (synthetic constant-power)",
+        ylabel="winding temperature [°C]",
+        title="(b) stint heat-soak → derate",
+    )
     ax2 = ax.twinx()
-    ax2.plot(laps, der, "--s", ms=3, color="tab:blue", label="derate")
+    ax2.plot(laps, der, "--", lw=1.8, color="tab:blue", label="derate")
     ax2.set_ylabel("torque derate [-]", color="tab:blue")
     ax2.set_ylim(0.0, 1.05)
     ax2.grid(False)
