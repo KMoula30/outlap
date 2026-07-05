@@ -94,8 +94,8 @@ axle's centripetal reaction through its roll centre; the elastic term is the spr
 distributed by roll-stiffness share. Summed over both axles the transfer reproduces the total roll
 moment `m a_y h_cg` (Milliken decomposition). For `a_y > 0` (left corner) load moves to the outside
 (right) wheels. Anti-dive/anti-squat change the geometric/elastic split of the *pitch* attitude
-(ride height), not the steady-state `F_z` totals, so they enter the aero-platform equilibrium in
-PR3 rather than here. Unsprung mass is lumped into the sprung mass for v1 (documented estimate).
+(ride height), not the steady-state `F_z` totals, so they enter the aero-platform equilibrium below
+rather than here. Unsprung mass is lumped into the sprung mass for v1 (documented estimate).
 
 ### F_z coupling (Decision #29)
 
@@ -108,6 +108,49 @@ PR3 rather than here. Unsprung mass is lumped into the sprung mass for v1 (docum
 At convergence R1/R2 force `ΣF = m·a`, so both closures reach the same trim; the mode changes only
 the algebraic coupling in the Jacobian (and matters for the transient tiers). It is recorded in
 every result.
+
+## Ride-height / yaw aero map and the platform equilibrium (§7.4)
+
+The constant `C_zA`/`C_xA` above is the degenerate (passenger-car) case. The primary aero
+representation is a **gridded map**
+
+```
+{ C_{z,front}A, C_{z,rear}A, C_xA } = f(h_front, h_rear, yaw [, DRS])
+```
+
+interpolated by the shared tensor-product monotone cubic Hermite (Decision #30). This is the first
+open ride-height aero-map representation (§5.5): it generalises Perantoni & Limebeer's
+speed-dependent aero to explicit ride heights so a downforce car's pitch attitude — the thing that
+*defines* its behaviour — drives the coefficients. The reference `f1_2026` map is **synthetic**
+(`python/tools/gen_f1_aero.py`), anchored so the reference ride heights (30 mm front / 70 mm rear,
+yaw 0, DRS closed) reproduce the constant-aero fallback (`C_{z,f}A = 1.9`, `C_{z,r}A = 2.6`,
+`C_xA = 1.25`; a stand-in for the PL2014 aero that PR9 reconciles against the published figures).
+
+**Aero-platform equilibrium.** The coefficients depend on ride heights, which depend on the
+downforce they produce — a fixed point. The platform sinks from its static (design) ride height
+under the downforce and the spring-carried part of the longitudinal load transfer:
+
+```
+T = m a_x h_cg / L                                  (longitudinal transfer, + under acceleration)
+front_lt = −T                    rear_lt = (1−antisquat)·T          (a_x ≥ 0: rear squats)
+front_lt = (1−antidive)·(−T)     rear_lt =  T                       (a_x < 0: front dives)
+h_a = h_a^static − (½ρ C_{z,a}A v² + a_lt) / (2 k_a)                (per axle a, clamped ≥ 0)
+```
+
+`k_a` is the wheel ride rate (axle rate `2 k_a`). Iterating `h → coefficients → downforce → h` with
+under-relaxation (`λ = 0.6`) converges the platform in a few steps (deterministic cap of 40
+iterations, `1 µm` tolerance, zero allocation). The effective `½ρ C_{z,a}A` / `½ρ C_xA` at the
+converged platform then feed the load transfer and drag exactly as the constant terms did. Because
+the aerodynamic **yaw** is the body-slip angle `β` (an unknown), the map is evaluated *inside* the
+residual, so the finite-difference Jacobian captures `∂(downforce)/∂β` — the mechanism that makes
+the g-g diagram asymmetric mid-corner when the map carries a yaw dependence (a symmetric,
+even-in-yaw map keeps the g-g left/right symmetric but shrinks it off-centre). DRS is closed in the
+trim (its activation is a controller concern). Out-of-grid ride heights **clamp** to the edge
+coefficients rather than extrapolating a ground-effect curve past its validity.
+
+Clean-room citations: Perantoni & Limebeer 2014 (speed-dependent aero of the reference car); Katz,
+*Race Car Aerodynamics*, 1995 (ground-effect ride-height sensitivity and rake); the platform
+fixed point is a standard quasi-static heave balance.
 
 ## Numerics
 
@@ -134,8 +177,9 @@ for both reference cars down to hairpin-scale corners (~6 m radius at 8 m/s).
 
 - **Understeer gradient** `K = dδ/da_y − L/v²` (central-differenced from two small‑`a_y` trims):
   `> 0` understeer, `< 0` oversteer.
-- **Aero balance**: the front axle's share of total downforce (speed-invariant with constant aero;
-  the ride-height map makes it speed-dependent in PR3).
+- **Aero balance**: the front axle's share of total downforce — speed-invariant with constant aero,
+  and speed-dependent with a ride-height map installed (the platform rakes with downforce), reported
+  at a given speed by `aero_front_downforce_share_at(v)`.
 
 ## Property tests
 
@@ -144,3 +188,9 @@ symmetric car at `±a_y`; ISO 8855 sign conventions (left corner ⇒ `a_y, δ, r
 outside wheels); pitch transfer direction (braking loads the front, accelerating the rear); Newton
 convergence over a dense feasible `(v, a_y, a_x)` grid for both reference fixtures; graceful
 infeasibility flagging; `fz_coupling` modes agree at convergence; zero-allocation trim solve.
+
+Aero-map tests: the committed F1 map reproduces the reference coefficients at the reference ride
+heights; a constant map degenerates to the constant-aero trim (≤1e-9); the platform equilibrium
+converges and sinks monotonically with speed; a yaw-sensitive map cuts downforce off-centre while a
+yaw-flat map does not; DRS open cuts rear downforce and drag; the mapped-aero trim stays
+zero-allocation.

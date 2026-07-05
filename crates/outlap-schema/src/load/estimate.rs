@@ -6,17 +6,26 @@ use crate::load::provenance::{Origin, ProvenanceMap};
 use crate::load::report::ReportEntry;
 use crate::vehicle::{AxleKc, Vehicle};
 
+/// Nominal front static ride height when unspecified, m (a generic downforce-car design height).
+const FRONT_NOMINAL_RIDE_HEIGHT_M: f64 = 0.030;
+/// Nominal rear static ride height when unspecified, m (rearward rake, larger than the front).
+const REAR_NOMINAL_RIDE_HEIGHT_M: f64 = 0.050;
+
 /// Fill estimable fields on a resolved vehicle in place.
 pub fn estimate(spec: &mut Vehicle, prov: &mut ProvenanceMap, estimated: &mut Vec<ReportEntry>) {
+    // Axle-nominal static ride heights when absent: a downforce car sits lower with rearward rake;
+    // a road car sits far higher, but there the constant-aero path ignores the value entirely.
     estimate_axle(
         &mut spec.suspension.front,
         "/suspension/front",
+        FRONT_NOMINAL_RIDE_HEIGHT_M,
         prov,
         estimated,
     );
     estimate_axle(
         &mut spec.suspension.rear,
         "/suspension/rear",
+        REAR_NOMINAL_RIDE_HEIGHT_M,
         prov,
         estimated,
     );
@@ -52,9 +61,23 @@ pub fn estimate(spec: &mut Vehicle, prov: &mut ProvenanceMap, estimated: &mut Ve
 fn estimate_axle(
     axle: &mut AxleKc,
     base: &str,
+    nominal_ride_height_m: f64,
     prov: &mut ProvenanceMap,
     estimated: &mut Vec<ReportEntry>,
 ) {
+    if axle.static_ride_height_m.is_none() {
+        axle.static_ride_height_m = Some(nominal_ride_height_m);
+        record(
+            prov,
+            estimated,
+            &format!("{base}/static_ride_height_m"),
+            "static_ride_height_nominal",
+            format!(
+                "assumed {} mm nominal (only used by the ride-height aero map)",
+                nominal_ride_height_m * 1000.0
+            ),
+        );
+    }
     if axle.anti_dive.is_none() {
         axle.anti_dive = Some(0.0);
         record(

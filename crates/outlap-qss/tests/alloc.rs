@@ -97,6 +97,32 @@ fn setup_t1() -> T1Vehicle {
     T1Vehicle::assemble(&rv, &Conditions::default(), &loader, false).unwrap()
 }
 
+/// Install a tiny 2-axis (ride-height) aero map on a T1 vehicle so the trim exercises the
+/// aero-platform equilibrium fixed point (which must also stay zero-allocation).
+fn install_map(car: &mut T1Vehicle) {
+    let names = ["ride_height_f_mm", "ride_height_r_mm"];
+    let (mut hf, mut hr, mut czf, mut czr, mut cx) = (vec![], vec![], vec![], vec![], vec![]);
+    for &a in &[10.0_f64, 30.0, 60.0] {
+        for &b in &[30.0_f64, 70.0, 140.0] {
+            hf.push(a);
+            hr.push(b);
+            czf.push(0.0 + (60.0 - a) / 60.0); // rises as the front lowers
+            czr.push(3.0 * (1.0 + (140.0 - b) / 140.0));
+            cx.push(1.0);
+        }
+    }
+    let cols = vec![
+        ("ride_height_f_mm".to_owned(), hf),
+        ("ride_height_r_mm".to_owned(), hr),
+        ("cz_front_a_m2".to_owned(), czf),
+        ("cz_rear_a_m2".to_owned(), czr),
+        ("cx_a_m2".to_owned(), cx),
+    ];
+    let table = outlap_core::GriddedTable::from_long(&cols, &names).unwrap();
+    let axes: Vec<String> = names.iter().map(|s| (*s).to_owned()).collect();
+    car.install_aero_map(&table, &axes).unwrap();
+}
+
 /// The dhat testing profiler is process-global, so all hot paths share ONE profiler here: separate
 /// `#[test]`s would race under the parallel runner (same pattern as `outlap-tire/tests/alloc.rs`).
 /// Each kernel is measured in its own before/after window.
@@ -137,6 +163,26 @@ fn hot_paths_are_zero_alloc() {
         after.total_blocks,
         before.total_blocks,
         "T1Vehicle::trim allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+
+    // --- T1 trim with a ride-height aero map (the platform equilibrium fixed point) ---
+    let mut mapped = setup_t1();
+    install_map(&mut mapped); // cold: allocations allowed here
+    let _ = mapped.trim(&TrimInput::flat(40.0, 8.0, -3.0)); // warm
+    let _ = mapped.trim(&TrimInput::flat(7.0, 11.0, 0.0));
+
+    let before = dhat::HeapStats::get();
+    for i in 0..16 {
+        let ay = -8.0 + f64::from(i);
+        let _ = mapped.trim(&TrimInput::flat(40.0, ay, -2.0));
+        let _ = mapped.trim(&TrimInput::flat(7.0, 8.0 + 0.3 * f64::from(i), 0.0));
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "T1Vehicle::trim (mapped aero) allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
 }

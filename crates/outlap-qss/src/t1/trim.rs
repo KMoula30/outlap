@@ -370,15 +370,19 @@ impl T1Vehicle {
         Some((dp - dm) / (2.0 * ay) - self.wheelbase_m / (v * v))
     }
 
-    /// Aero balance: the front axle's share of total downforce, 0..1 (speed-invariant in T1/PR2 —
-    /// the ride-height map makes it speed-dependent in PR3).
+    /// Aero balance: the front axle's share of total downforce, 0..1, at the **reference** platform
+    /// (constant terms). With a ride-height map installed this is speed-invariant; use
+    /// [`Self::aero_front_downforce_share_at`] for the speed-dependent balance the map produces.
     pub fn aero_front_downforce_share(&self) -> f64 {
-        let total = self.qz_f + self.qz_r;
-        if total > 0.0 {
-            self.qz_f / total
-        } else {
-            0.5
-        }
+        share(self.qz_f, self.qz_r)
+    }
+
+    /// Aero balance at speed `v` (m/s): the front axle's share of total downforce, 0..1, at the
+    /// aero-platform equilibrium (straight running, `a_x = 0`). Speed-dependent when a ride-height
+    /// map is installed (the platform rakes with downforce); equals the reference share otherwise.
+    pub fn aero_front_downforce_share_at(&self, v: f64) -> f64 {
+        let aero = self.aero_lumped(v, 0.0, 0.0, 0.0);
+        share(aero.qz_f, aero.qz_r)
     }
 
     /// The residual vector `R(z)` for a commanded operating point (scaled dimensionless).
@@ -414,8 +418,12 @@ impl T1Vehicle {
             sum_fy += fy_b;
             sum_mz += geom.x[i] * fy_b - geom.y[i] * fx_b + f.mz;
         }
-        // Aero (constant): drag along body x, downforce enters the load transfer below.
-        let drag = self.qx * v * v;
+        // Aero: constant, or the ride-height map's platform equilibrium at this operating point.
+        // The aerodynamic yaw is the body-slip angle β (evaluated in degrees); DRS is closed in the
+        // trim (its activation is a controller concern). Keeping the evaluation inside the residual
+        // lets the finite-difference Jacobian pick up ∂(downforce)/∂β for the mid-corner asymmetry.
+        let aero = self.aero_lumped(v, inp.ax, beta.to_degrees(), 0.0);
+        let drag = aero.qx * v * v;
         sum_fx -= drag;
 
         // Load-transfer prediction of the four normal loads.
@@ -423,7 +431,7 @@ impl T1Vehicle {
             FzCoupling::OneStepLag => (inp.ax, inp.ay),
             FzCoupling::FixedPoint => (sum_fx / self.mass_kg, sum_fy / self.mass_kg),
         };
-        let fz_pred = self.load_transfer(inp, ax_lt, ay_lt);
+        let fz_pred = self.load_transfer(inp, ax_lt, ay_lt, aero.qz_f, aero.qz_r);
 
         // Scales: forces by m·g, moment by m·g·L, kinematic by g.
         let g = inp.g_normal;
@@ -441,15 +449,16 @@ impl T1Vehicle {
         }
     }
 
-    /// Quasi-static normal-load prediction `[FL, FR, RL, RR]` from the load-transfer model.
-    fn load_transfer(&self, inp: &TrimInput, ax: f64, ay: f64) -> [f64; 4] {
+    /// Quasi-static normal-load prediction `[FL, FR, RL, RR]` from the load-transfer model, given the
+    /// effective per-axle downforce terms `qz_f`/`qz_r` (`½·ρ·C_z·A`) at this operating point.
+    fn load_transfer(&self, inp: &TrimInput, ax: f64, ay: f64, qz_f: f64, qz_r: f64) -> [f64; 4] {
         let m = self.mass_kg;
         let l = self.wheelbase_m;
         let g = inp.g_normal;
         let v2 = inp.v * inp.v;
         // Static + downforce, per axle.
-        let front_total = m * g * (self.b_r / l) + self.qz_f * v2;
-        let rear_total = m * g * (self.a_f / l) + self.qz_r * v2;
+        let front_total = m * g * (self.b_r / l) + qz_f * v2;
+        let rear_total = m * g * (self.a_f / l) + qz_r * v2;
         // Longitudinal (pitch) transfer: rear gains under forward acceleration.
         let dfz_x = m * ax * self.h_cg / l;
         // Lateral transfer per axle: geometric (roll-centre) + elastic (roll-stiffness share).
@@ -500,7 +509,9 @@ impl T1Vehicle {
         let yaw_rate = inp.ay / v;
         let s = 0.03 * inp.ax.signum() * f64::from(u8::from(inp.ax != 0.0));
         let mg = self.mass_kg * inp.g_normal;
-        let fz = self.load_transfer(inp, inp.ax, inp.ay);
+        // Warm-start aero at zero yaw (β ≈ 0); the residual refines it against the true β.
+        let aero = self.aero_lumped(inp.v, inp.ax, 0.0, 0.0);
+        let fz = self.load_transfer(inp, inp.ax, inp.ay, aero.qz_f, aero.qz_r);
         [
             delta,
             beta,
@@ -603,6 +614,16 @@ fn split_axle(total: f64, transfer: f64) -> (f64, f64) {
         (total, 0.0)
     } else {
         (left, right)
+    }
+}
+
+/// The front axle's share of total downforce (0.5 when there is no downforce).
+fn share(qz_f: f64, qz_r: f64) -> f64 {
+    let total = qz_f + qz_r;
+    if total > 0.0 {
+        qz_f / total
+    } else {
+        0.5
     }
 }
 

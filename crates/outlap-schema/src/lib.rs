@@ -96,6 +96,7 @@ pub mod schema_name {
 /// The MAJOR version this build of the loader accepts for every schema (loaders accept same-major).
 pub const SCHEMA_MAJOR: u16 = 1;
 /// The MINOR version this build emits when serializing, and the highest MINOR it fully understands
-/// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block; an
+/// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block, then to
+/// 2 for the `vehicle/1.2` suspension `static_ride_height_m` (ride-height aero map, §7.4); an
 /// unknown key in a file that declares a newer MINOR than this is flagged as possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 1;
+pub const SCHEMA_MINOR: u16 = 2;

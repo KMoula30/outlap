@@ -24,11 +24,14 @@ suspension:
   model: lumped_kc
   front:
     ride_rate_n_per_m: 220000.0
+    # Static (design) ride heights the aero-map platform equilibrium compresses under downforce.
+    static_ride_height_m: 0.040
     roll_stiffness_share: 0.58
     roll_center_height_m: 0.03
     anti_dive: 0.4
   rear:
     ride_rate_n_per_m: 240000.0
+    static_ride_height_m: 0.090
     roll_stiffness_share: 0.42
     roll_center_height_m: 0.06
     anti_squat: 0.3

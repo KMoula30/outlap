@@ -6,8 +6,10 @@
 //! zero-allocation, panic-free trim solve consumed by the g-g-g-v envelope generator (PR7). The
 //! theory is documented in `docs/theory/t1-trim.md` with citations.
 
+pub mod aero;
 pub mod trim;
 pub mod vehicle;
 
+pub use aero::{AeroCoeffs, AeroLumped, AeroMap};
 pub use trim::{TrimInput, TrimOutcome, TrimState};
 pub use vehicle::T1Vehicle;
