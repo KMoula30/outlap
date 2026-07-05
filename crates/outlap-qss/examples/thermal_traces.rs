@@ -34,6 +34,7 @@ fn none(_: &str) -> Option<f64> {
     None
 }
 
+#[allow(clippy::too_many_lines)] // one linear trace-emitting script; splitting it hurts clarity.
 fn main() {
     let cond = Conditions::default();
     println!(
@@ -92,17 +93,26 @@ fn main() {
     )
     .expect("rear assembles");
     let base = 3000.0;
+    let steps_per_lap = 200;
     for lap in 0..26 {
-        println!(
-            "stint,{lap},{:.3},{:.4}",
-            rear.temp_c("winding").unwrap(),
-            rear.derate()
-        );
-        for _ in 0..200 {
+        for step in 0..steps_per_lap {
+            if step % 5 == 0 {
+                let frac = f64::from(lap) + f64::from(step) / f64::from(steps_per_lap);
+                println!(
+                    "stint,{frac:.4},{:.3},{:.4}",
+                    rear.temp_c("winding").unwrap(),
+                    rear.derate()
+                );
+            }
             let d = rear.derate();
             rear.step(base * d, none, 800.0, 1.0).expect("stint step");
         }
     }
+    println!(
+        "stint,26.0000,{:.3},{:.4}",
+        rear.temp_c("winding").unwrap(),
+        rear.derate()
+    );
 
     // --- (c) Speed-dependent air-gap cooling: the detailed pdt_synth network at two shaft speeds.
     // Per-component losses drive the magnet, whose only escape is the (speed-dependent) air-gap film.
