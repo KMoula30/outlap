@@ -17,7 +17,7 @@ pub mod vehicle;
 pub use aero::{AeroCoeffs, AeroLumped, AeroMap};
 pub use battery::{Pack, PackState, StepOut};
 pub use envelope::GgvEnvelope;
-pub use powertrain::{DiffModel, EnergyPoint, PrimaryDiff, T1Powertrain};
+pub use powertrain::{DiffModel, EnergyPoint, PrimaryDiff, T1Powertrain, TractionEnergy};
 pub use thermal::MachineThermal;
 pub use trim::{TrimInput, TrimOutcome, TrimState};
 pub use vehicle::T1Vehicle;

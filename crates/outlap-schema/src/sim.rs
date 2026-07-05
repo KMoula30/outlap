@@ -38,12 +38,17 @@ pub struct Sim {
     /// (Decision #40).
     #[serde(default)]
     pub allow_degraded: bool,
+    /// Flat-track analysis mode: zero the track grade, banking, and vertical curvature so the
+    /// g-g-g-v envelope collapses to a flat g-g (the 2-D oracle-comparison mode, e.g. the Limebeer
+    /// cross-check). A recorded simulation setting; the physical track file is left untouched.
+    #[serde(default)]
+    pub flat_track: bool,
 }
 
 impl Default for Sim {
     fn default() -> Self {
         Self {
-            schema: SchemaVersion::new(crate::schema_name::SIM, crate::SCHEMA_MAJOR, 0),
+            schema: SchemaVersion::new(crate::schema_name::SIM, crate::SCHEMA_MAJOR, 1),
             tier: Tier::default(),
             dt_s: default_dt_s(),
             fz_coupling: FzCoupling::default(),
@@ -51,6 +56,7 @@ impl Default for Sim {
             envelope: Envelope::default(),
             raceline: Raceline::default(),
             allow_degraded: false,
+            flat_track: false,
         }
     }
 }

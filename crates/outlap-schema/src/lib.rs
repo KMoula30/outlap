@@ -103,6 +103,7 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block, to
 /// 2 for the `vehicle/1.2` suspension `static_ride_height_m` (ride-height aero map, §7.4), then to
 /// 3 for the `ptm/1.1` optional Vdc axis (Vdc–SoC coupling, §8.4) alongside the new `battery/1.0`
-/// document; an unknown key in a file that declares a newer MINOR than this is flagged as
+/// document, then to 4 for the `sim/1.1` `flat_track` analysis flag (tier dispatch + Limebeer
+/// cross-check); an unknown key in a file that declares a newer MINOR than this is flagged as
 /// possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 3;
+pub const SCHEMA_MINOR: u16 = 4;

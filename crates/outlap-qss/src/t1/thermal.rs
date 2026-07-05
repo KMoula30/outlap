@@ -368,6 +368,13 @@ impl MachineThermal {
         self.net.derate(&self.state)
     }
 
+    /// Temperature of the **winding** node, °C — the rated node that normally binds the derate and
+    /// the representative machine temperature the QSS slow-state coupling logs per segment.
+    #[must_use]
+    pub fn winding_temp_c(&self) -> f64 {
+        self.state.temp_k[self.winding_idx] - CELSIUS_K
+    }
+
     /// Temperature of a node by name, °C (`None` if the name is unknown).
     #[must_use]
     pub fn temp_c(&self, node: &str) -> Option<f64> {
