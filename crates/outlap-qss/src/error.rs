@@ -94,4 +94,9 @@ pub enum T1Error {
     /// table column, or a non-rectilinear `(soc, temp)` grid).
     #[error("could not assemble the battery pack: {0}")]
     Battery(String),
+    /// A g-g-g-v envelope table (base boundary or a Decision #31 sensitivity field) could not be
+    /// built into an interpolant — the axes/values were inconsistent (should not happen: the
+    /// generator builds a full rectilinear grid with finite values).
+    #[error("could not build the g-g-g-v envelope interpolant: {0}")]
+    GgvEnvelope(outlap_core::GridMapError),
 }

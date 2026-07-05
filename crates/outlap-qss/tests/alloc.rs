@@ -10,13 +10,15 @@ use std::f64::consts::PI;
 
 use outlap_core::GriddedTable;
 use outlap_qss::path::T0Path;
-use outlap_qss::solver::solve_into;
+use outlap_qss::solver::{solve_into, solve_into_ggv};
 use outlap_qss::{
-    MachineThermal, Pack, PackState, T0Options, T0Vehicle, T0Workspace, T1Vehicle, TrimInput,
+    GgvEnvelope, MachineThermal, Pack, PackState, T0Options, T0Vehicle, T0Workspace, T1Vehicle,
+    TrimInput,
 };
 use outlap_schema::centerline::{Centerline, CenterlineRow};
 use outlap_schema::io::MemLoader;
 use outlap_schema::refs::CenterlineRef;
+use outlap_schema::sim::Envelope as EnvelopeRes;
 use outlap_schema::track::{TrackDoc, TrackMeta};
 use outlap_schema::version::SchemaVersion;
 use outlap_schema::{load_vehicle, Conditions, LoadOptions};
@@ -147,6 +149,33 @@ fn hot_paths_are_zero_alloc() {
         after.total_blocks,
         before.total_blocks,
         "solve_into allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+
+    // --- g-g-g-v envelope query + T0-on-envelope velocity-profile solve ---
+    // The envelope is generated cold (allocations allowed); the per-lap solve and the boundary
+    // queries must not allocate.
+    let t1 = setup_t1();
+    let env_res = EnvelopeRes {
+        v_points: 4,
+        ax_points: 5,
+        g_normal_points: 2,
+    };
+    let env = GgvEnvelope::generate(&t1, &env_res, outlap_schema::sim::FzCoupling::OneStepLag)
+        .expect("envelope generates");
+    solve_into_ggv(&veh, &env, &path, &mut ws).unwrap(); // warm
+
+    let before = dhat::HeapStats::get();
+    for _ in 0..16 {
+        solve_into_ggv(&veh, &env, &path, &mut ws).unwrap();
+        let _ = env.ay_boundary(40.0, -2.0, 9.81);
+        let _ = env.ay_boundary_corrected(40.0, 1.0, 11.0, 1.1, 980.0, 1.2);
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "solve_into_ggv / envelope eval allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
 
