@@ -11,12 +11,14 @@ use outlap_core::GriddedTable;
 use outlap_schema::conditions::Conditions;
 use outlap_schema::io::SourceLoader;
 use outlap_schema::load::load_tyr;
+use outlap_schema::tyr::Tyr;
 use outlap_schema::vehicle::Wheel;
 use outlap_schema::ResolvedVehicle;
 use outlap_tire::TireModel;
 
 use crate::error::T1Error;
 use crate::t1::aero::{AeroLumped, AeroMap, AeroPlatform};
+use crate::t1::powertrain::{PrimaryDiff, T1Powertrain};
 
 /// Specific gas constant for dry air, J/(kg·K).
 const DRY_AIR_R: f64 = 287.05;
@@ -90,6 +92,11 @@ pub struct T1Vehicle {
     pub driven: [bool; 4],
     /// Brake-balance bar: front bias fraction, 0..1.
     pub brake_front_bias: f64,
+    /// The topology powertrain: traction ceiling + differential torque split + energy accounting.
+    pub(crate) powertrain: T1Powertrain,
+    /// The primary driven axle's differential (cached from the powertrain for the trim's diff
+    /// residual). `None` ⇒ the trim uses the equal-speed (locked) baseline.
+    pub(crate) primary_diff: Option<PrimaryDiff>,
     /// Assembly notes / simplifications (nothing silent).
     notes: Vec<String>,
 }
@@ -103,6 +110,7 @@ impl T1Vehicle {
     /// # Errors
     /// [`T1Error`] if a referenced `.tyr` fails to load/validate, the tyre force model cannot be
     /// built, or the aero block has no `constant` coefficients and no map is installed.
+    #[allow(clippy::too_many_lines)] // one linear assembly procedure; splitting it hurts clarity.
     pub fn assemble(
         vehicle: &ResolvedVehicle,
         conditions: &Conditions,
@@ -124,6 +132,8 @@ impl T1Vehicle {
         }
         let p_front = 1000.0 * front_doc.thermal.p_cold;
         let p_rear = 1000.0 * rear_doc.thermal.p_cold;
+        let r_front = tyr_radius(&front_doc);
+        let r_rear = tyr_radius(&rear_doc);
 
         // --- Chassis geometry (CG measured from the front axle, §6.1) ---
         let ch = &spec.chassis;
@@ -175,12 +185,22 @@ impl T1Vehicle {
 
         let brake_front_bias = spec.brakes.balance_bar;
 
+        // --- Topology powertrain (traction ceiling + differential torque split) ---
+        let powertrain = T1Powertrain::assemble(vehicle, loader, r_front, r_rear)?;
+        let primary_diff = powertrain.primary_diff();
+        for n in powertrain.notes() {
+            if !notes.contains(n) {
+                notes.push(n.clone());
+            }
+        }
+
         notes.push(
             "T1 load transfer: total longitudinal transfer + per-axle lateral transfer (roll-centre \
              geometry + roll-stiffness distribution). With a ride-height aero map installed, \
              anti-dive/anti-squat modulate the aero-platform heave; without one they do not affect \
-             steady-state Fz. Simplified longitudinal-slip traction (PR4 adds the drivetrain graph). \
-             Camber = 0 (camber maps land later)."
+             steady-state Fz. The differential torque split (open/locked/LSD/solid) enters the trim; \
+             the powertrain torque envelope is the traction ceiling. Camber = 0 (camber maps land \
+             later)."
                 .to_owned(),
         );
 
@@ -215,6 +235,8 @@ impl T1Vehicle {
             aero_map: None,
             driven,
             brake_front_bias,
+            powertrain,
+            primary_diff,
             notes,
         })
     }
@@ -281,6 +303,37 @@ impl T1Vehicle {
         self.aero_map.is_some()
     }
 
+    /// Install a decoded `.ptm` efficiency/loss table onto drive unit `unit_idx` (energy
+    /// accounting). Decode the sidecar with the axis names from [`T1Powertrain::map_axis_names`].
+    ///
+    /// # Errors
+    /// [`T1Error::PowertrainMap`] / [`T1Error::UnknownDriveUnit`] if the table or index is invalid.
+    pub fn install_powertrain_maps(
+        &mut self,
+        unit_idx: usize,
+        table: &GriddedTable<f64>,
+    ) -> Result<(), T1Error> {
+        self.powertrain.install_maps(unit_idx, table)
+    }
+
+    /// The topology powertrain (traction ceiling, differential split, energy accounting).
+    pub fn powertrain(&self) -> &T1Powertrain {
+        &self.powertrain
+    }
+
+    /// The maximum wheel **drive** force the powertrain can put down at vehicle speed `v` (m/s), N —
+    /// the traction ceiling PR7's g-g-g-v envelope caps the acceleration boundary with. The
+    /// tyre-grip limit is enforced separately by the trim. Allocation-free.
+    pub fn max_tractive_force(&self, v: f64) -> f64 {
+        self.powertrain.max_drive_force(v)
+    }
+
+    /// The maximum powertrain-limited longitudinal acceleration at speed `v` (m/s), m/s² — the
+    /// traction ceiling divided by mass (aero drag is applied by the caller/envelope generator).
+    pub fn max_tractive_accel(&self, v: f64) -> f64 {
+        self.max_tractive_force(v) / self.mass_kg
+    }
+
     /// Front-axle static weight fraction `b_r / L` (share of vertical load carried by the front axle
     /// with no aero and no acceleration).
     pub fn front_weight_fraction(&self) -> f64 {
@@ -335,6 +388,12 @@ fn ride_height_or_default(
         ));
         default_m
     })
+}
+
+/// The tyre unloaded rolling radius, m (MF6.1 `UNLOADED_RADIUS`; 0.33 m fallback), for the
+/// shaft-speed/force conversion in the powertrain traction limit.
+fn tyr_radius(tyr: &Tyr) -> f64 {
+    tyr.mf61.0.get("UNLOADED_RADIUS").copied().unwrap_or(0.33)
 }
 
 /// Map a [`Wheel`] to its index in the canonical `[FL, FR, RL, RR]` order.

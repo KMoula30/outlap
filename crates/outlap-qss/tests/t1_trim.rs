@@ -163,19 +163,31 @@ fn left_right_symmetry_for_symmetric_car() {
 fn newton_converges_over_modest_feasible_grid() {
     // Modest operating points inside the friction envelope of both reference cars (an F1 with
     // downforce and a FWD road car with slight lift), spanning low race-corner speeds (8 m/s ≈
-    // 29 km/h) up to 60 m/s — the homotopy continuation keeps every one converging. Every one trims.
+    // 29 km/h) up to 60 m/s — the homotopy continuation keeps every feasible one converging.
+    //
+    // PR4 (diff in the trim): the FWD hatch runs an OPEN front diff, so its equal-torque limit is
+    // set by the inner (less-loaded) wheel. Demanding maximum lateral AND maximum longitudinal at
+    // once — |ay| = 6 with ax = 3 — exceeds that open-diff envelope (the inner wheel cannot match
+    // the outer's torque), so those corners are a clean boundary, not a solver failure. The F1
+    // (LSD ⇒ locked in the trim) can shuffle torque across the axle and trims the whole grid.
     for name in ["f1_2026/vehicle.yaml", "fwd_hatch/vehicle.yaml"] {
         let car = assemble(name);
+        let open_front_diff = name.contains("fwd_hatch");
         for vi in 0..7 {
             let v = 8.0 + 8.0 * f64::from(vi); // 8 … 56 m/s
             for ai in 0..7 {
                 let ay = -6.0 + 2.0 * f64::from(ai); // −6 … 6 m/s²
                 for xi in 0..5 {
                     let ax = -3.0 + 1.5 * f64::from(xi); // −3 … 3 m/s²
+                                                         // The open-diff inner-wheel traction limit (documented above).
+                    let open_diff_limited = open_front_diff && ay.abs() >= 6.0 && ax >= 3.0;
                     match car.trim(&TrimInput::flat(v, ay, ax)) {
                         TrimOutcome::Converged(s) => assert!(s.residual_norm <= 1e-10),
                         TrimOutcome::Infeasible { residual_norm, .. } => {
-                            panic!("{name}: (v={v}, ay={ay}, ax={ax}) should trim (rn={residual_norm:.2e})")
+                            assert!(
+                                open_diff_limited && residual_norm.is_finite(),
+                                "{name}: (v={v}, ay={ay}, ax={ax}) should trim (rn={residual_norm:.2e})"
+                            );
                         }
                     }
                 }

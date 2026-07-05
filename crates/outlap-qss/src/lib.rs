@@ -43,7 +43,10 @@ pub use error::{T0Error, T1Error};
 pub use path::T0Path;
 pub use result::{LapResult, LineDescriptor, T0Workspace};
 pub use solver::{solve_into, solve_lap};
-pub use t1::{AeroCoeffs, AeroLumped, AeroMap, T1Vehicle, TrimInput, TrimOutcome, TrimState};
+pub use t1::{
+    AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint, PrimaryDiff, T1Powertrain, T1Vehicle,
+    TrimInput, TrimOutcome, TrimState,
+};
 pub use vehicle::{T0Options, T0Vehicle};
 
 /// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];
