@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 
 use outlap_qss::path::T0Path;
 use outlap_qss::solver::solve_into;
-use outlap_qss::{T0Options, T0Vehicle, T0Workspace};
+use outlap_qss::{T0Options, T0Vehicle, T0Workspace, T1Vehicle, TrimInput};
 use outlap_schema::centerline::{Centerline, CenterlineRow};
 use outlap_schema::io::MemLoader;
 use outlap_schema::refs::CenterlineRef;
@@ -75,25 +75,68 @@ fn setup() -> (T0Vehicle, T0Path) {
     (veh, path)
 }
 
+/// Assemble a T1 vehicle from the same in-memory fixture as [`setup`].
+fn setup_t1() -> T1Vehicle {
+    let ptm = "schema: ptm/1.0\nkind: drive_unit\n\
+        axes: {speed_rpm: [0.0, 30000.0], load_axis: {torque_nm: [0.0, 800.0]}, torque_nm: [0.0, 800.0]}\n\
+        tables: {file: x.parquet}\n\
+        limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 30000.0], torque_nm: [800.0, 800.0]}}\n\
+        inertia_kgm2: 0.05\nmass_kg: 60.0\nmeta: {upstream_ratio_applied: false}\n";
+    let veh = "schema: vehicle/1.0\nname: t\n\
+        chassis: {mass_kg: 1000.0, cg: [1.4, 0.0, 0.3], inertia: [100.0, 400.0, 450.0], wheelbase_m: 2.8, track_m: [1.6, 1.6]}\n\
+        aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 1.0, cz_front_a_m2: 0.0, cz_rear_a_m2: 3.0}}\n\
+        suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
+        tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
+        drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{fixed_ratio: 4.0}], wheels: [RL, RR]}]}\n\
+        brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}, rear: {thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}}}\n";
+    let loader = MemLoader::new()
+        .with("vehicle.yaml", veh)
+        .with("ptm/u.ptm.yaml", ptm)
+        .with("tyr/slick.tyr.yaml", SLICK);
+    let rv = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
+    T1Vehicle::assemble(&rv, &Conditions::default(), &loader, false).unwrap()
+}
+
+/// The dhat testing profiler is process-global, so all hot paths share ONE profiler here: separate
+/// `#[test]`s would race under the parallel runner (same pattern as `outlap-tire/tests/alloc.rs`).
+/// Each kernel is measured in its own before/after window.
 #[test]
-fn solve_into_is_zero_alloc() {
+fn hot_paths_are_zero_alloc() {
     let _profiler = dhat::Profiler::builder().testing().build();
+
+    // --- T0 velocity-profile solve ---
     let (veh, path) = setup();
     let mut ws = T0Workspace::for_path(&path);
-
-    // Warm (first call may touch lazily-initialised statics elsewhere).
-    solve_into(&veh, &path, &mut ws).unwrap();
+    solve_into(&veh, &path, &mut ws).unwrap(); // warm
 
     let before = dhat::HeapStats::get();
     for _ in 0..16 {
         solve_into(&veh, &path, &mut ws).unwrap();
     }
     let after = dhat::HeapStats::get();
-
     assert_eq!(
         after.total_blocks,
         before.total_blocks,
         "solve_into allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+
+    // --- T1 double-track trim (Levenberg–Marquardt + FD Jacobian; homotopy continuation) ---
+    let car = setup_t1();
+    let _ = car.trim(&TrimInput::flat(40.0, 8.0, -3.0)); // warm the fast path
+    let _ = car.trim(&TrimInput::flat(7.0, 11.0, 0.0)); // warm the continuation fallback
+
+    let before = dhat::HeapStats::get();
+    for i in 0..16 {
+        let ay = -8.0 + f64::from(i);
+        let _ = car.trim(&TrimInput::flat(40.0, ay, -2.0)); // fast direct solve
+        let _ = car.trim(&TrimInput::flat(7.0, 8.0 + 0.3 * f64::from(i), 0.0)); // continuation path
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "T1Vehicle::trim allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
 }

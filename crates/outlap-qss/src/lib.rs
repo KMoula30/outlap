@@ -36,12 +36,14 @@ pub mod error;
 pub mod path;
 pub mod result;
 pub mod solver;
+pub mod t1;
 pub mod vehicle;
 
-pub use error::T0Error;
+pub use error::{T0Error, T1Error};
 pub use path::T0Path;
 pub use result::{LapResult, LineDescriptor, T0Workspace};
 pub use solver::{solve_into, solve_lap};
+pub use t1::{T1Vehicle, TrimInput, TrimOutcome, TrimState};
 pub use vehicle::{T0Options, T0Vehicle};
 
 /// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];

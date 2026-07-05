@@ -46,3 +46,19 @@ pub enum T0Error {
         path: usize,
     },
 }
+
+/// An error assembling a [`T1Vehicle`](crate::t1::T1Vehicle) for the trim solver.
+#[derive(Debug, thiserror::Error)]
+pub enum T1Error {
+    /// A referenced `.tyr` file failed to load or validate.
+    #[error(transparent)]
+    Load(#[from] outlap_schema::SchemaError),
+    /// A tyre force model could not be built from a `.tyr` document (a required force key is
+    /// missing and no brush block is present — should not happen after schema validation).
+    #[error("could not build the tyre force model: {0}")]
+    TireBuild(#[from] outlap_tire::TireBuildError),
+    /// The aero block has no `constant` coefficients and `allow_degraded` was not set. T1/PR2 needs
+    /// constant CdA/CzA (the ride-height aero map arrives in PR3).
+    #[error("aero has no `constant` block; T1 (PR2) needs constant CdA/CzA (set `allow_degraded` to run with zero aero)")]
+    NoConstantAero,
+}
