@@ -63,6 +63,15 @@ pub struct T1Vehicle {
     pub p_front: f64,
     /// Rear tyre cold inflation pressure, Pa.
     pub p_rear: f64,
+    /// Uniform tyre-grip scale (`μ_tire`), 1.0 at the reference state. Multiplies the per-wheel
+    /// `μ_scale_x`/`μ_scale_y` in the trim so the g-g-g-v envelope generator (PR7) can re-solve at
+    /// perturbed grip for the Decision #31 sensitivity corrections. Not a per-run setting — a
+    /// reference-perturbation knob (`with_mu_scale`).
+    pub(crate) mu_scale: f64,
+    /// Uniform downforce (`C_zA`) scale, 1.0 at the reference state. Multiplies the effective
+    /// downforce terms `qz_f`/`qz_r` after the aero-platform equilibrium (the ∂/∂ClA perturbation for
+    /// the PR7 corrections; drag `qx` is unaffected). Set via `with_cla_scale`.
+    pub(crate) cla_scale: f64,
     /// Lumped drag term `½·ρ·C_xA`, N per (m/s)² — the constant/reference value (the ride-height
     /// map, when installed, supersedes it at each operating point).
     pub qx: f64,
@@ -222,6 +231,8 @@ impl T1Vehicle {
             tire_rear,
             p_front,
             p_rear,
+            mu_scale: 1.0,
+            cla_scale: 1.0,
             qx,
             qz_f,
             qz_r,
@@ -285,7 +296,7 @@ impl T1Vehicle {
     ///
     /// `yaw_deg` is the aerodynamic yaw (vehicle sideslip β) in degrees; `drs` the DRS flag.
     pub(crate) fn aero_lumped(&self, v: f64, ax: f64, yaw_deg: f64, drs: f64) -> AeroLumped {
-        match &self.aero_map {
+        let mut aero = match &self.aero_map {
             Some(map) => self.platform().equilibrium(map, v, ax, yaw_deg, drs),
             None => AeroLumped {
                 qx: self.qx,
@@ -295,7 +306,41 @@ impl T1Vehicle {
                 h_r_m: self.h_ref_r_m,
                 converged: true,
             },
-        }
+        };
+        // Uniform downforce (ClA) perturbation for the PR7 corrections: scale the effective
+        // downforce after the platform equilibrium (drag `qx` is unaffected). Identity at the
+        // reference state (`cla_scale == 1`).
+        aero.qz_f *= self.cla_scale;
+        aero.qz_r *= self.cla_scale;
+        aero
+    }
+
+    /// A clone of this vehicle with the uniform tyre-grip scale set to `mu_scale` (a
+    /// reference-perturbation for the g-g-g-v envelope's Decision #31 ∂/∂μ_tire sensitivity).
+    /// Cold path (clones the assembly).
+    #[must_use]
+    pub fn with_mu_scale(&self, mu_scale: f64) -> Self {
+        let mut c = self.clone();
+        c.mu_scale = mu_scale;
+        c
+    }
+
+    /// A clone of this vehicle with the total mass set to `mass_kg` (the ∂/∂mass perturbation for the
+    /// envelope corrections). Cold path.
+    #[must_use]
+    pub fn with_mass(&self, mass_kg: f64) -> Self {
+        let mut c = self.clone();
+        c.mass_kg = mass_kg;
+        c
+    }
+
+    /// A clone of this vehicle with the uniform downforce scale set to `cla_scale` (the ∂/∂ClA
+    /// perturbation for the envelope corrections). Cold path.
+    #[must_use]
+    pub fn with_cla_scale(&self, cla_scale: f64) -> Self {
+        let mut c = self.clone();
+        c.cla_scale = cla_scale;
+        c
     }
 
     /// Whether a ride-height/yaw aero map is installed.

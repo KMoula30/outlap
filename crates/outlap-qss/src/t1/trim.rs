@@ -206,6 +206,53 @@ impl T1Vehicle {
         self.trim_continuation(inp, &geom, iters)
     }
 
+    /// A single direct trim solve seeded from an optional warm state, **without** the homotopy
+    /// continuation fallback. This is the boundary-search primitive the g-g-g-v envelope generator
+    /// marches: walking `a_y` upward from a feasible state and warm-starting each probe from the
+    /// previous solution keeps every solve in the LM fast path, so feasible points converge and
+    /// infeasible ones (past the friction boundary) fail fast — orders of magnitude cheaper than
+    /// running the full continuation on the many infeasible probes a bisection makes. Zero-allocation,
+    /// panic-free.
+    pub(crate) fn trim_warm(&self, inp: &TrimInput, warm: Option<&TrimState>) -> TrimOutcome {
+        let bad_speed = !inp.v.is_finite() || inp.v <= V_MIN;
+        let bad_gravity = !inp.g_normal.is_finite() || inp.g_normal <= 0.0;
+        if bad_speed || bad_gravity {
+            return TrimOutcome::Infeasible {
+                residual_norm: f64::INFINITY,
+                iterations: 0,
+            };
+        }
+        let geom = Geom::new(self);
+        let z0 = warm.map_or_else(|| self.initial_guess(inp), |w| self.warm_z(inp, w));
+        let (z, rn, iters) = self.solve_lm(inp, &geom, z0);
+        if rn <= TOL {
+            TrimOutcome::Converged(self.finalize(inp, &geom, &z, rn, iters))
+        } else {
+            TrimOutcome::Infeasible {
+                residual_norm: rn,
+                iterations: iters,
+            }
+        }
+    }
+
+    /// Reconstruct an unknown vector `z` from a converged [`TrimState`] to warm-start a nearby solve
+    /// (the `F_z` components are re-non-dimensionalised by `m·g_normal`; the driven-axle split `w`
+    /// starts even and the LM refines it).
+    fn warm_z(&self, inp: &TrimInput, w: &TrimState) -> [f64; N] {
+        let mg = self.mass_kg * inp.g_normal;
+        [
+            w.delta,
+            w.beta,
+            w.yaw_rate,
+            w.long_ctrl,
+            0.0,
+            w.fz[0] / mg,
+            w.fz[1] / mg,
+            w.fz[2] / mg,
+            w.fz[3] / mg,
+        ]
+    }
+
     /// Homotopy continuation of the trim: solve the easy straight-line state, then ramp the target
     /// `(a_y, a_x)` with an adaptive continuation parameter, re-solving from the previous solution.
     fn trim_continuation(&self, inp: &TrimInput, geom: &Geom, mut iters: usize) -> TrimOutcome {
@@ -420,7 +467,7 @@ impl T1Vehicle {
             } else {
                 (&self.tire_rear, self.p_rear)
             };
-            let f = tire_forces(model, kappa, alpha, z[FZ0 + i] * mg, p, vxw);
+            let f = tire_forces(model, kappa, alpha, z[FZ0 + i] * mg, p, vxw, self.mu_scale);
             // Capture the driven-axle wheel-frame longitudinal forces for the diff residual.
             if let Some(pd) = &self.primary_diff {
                 if i == pd.left {
@@ -616,7 +663,7 @@ impl T1Vehicle {
             } else {
                 (&self.tire_rear, self.p_rear)
             };
-            let f = tire_forces(model, kappa, alpha, z[FZ0 + i] * mg, p, vxw);
+            let f = tire_forces(model, kappa, alpha, z[FZ0 + i] * mg, p, vxw, self.mu_scale);
             st.kappa[i] = kappa;
             st.alpha[i] = alpha;
             st.fx[i] = f.fx * cs - f.fy * sn;
@@ -626,7 +673,9 @@ impl T1Vehicle {
     }
 }
 
-/// Evaluate the tyre force model at a contact-patch state (`γ = 0`, unity μ-scale in T1/PR2).
+/// Evaluate the tyre force model at a contact-patch state (`γ = 0`). `mu_scale` uniformly scales the
+/// per-axis friction (1.0 at the reference state; the envelope generator perturbs it for the
+/// Decision #31 ∂/∂μ_tire sensitivity).
 #[inline]
 fn tire_forces(
     model: &TireModel<f64>,
@@ -635,8 +684,12 @@ fn tire_forces(
     fz: f64,
     p: f64,
     vx: f64,
+    mu_scale: f64,
 ) -> outlap_tire::TireForces<f64> {
-    model.forces(&SlipState::new(kappa, alpha, 0.0, fz, p, vx))
+    let mut slip = SlipState::new(kappa, alpha, 0.0, fz, p, vx);
+    slip.mu_scale_x = mu_scale;
+    slip.mu_scale_y = mu_scale;
+    model.forces(&slip)
 }
 
 /// Clamp a trim state to physically-generous bounds so the solver cannot wander into unphysical

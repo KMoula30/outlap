@@ -42,10 +42,10 @@ pub mod vehicle;
 pub use error::{T0Error, T1Error};
 pub use path::T0Path;
 pub use result::{LapResult, LineDescriptor, T0Workspace};
-pub use solver::{solve_into, solve_lap};
+pub use solver::{solve_into, solve_into_ggv, solve_lap};
 pub use t1::{
-    AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint, MachineThermal, Pack, PackState,
-    PrimaryDiff, StepOut, T1Powertrain, T1Vehicle, TrimInput, TrimOutcome, TrimState,
+    AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint, GgvEnvelope, MachineThermal, Pack,
+    PackState, PrimaryDiff, StepOut, T1Powertrain, T1Vehicle, TrimInput, TrimOutcome, TrimState,
 };
 pub use vehicle::{T0Options, T0Vehicle};
 
