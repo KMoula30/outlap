@@ -126,6 +126,12 @@ speed-dependent aero to explicit ride heights so a downforce car's pitch attitud
 yaw 0, DRS closed) reproduce the constant-aero fallback (`C_{z,f}A = 1.9`, `C_{z,r}A = 2.6`,
 `C_xA = 1.25`; a stand-in for the PL2014 aero that PR9 reconciles against the published figures).
 
+![Reference F1 ride-height/yaw aero map and platform equilibrium](img/t1_aero_map.png)
+
+*The committed synthetic F1 map (`python/tools/plot_f1_aero.py`): (a,b) ground effect and rake, (c)
+the even yaw sensitivity and DRS effect, and (d) the platform sinking and raking with speed so the
+downforce balance shifts forward — the speed-dependent balance a constant-aero car cannot show.*
+
 **Aero-platform equilibrium.** The coefficients depend on ride heights, which depend on the
 downforce they produce — a fixed point. The platform sinks from its static (design) ride height
 under the downforce and the spring-carried part of the longitudinal load transfer:
