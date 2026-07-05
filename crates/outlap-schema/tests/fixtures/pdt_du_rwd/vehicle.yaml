@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Test topology: a lumped PDT drive-unit (ptm/pdt_synth_du.ptm.yaml, ratio already applied at the
+# output shaft) -> open diff -> RL+RR. Used by the T1 powertrain tests (map install, PDT round-trip,
+# energy closure, traction ceiling). SYNTHETIC — never derived from PDT data (firewall).
+schema: vehicle/1.0
+name: "PDT drive-unit RWD (test)"
+chassis:
+  mass_kg: 420.0
+  cg: [1.10, 0.0, 0.30]
+  inertia: [90.0, 260.0, 300.0]
+  wheelbase_m: 2.20
+  track_m: [1.30, 1.28]
+aero:
+  map: aero/none.parquet
+  axes: []
+  constant:
+    cx_a_m2: 0.90
+    cz_front_a_m2: 0.0
+    cz_rear_a_m2: 0.0
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 30000.0
+    roll_stiffness_share: 0.52
+    roll_center_height_m: 0.05
+  rear:
+    ride_rate_n_per_m: 32000.0
+    roll_stiffness_share: 0.48
+    roll_center_height_m: 0.06
+tires:
+  front: tyr/slick.tyr.yaml
+  rear: tyr/slick.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/pdt_synth_du.ptm.yaml
+      path:
+        - diff: { type: open }
+      wheels: [RL, RR]
+brakes:
+  balance_bar: 0.58
+  disc:
+    front:
+      thermal_capacity_j_per_k: 20000.0
+      cooling_area_m2: 0.05
+    rear:
+      thermal_capacity_j_per_k: 16000.0
+      cooling_area_m2: 0.04

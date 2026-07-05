@@ -21,7 +21,7 @@ decomposition). No lap-time-optimiser source code is read for the implementation
 
 ISO 8855 body frame: `x` forward, `y` left, `z` up; origin at the CG, so the front axle sits at
 `x = +a_f`, the rear at `x = −b_r` (`a_f = cg_x`, `b_r = L − a_f`), the left wheels at `y = +t/2`.
-The trim solves an 8‑unknown vector `z`:
+The trim solves a 9‑unknown vector `z`:
 
 | index | symbol | meaning |
 |---|---|---|
@@ -29,7 +29,8 @@ The trim solves an 8‑unknown vector `z`:
 | 1 | `β` | body-slip angle (CG velocity vs body `x`), rad |
 | 2 | `r` | yaw rate, rad/s |
 | 3 | `s` | longitudinal-slip control (`> 0` drive, `< 0` brake) |
-| 4–7 | `F_{z,i}` | per-wheel normal loads `[FL, FR, RL, RR]`, N |
+| 4 | `w` | driven-axle slip split (`κ_left = s + w`, `κ_right = s − w`; the [differential](qss-powertrain.md) unknown) |
+| 5–8 | `F_{z,i}` | per-wheel normal loads `[FL, FR, RL, RR]`, N |
 
 ## Wheel kinematics
 
@@ -50,11 +51,13 @@ V_{yw} = −V_x sin δ_i + V_y cos δ_i
 α_i = atan2(V_{yw}, |V_{xw}|)
 ```
 
-The longitudinal slip is set by the control `s`: `κ_i = s` on the driven wheels for `s ≥ 0`
-(drive), and `κ_i = s·b_i` on all wheels for `s < 0` (brake), with the front/rear brake split `b_i`
-from the balance bar. This one-parameter longitudinal model captures the friction-circle coupling
-(longitudinal force consumes grip available for cornering); the drivetrain-graph traction limit and
-diff behaviour are refined in PR4.
+The longitudinal slip is set by the control `s` and the driven-axle split `w`: on the driven wheels
+for `s ≥ 0` (drive) `κ_left = s + w`, `κ_right = s − w`, so the [differential](qss-powertrain.md)
+distributes torque left/right; for `s < 0` (brake) `κ_i = s·b_i` on all wheels with the front/rear
+brake split `b_i` from the balance bar and `w` inactive. This captures the friction-circle coupling
+(longitudinal force consumes grip available for cornering) and the differential behaviour; the
+drivetrain-graph traction ceiling is a separate [powertrain](qss-powertrain.md) query the g-g-g-v
+envelope (PR7) caps the acceleration boundary with.
 
 ## Force/moment balance and the kinematic closure
 
@@ -167,10 +170,11 @@ fixed point is a standard quasi-static heave balance.
 
 ## Numerics
 
-The 8×8 system is solved by **Levenberg–Marquardt** (Marquardt diagonal scaling) on the scaled
+The 9×9 system is solved by **Levenberg–Marquardt** (Marquardt diagonal scaling) on the scaled
 residual: forces are scaled by `m g`, the moment by `m g L`, the closure by `g`, and the four
 `F_z` unknowns are non-dimensionalised by `m g` so every unknown is `O(1)` and the finite-difference
-Jacobian is well conditioned despite mixing radians and newtons. The trial state is clamped to
+Jacobian is well conditioned despite mixing radians and newtons. The [differential](qss-powertrain.md)
+residual closes the driven-axle split `w` (equal torque for an open diff, equal speed otherwise). The trial state is clamped to
 physically generous bounds so the search cannot wander into the periodic-`β` aliases that trap a
 plain Newton. The state is warm-started from point-mass kinematics (Ackermann steer, `r = a_y/v`)
 and the direct load-transfer prediction.

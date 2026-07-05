@@ -7,9 +7,11 @@
 //! theory is documented in `docs/theory/t1-trim.md` with citations.
 
 pub mod aero;
+pub mod powertrain;
 pub mod trim;
 pub mod vehicle;
 
 pub use aero::{AeroCoeffs, AeroLumped, AeroMap};
+pub use powertrain::{DiffModel, EnergyPoint, PrimaryDiff, T1Powertrain};
 pub use trim::{TrimInput, TrimOutcome, TrimState};
 pub use vehicle::T1Vehicle;

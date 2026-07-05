@@ -4,8 +4,8 @@
 //!
 //! Given a commanded operating point `(v, a_y, a_x)` the trim finds the steady-state chassis state
 //! that produces exactly those CG accelerations in planar force/moment balance, with per-wheel tyre
-//! forces from the shared [`TireModel`](outlap_tire::TireModel). It is a damped Newton solve of an
-//! 8-unknown, 8-residual algebraic system — zero-allocation (fixed stack arrays), panic-free
+//! forces from the shared [`TireModel`](outlap_tire::TireModel). It is a damped Newton solve of a
+//! 9-unknown, 9-residual algebraic system — zero-allocation (fixed stack arrays), panic-free
 //! ([`TrimOutcome::Infeasible`] flags an unreachable operating point, consumed by the envelope
 //! generator as a boundary, never a panic).
 //!
@@ -17,7 +17,8 @@
 //! | 1 | `β`   | body-slip angle (velocity vs body x), rad |
 //! | 2 | `r`   | yaw rate, rad/s |
 //! | 3 | `s`   | longitudinal-slip control (drive if > 0, brake if < 0) |
-//! | 4–7 | `F_z,i` | per-wheel normal loads `[FL, FR, RL, RR]`, N |
+//! | 4 | `w`   | driven-axle slip split: `κ_left = s + w`, `κ_right = s − w` (PR4 diff) |
+//! | 5–8 | `F_z,i` | per-wheel normal loads `[FL, FR, RL, RR]`, N |
 //!
 //! # Residuals `R`
 //!
@@ -26,16 +27,23 @@
 //! - `ΣM_z = 0` — yaw-moment balance (steady state ⇒ ṙ = 0).
 //! - `r·v = a_y·cos β − a_x·sin β` — steady-state kinematic closure (the yaw rate that makes the
 //!   body-frame CG acceleration equal the commanded `(a_x, a_y)`).
+//! - **differential law** (the 9th residual, §8.2): **open** ⇒ equal torque on the driven axle's
+//!   two wheels (`F_{x,left} = F_{x,right}`, `w` free); **locked/solid/LSD** ⇒ equal speed (`w = 0`;
+//!   a well-preloaded LSD locks at the traction limit, so LSD reduces to the locked constraint here
+//!   and its preload/ramp bound the reported split). Under braking the diff is inactive (`w = 0`).
 //! - `F_z,i = F_z,i^pred` (×4) — quasi-static load transfer: static + downforce + longitudinal pitch
 //!   transfer + per-axle lateral transfer via roll-centre geometry and roll-stiffness distribution.
 
 use outlap_schema::sim::FzCoupling;
+use outlap_schema::vehicle::DiffKind;
 use outlap_tire::{SlipState, TireModel};
 
 use crate::t1::vehicle::T1Vehicle;
 
 /// Number of trim unknowns/residuals.
-const N: usize = 8;
+const N: usize = 9;
+/// Index of the first per-wheel normal-load unknown/residual (`F_z` occupies `FZ0..FZ0+4`).
+const FZ0: usize = 5;
 /// Maximum Newton iterations before an operating point is declared infeasible.
 const MAX_NEWTON: usize = 80;
 /// Maximum backtracking-line-search halvings per Newton step.
@@ -387,12 +395,14 @@ impl T1Vehicle {
 
     /// The residual vector `R(z)` for a commanded operating point (scaled dimensionless).
     fn residual(&self, inp: &TrimInput, geom: &Geom, z: &[f64; N], out: &mut [f64; N]) {
-        let (delta, beta, yaw_rate, s) = (z[0], z[1], z[2], z[3]);
+        let (delta, beta, yaw_rate, s, w) = (z[0], z[1], z[2], z[3], z[4]);
         let v = inp.v;
         // The four F_z unknowns are non-dimensionalised by `m·g` (all unknowns then O(1), so the
         // finite-difference Jacobian is well-conditioned despite mixing rad and newtons).
         let mg = self.mass_kg * inp.g_normal;
         let (mut sum_fx, mut sum_fy, mut sum_mz) = (0.0, 0.0, 0.0);
+        // Wheel-frame longitudinal forces of the primary driven axle's two wheels (for the diff law).
+        let (mut fxw_left, mut fxw_right) = (0.0, 0.0);
         // Per-wheel tyre forces in the body frame.
         for i in 0..4 {
             let steer = if geom.front[i] { delta } else { 0.0 };
@@ -404,13 +414,21 @@ impl T1Vehicle {
             let vxw = vx_b * cs + vy_b * sn;
             let vyw = -vx_b * sn + vy_b * cs;
             let alpha = vyw.atan2(vxw.abs()); // tan α = V_sy / |V_cx|  (ISO-W sign contract)
-            let kappa = self.long_slip(s, i);
+            let kappa = self.wheel_slip(s, w, i);
             let (model, p) = if geom.front[i] {
                 (&self.tire_front, self.p_front)
             } else {
                 (&self.tire_rear, self.p_rear)
             };
-            let f = tire_forces(model, kappa, alpha, z[4 + i] * mg, p, vxw);
+            let f = tire_forces(model, kappa, alpha, z[FZ0 + i] * mg, p, vxw);
+            // Capture the driven-axle wheel-frame longitudinal forces for the diff residual.
+            if let Some(pd) = &self.primary_diff {
+                if i == pd.left {
+                    fxw_left = f.fx;
+                } else if i == pd.right {
+                    fxw_right = f.fx;
+                }
+            }
             // Rotate the wheel-frame force back into the body frame.
             let fx_b = f.fx * cs - f.fy * sn;
             let fy_b = f.fx * sn + f.fy * cs;
@@ -443,9 +461,26 @@ impl T1Vehicle {
         out[1] = (sum_fy - self.mass_kg * inp.ay) * f_scale;
         out[2] = sum_mz * m_scale;
         out[3] = (yaw_rate * v - (inp.ay * beta.cos() - inp.ax * beta.sin())) * k_scale;
+        // Differential law (§8.2): open ⇒ equal driven-wheel torque (equal wheel-frame Fx); locked/
+        // solid/LSD ⇒ equal speed (w = 0). Under braking the diff is inactive (the balance bar splits
+        // brake torque), so w is pinned to 0. Absent a driven axle pair the split is 0 (baseline).
+        out[4] = self.diff_residual(s, w, fxw_left, fxw_right, f_scale);
         // F_z residuals in the same non-dimensional units as the unknowns (Fz/(m·g)).
         for i in 0..4 {
-            out[4 + i] = z[4 + i] - fz_pred[i] * f_scale;
+            out[FZ0 + i] = z[FZ0 + i] - fz_pred[i] * f_scale;
+        }
+    }
+
+    /// The differential-law residual (§8.2). See the residual list in the module header.
+    fn diff_residual(&self, s: f64, w: f64, fxw_left: f64, fxw_right: f64, f_scale: f64) -> f64 {
+        match &self.primary_diff {
+            // Open diff under drive: the two driven wheels carry equal torque ⇒ equal wheel-frame
+            // longitudinal force (equal rolling radius). Non-dimensionalised by m·g like the forces.
+            Some(pd) if s >= 0.0 && matches!(pd.diff.kind, DiffKind::Open) => {
+                (fxw_left - fxw_right) * f_scale
+            }
+            // Locked / solid / LSD (or braking, or no driven pair): equal speed ⇒ zero slip split.
+            _ => w,
         }
     }
 
@@ -480,15 +515,25 @@ impl T1Vehicle {
         [fl, fr, rl, rr]
     }
 
-    /// Per-wheel longitudinal slip `κ_i` from the control `s`: drive on driven wheels for `s ≥ 0`,
-    /// brake on all wheels split by the balance bar for `s < 0`.
-    fn long_slip(&self, s: f64, i: usize) -> f64 {
+    /// Per-wheel longitudinal slip `κ_i` from the controls `(s, w)`. Under drive (`s ≥ 0`) the driven
+    /// wheels slip; the primary axle's left/right wheels split by the differential unknown `w`
+    /// (`κ_left = s + w`, `κ_right = s − w`) so open vs locked behaviour is realised, and any other
+    /// driven wheels (AWD) share the common slip `s`. Under braking (`s < 0`) all wheels brake, split
+    /// by the balance bar, and `w` is inactive.
+    fn wheel_slip(&self, s: f64, w: f64, i: usize) -> f64 {
         if s >= 0.0 {
-            if self.driven[i] {
-                s
-            } else {
-                0.0
+            if !self.driven[i] {
+                return 0.0;
             }
+            if let Some(pd) = &self.primary_diff {
+                if i == pd.left {
+                    return s + w;
+                }
+                if i == pd.right {
+                    return s - w;
+                }
+            }
+            s
         } else {
             let front = i < 2;
             let bias = if front {
@@ -508,6 +553,7 @@ impl T1Vehicle {
         let beta = 0.0;
         let yaw_rate = inp.ay / v;
         let s = 0.03 * inp.ax.signum() * f64::from(u8::from(inp.ax != 0.0));
+        let w = 0.0; // start from an even (equal-speed) driven-axle split
         let mg = self.mass_kg * inp.g_normal;
         // Warm-start aero at zero yaw (β ≈ 0); the residual refines it against the true β.
         let aero = self.aero_lumped(inp.v, inp.ax, 0.0, 0.0);
@@ -517,6 +563,7 @@ impl T1Vehicle {
             beta,
             yaw_rate,
             s,
+            w,
             fz[0] / mg,
             fz[1] / mg,
             fz[2] / mg,
@@ -533,7 +580,7 @@ impl T1Vehicle {
         residual_norm: f64,
         iterations: usize,
     ) -> TrimState {
-        let (delta, beta, yaw_rate, s) = (z[0], z[1], z[2], z[3]);
+        let (delta, beta, yaw_rate, s, w) = (z[0], z[1], z[2], z[3], z[4]);
         let v = inp.v;
         let mg = self.mass_kg * inp.g_normal;
         let mut st = TrimState {
@@ -541,7 +588,12 @@ impl T1Vehicle {
             beta,
             yaw_rate,
             long_ctrl: s,
-            fz: [z[4] * mg, z[5] * mg, z[6] * mg, z[7] * mg],
+            fz: [
+                z[FZ0] * mg,
+                z[FZ0 + 1] * mg,
+                z[FZ0 + 2] * mg,
+                z[FZ0 + 3] * mg,
+            ],
             kappa: [0.0; 4],
             alpha: [0.0; 4],
             fx: [0.0; 4],
@@ -558,13 +610,13 @@ impl T1Vehicle {
             let vxw = vx_b * cs + vy_b * sn;
             let vyw = -vx_b * sn + vy_b * cs;
             let alpha = vyw.atan2(vxw.abs());
-            let kappa = self.long_slip(s, i);
+            let kappa = self.wheel_slip(s, w, i);
             let (model, p) = if geom.front[i] {
                 (&self.tire_front, self.p_front)
             } else {
                 (&self.tire_rear, self.p_rear)
             };
-            let f = tire_forces(model, kappa, alpha, z[4 + i] * mg, p, vxw);
+            let f = tire_forces(model, kappa, alpha, z[FZ0 + i] * mg, p, vxw);
             st.kappa[i] = kappa;
             st.alpha[i] = alpha;
             st.fx[i] = f.fx * cs - f.fy * sn;
@@ -596,7 +648,8 @@ fn clamp_state(z: &mut [f64; N]) {
     z[1] = z[1].clamp(-0.5, 0.5); // β
     z[2] = z[2].clamp(-8.0, 8.0); // r
     z[3] = z[3].clamp(-0.6, 0.6); // s
-    for zi in z.iter_mut().skip(4) {
+    z[4] = z[4].clamp(-0.6, 0.6); // w (driven-axle slip split; an open diff can spin the inside wheel)
+    for zi in z.iter_mut().skip(FZ0) {
         *zi = zi.clamp(0.0, 6.0); // Fz/(m·g)
     }
 }

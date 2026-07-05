@@ -72,4 +72,18 @@ pub enum T1Error {
     /// `cz_front_a_m2`/`cz_rear_a_m2`/`cx_a_m2`, a non-rectilinear grid, or a bad axis).
     #[error("could not build the aero map interpolant: {0}")]
     AeroMap(#[from] outlap_core::GridMapError),
+    /// A powertrain peak-torque envelope could not be fitted from a `.ptm` (too few points or a
+    /// non-monotone speed axis — should not happen after schema validation; surfaced defensively).
+    #[error("could not fit a powertrain torque envelope: {0}")]
+    Envelope(outlap_core::InterpError),
+    /// A `.ptm` efficiency/loss sidecar table could not be built into an interpolant (missing the
+    /// `efficiency` value column, a non-rectilinear grid, or a bad axis).
+    #[error("could not build the powertrain efficiency/loss map: {0}")]
+    PowertrainMap(outlap_core::GridMapError),
+    /// A powertrain-map install referenced a drive-unit index outside the drivetrain.
+    #[error("no drive unit at index {unit} to install a powertrain map onto")]
+    UnknownDriveUnit {
+        /// The out-of-range drive-unit index.
+        unit: usize,
+    },
 }
