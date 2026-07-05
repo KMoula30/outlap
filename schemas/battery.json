@@ -1,0 +1,325 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BatteryDoc",
+  "description": "A battery equivalent-circuit parameter document.",
+  "type": "object",
+  "properties": {
+    "capacity": {
+      "description": "Pack capacity (charge and energy).",
+      "$ref": "#/$defs/PackCapacity"
+    },
+    "ecm": {
+      "description": "The equivalent-circuit model: RC-pair count, grid axes, and the table sidecar.",
+      "$ref": "#/$defs/Ecm"
+    },
+    "limits": {
+      "description": "Operating limits (power vs SoC, cell voltage bounds, C-rate).",
+      "$ref": "#/$defs/PackLimits"
+    },
+    "meta": {
+      "description": "Provenance/metadata.",
+      "$ref": "#/$defs/BatteryMeta",
+      "default": {}
+    },
+    "model": {
+      "description": "The equivalent-circuit family (currently only RC-pair Thevenin).",
+      "$ref": "#/$defs/BatteryModelKind"
+    },
+    "schema": {
+      "description": "Schema version, e.g. `battery/1.0`.",
+      "$ref": "#/$defs/SchemaVersion"
+    },
+    "soc_window": {
+      "description": "Usable state-of-charge window `[min, max]`, ascending within `[0, 1]`.",
+      "type": "array",
+      "items": {
+        "type": "number",
+        "format": "double"
+      },
+      "maxItems": 2,
+      "minItems": 2
+    },
+    "thermal": {
+      "description": "Lumped thermal node (mass·cp, jacket resistance, coolant temperature).",
+      "$ref": "#/$defs/PackThermal"
+    },
+    "topology": {
+      "description": "Series/parallel cell counts.",
+      "$ref": "#/$defs/PackTopology"
+    }
+  },
+  "required": [
+    "schema",
+    "model",
+    "topology",
+    "capacity",
+    "soc_window",
+    "ecm",
+    "limits",
+    "thermal"
+  ],
+  "$defs": {
+    "BatteryMeta": {
+      "description": "Provenance/metadata for a battery document.",
+      "type": "object",
+      "properties": {
+        "cell": {
+          "description": "Cell name/chemistry note.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Human-readable source/provenance note.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "BatteryModelKind": {
+      "description": "The equivalent-circuit model family.",
+      "oneOf": [
+        {
+          "description": "Thevenin equivalent circuit with one or more series RC pairs.",
+          "type": "string",
+          "const": "rc_pairs"
+        }
+      ]
+    },
+    "BatteryTables": {
+      "description": "The parameter-table sidecar reference plus the level its values are stated at.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Reference to the long/tidy parquet sidecar\n(`soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k`).",
+          "$ref": "#/$defs/MapRef"
+        },
+        "level": {
+          "description": "Whether the OCV/resistance values are stated per cell or per pack.",
+          "$ref": "#/$defs/TableLevel"
+        }
+      },
+      "required": [
+        "file",
+        "level"
+      ]
+    },
+    "Ecm": {
+      "description": "The equivalent-circuit model: RC-pair count, table axes, and the sidecar reference.",
+      "type": "object",
+      "properties": {
+        "axes": {
+          "description": "The `(soc, temp_c)` grid axes the sidecar tables are sampled on.",
+          "$ref": "#/$defs/EcmAxes"
+        },
+        "rc_pairs": {
+          "description": "Number of series RC pairs (currently 1 — the tables carry `r1`/`tau1`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tables": {
+          "description": "The parameter-table sidecar reference and its level (cell vs pack).",
+          "$ref": "#/$defs/BatteryTables"
+        }
+      },
+      "required": [
+        "rc_pairs",
+        "axes",
+        "tables"
+      ]
+    },
+    "EcmAxes": {
+      "description": "The ECM grid axes (both strictly ascending).",
+      "type": "object",
+      "properties": {
+        "soc": {
+          "description": "State-of-charge breakpoints, 0..1 (ascending).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "temp_c": {
+          "description": "Temperature breakpoints, °C (ascending).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "required": [
+        "soc",
+        "temp_c"
+      ]
+    },
+    "MapRef": {
+      "description": "Reference to a numeric sidecar map table (parquet/CSV), e.g. an aero or K&C map.",
+      "type": "string"
+    },
+    "PackCapacity": {
+      "description": "Pack capacity, as reported by the source pack.",
+      "type": "object",
+      "properties": {
+        "e_pack_wh": {
+          "description": "Pack energy capacity, W·h (nominal; informational).",
+          "type": "number",
+          "format": "double"
+        },
+        "q_pack_ah": {
+          "description": "Pack charge capacity, A·h (Coulomb counting divides by this).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "q_pack_ah",
+        "e_pack_wh"
+      ]
+    },
+    "PackLimits": {
+      "description": "Operating limits: peak power vs SoC, cell-voltage bounds, and the maximum C-rate.",
+      "type": "object",
+      "properties": {
+        "cell_v_max": {
+          "description": "Maximum cell terminal voltage, V.",
+          "type": "number",
+          "format": "double"
+        },
+        "cell_v_min": {
+          "description": "Minimum cell terminal voltage, V.",
+          "type": "number",
+          "format": "double"
+        },
+        "max_c_rate": {
+          "description": "Maximum continuous C-rate (informational; power limits bind first).",
+          "type": "number",
+          "format": "double"
+        },
+        "peak_discharge_power_w_vs_soc": {
+          "description": "Peak discharge power vs SoC, W (a positive-power ceiling).",
+          "$ref": "#/$defs/PowerVsSoc"
+        },
+        "peak_regen_power_w_vs_soc": {
+          "description": "Peak regen (charge) power vs SoC, W (a positive-magnitude ceiling on charging).",
+          "$ref": "#/$defs/PowerVsSoc"
+        }
+      },
+      "required": [
+        "peak_discharge_power_w_vs_soc",
+        "peak_regen_power_w_vs_soc",
+        "cell_v_min",
+        "cell_v_max",
+        "max_c_rate"
+      ]
+    },
+    "PackThermal": {
+      "description": "The lumped-node thermal parameters of the pack.",
+      "type": "object",
+      "properties": {
+        "coolant_temp_c": {
+          "description": "Coolant/ambient sink temperature, °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "cp_j_per_kgk": {
+          "description": "Specific heat, J/(kg·K).",
+          "type": "number",
+          "format": "double"
+        },
+        "mass_kg": {
+          "description": "Pack thermal mass, kg (heat capacity `C = mass · cp`).",
+          "type": "number",
+          "format": "double"
+        },
+        "thermal_resistance_k_per_w": {
+          "description": "Jacket thermal resistance to the coolant, K/W (heat leaves as `(T − T_coolant) / R`).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "mass_kg",
+        "cp_j_per_kgk",
+        "thermal_resistance_k_per_w",
+        "coolant_temp_c"
+      ]
+    },
+    "PackTopology": {
+      "description": "Series/parallel pack topology (`ns` cells in series × `np` strings in parallel).",
+      "type": "object",
+      "properties": {
+        "np": {
+          "description": "Number of parallel strings (splits the pack current `I_cell = I_pack / np`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ns": {
+          "description": "Number of cells in series (sets the pack voltage `V_pack = ns · V_cell`).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "ns",
+        "np"
+      ]
+    },
+    "PowerVsSoc": {
+      "description": "A power-vs-SoC curve: paired equal-length SoC / power arrays.",
+      "type": "object",
+      "properties": {
+        "power_w": {
+          "description": "Power at each breakpoint, W.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "soc": {
+          "description": "SoC breakpoints, 0..1 (ascending).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "required": [
+        "soc",
+        "power_w"
+      ]
+    },
+    "SchemaVersion": {
+      "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
+      "type": "string",
+      "examples": [
+        "vehicle/1.0"
+      ],
+      "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "TableLevel": {
+      "description": "The level a parameter table's values are stated at.",
+      "oneOf": [
+        {
+          "description": "Values are per cell; the pack scales them by `ns`/`np` (voltage ×ns, resistance ×ns/np).",
+          "type": "string",
+          "const": "cell"
+        },
+        {
+          "description": "Values are already stated at the pack level (no `ns`/`np` scaling applied).",
+          "type": "string",
+          "const": "pack"
+        }
+      ]
+    }
+  }
+}

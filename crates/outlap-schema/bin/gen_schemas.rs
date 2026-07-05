@@ -2,12 +2,14 @@
 //! `gen_schemas` — emit the golden JSON Schemas (draft 2020-12) for the outlap file formats.
 //!
 //! The Rust schemars types are the single source of truth (Decision #34). This binary writes
-//! `schemas/{vehicle,ptm,tyr,emotor,track,conditions,sim}.json`; with `--check` it regenerates
-//! in-memory and diffs against the committed files, failing if they drift (wired into Rust CI).
+//! `schemas/{vehicle,ptm,tyr,emotor,battery,track,conditions,sim}.json`; with `--check` it
+//! regenerates in-memory and diffs against the committed files, failing if they drift (wired into
+//! Rust CI).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use outlap_schema::battery::BatteryDoc;
 use outlap_schema::conditions::Conditions;
 use outlap_schema::emotor::Emotor;
 use outlap_schema::ptm::Ptm;
@@ -23,6 +25,7 @@ fn schemas() -> Vec<(&'static str, String)> {
         ("ptm.json", pretty::<Ptm>()),
         ("tyr.json", pretty::<Tyr>()),
         ("emotor.json", pretty::<Emotor>()),
+        ("battery.json", pretty::<BatteryDoc>()),
         ("track.json", pretty::<TrackDoc>()),
         ("conditions.json", pretty::<Conditions>()),
         ("sim.json", pretty::<Sim>()),

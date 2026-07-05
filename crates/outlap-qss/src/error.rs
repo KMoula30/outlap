@@ -90,4 +90,8 @@ pub enum T1Error {
     /// capacity/conductance with no mass heuristic for the node roles, or a bad node reference).
     #[error("could not assemble the machine thermal network: {0}")]
     Thermal(String),
+    /// A `battery/1.0` pack could not be assembled (an unsupported RC-pair count, a missing ECM
+    /// table column, or a non-rectilinear `(soc, temp)` grid).
+    #[error("could not assemble the battery pack: {0}")]
+    Battery(String),
 }

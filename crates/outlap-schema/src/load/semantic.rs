@@ -314,6 +314,83 @@ pub fn check_ptm(
         ));
     }
     positive(ptm.mass_kg, "mass_kg", "/mass_kg", &s, sources)?;
+    // The optional Vdc axis (ptm/1.1) must be strictly ascending when present.
+    if let Some(vdc) = &ptm.axes.vdc_v {
+        if vdc.len() < 2 || !is_ascending(vdc) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/axes/vdc_v"),
+                "`axes.vdc_v` must have ≥ 2 strictly-ascending breakpoints",
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Semantic checks for a `battery/1.0` document: positive topology/capacity, an ascending SoC
+/// window inside `[0, 1]`, and strictly-ascending ECM grid axes.
+pub fn check_battery(
+    b: &crate::battery::BatteryDoc,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    if b.topology.ns == 0 || b.topology.np == 0 {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/topology"),
+            "`topology.ns` and `topology.np` must be positive",
+            None,
+        ));
+    }
+    positive(
+        b.capacity.q_pack_ah,
+        "capacity.q_pack_ah",
+        "/capacity/q_pack_ah",
+        &s,
+        sources,
+    )?;
+    let [lo, hi] = b.soc_window;
+    if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) || lo >= hi {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/soc_window"),
+            "`soc_window` must be `[min, max]` ascending within [0, 1]",
+            None,
+        ));
+    }
+    if b.ecm.axes.soc.len() < 2 || !is_ascending(&b.ecm.axes.soc) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/ecm/axes/soc"),
+            "`ecm.axes.soc` must have ≥ 2 strictly-ascending breakpoints",
+            None,
+        ));
+    }
+    if b.ecm.axes.temp_c.len() < 2 || !is_ascending(&b.ecm.axes.temp_c) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/ecm/axes/temp_c"),
+            "`ecm.axes.temp_c` must have ≥ 2 strictly-ascending breakpoints",
+            None,
+        ));
+    }
+    positive(
+        b.thermal.mass_kg,
+        "thermal.mass_kg",
+        "/thermal/mass_kg",
+        &s,
+        sources,
+    )?;
+    positive(
+        b.thermal.cp_j_per_kgk,
+        "thermal.cp_j_per_kgk",
+        "/thermal/cp_j_per_kgk",
+        &s,
+        sources,
+    )?;
     Ok(())
 }
 
