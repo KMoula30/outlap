@@ -132,6 +132,13 @@ yaw 0, DRS closed) reproduce the constant-aero fallback (`C_{z,f}A = 1.9`, `C_{z
 the even yaw sensitivity and DRS effect, and (d) the platform sinking and raking with speed so the
 downforce balance shifts forward — the speed-dependent balance a constant-aero car cannot show.*
 
+![Front/Rear/Total downforce and drag over the ride-height plane](img/t1_aero_map_2d.png)
+
+*The same map as the classic 2-D ride-height maps — front, rear, and total downforce and drag over
+the rear-RH × front-RH plane (yaw 0, DRS closed). The white line on the total-downforce panel is the
+aero-platform **equilibrium locus** (the front/rear ride heights the trim rides as speed climbs from
+10 → 95 m/s), starting at the static platform and sinking into the high-downforce corner.*
+
 **Aero-platform equilibrium.** The coefficients depend on ride heights, which depend on the
 downforce they produce — a fixed point. The platform sinks from its static (design) ride height
 under the downforce and the spring-carried part of the longitudinal load transfer:
