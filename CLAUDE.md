@@ -14,8 +14,13 @@ implementing anything new; the Locked Decisions log in §1 overrides everything 
    code or commit real PDT files (synthetic fixtures only).
 2. **Clean-room**: flagship models (tire thermal ring, wear/cliff, ERS energy manager) are
    implemented from published literature (Farroni, Pacejka 2012, Archard, FIA regs) with citations
-   in the docs theory page, in the same PR. Never derive model code from other simulators'
-   source (especially GPL game engines: Speed Dreams, VDrift).
+   in the docs theory page, in the same PR. **Never copy or closely paraphrase another project's
+   source.** You MAY *consult* other open-source projects whose licence permits reading them — to
+   see how a problem was approached ("how did they solve this") — provided the code is re-authored
+   independently from that understanding plus the cited literature, and the consulted repo is
+   recorded (name + licence) alongside the citations. Take ideas, not expression; read
+   strong-copyleft (GPL/AGPL) sources for approach only. Never lift code from GPL game engines
+   (Speed Dreams, VDrift).
 3. **License hygiene**: code AGPL-3.0-only with SPDX headers; `schemas/` Apache-2.0; deps must be
    MIT/Apache/BSD/Zlib/LGPL (GPL-3.0-compatible OK if genuinely needed — flag it in the PR).
 4. **One vehicle description**: all solver tiers (T0/T1/T2/T3) evaluate the same parameter
