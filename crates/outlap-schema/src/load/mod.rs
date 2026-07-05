@@ -401,6 +401,15 @@ pub fn load_emotor(path: &str, loader: &dyn SourceLoader) -> Result<Emotor> {
     Ok(em)
 }
 
+/// Load and validate a standalone `battery/1.0` document.
+pub fn load_battery(path: &str, loader: &dyn SourceLoader) -> Result<crate::battery::BatteryDoc> {
+    let mut sources = Sources::new();
+    let (b, id, index, _) =
+        load_typed::<crate::battery::BatteryDoc>(path, schema_name::BATTERY, loader, &mut sources)?;
+    semantic::check_battery(&b, &index, &sources, id)?;
+    Ok(b)
+}
+
 /// Load and validate a standalone `track.yaml` document (the referenced `centerline.csv` is parsed
 /// by the `outlap-track` crate, which owns the geometry).
 pub fn load_track_doc(path: &str, loader: &dyn SourceLoader) -> Result<crate::track::TrackDoc> {

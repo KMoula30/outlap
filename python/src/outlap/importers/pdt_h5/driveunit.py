@@ -48,6 +48,7 @@ def convert_driveunit(
 ) -> dict[str, Any]:
     """Convert a DriveUnit HDF5 file to a `.ptm` document + parquet sidecar. Returns a summary."""
     maps_path = maps_path or out_yaml.with_suffix(".maps.parquet")
+    regrid_stack: c.RegridStack | None = None
     with h5py.File(src, "r") as f:
         speed_rpm = c.arr(f, "sweep/speed")
         vdc_grid = c.arr(f, "sweep/vdc")
@@ -63,15 +64,49 @@ def convert_driveunit(
         choice = c.select_vdc(vdc_grid, vdc, vdc_used)
         iv = choice.index
 
-        tau = c.arr(f, "opt_op/torque")[iv]
-        eff = c.arr(f, "opt_op/du_eff")[iv]
-        loss = c.arr(f, "opt_op/du_total_losses")[iv]
-        torque_drive = c.arr(f, "peak_op/torque_drive")[iv]
-        torque_regen = c.arr(f, "peak_op/torque_regen")[iv]
+        tau_all = c.arr(f, "opt_op/torque")
+        eff_all = c.arr(f, "opt_op/du_eff")
+        loss_all = c.arr(f, "opt_op/du_total_losses")
+        td_all = c.arr(f, "peak_op/torque_drive")
+        tr_all = c.arr(f, "peak_op/torque_regen")
+        # Emit the FULL Vdc stack by default (a ptm/1.1 map with a vdc_v axis, for the Vdc–SoC
+        # coupling); `--vdc` forces the single nearest slice (the legacy single-voltage map).
+        stack_vdc = vdc is None and vdc_grid.size > 1
+        tau = tau_all[iv]
+        eff = eff_all[iv]
+        loss = loss_all[iv]
+        torque_drive = td_all[iv]
+        torque_regen = tr_all[iv]
 
-        regrid = c.regrid_map(
-            speed_rpm, tau, eff, loss, torque_drive, torque_regen, choice, torque_points
-        )
+        if stack_vdc:
+            regrid_stack = c.regrid_map_stack(
+                speed_rpm,
+                tau_all,
+                eff_all,
+                loss_all,
+                td_all,
+                tr_all,
+                vdc_grid,
+                torque_points,
+            )
+            regrid = c.Regrid(
+                speed_rpm=speed_rpm,
+                torque_nm=regrid_stack.torque_nm,
+                efficiency=regrid_stack.efficiency[iv],
+                loss_w=regrid_stack.loss_w[iv],
+                vdc=choice,
+            )
+        else:
+            regrid = c.regrid_map(
+                speed_rpm,
+                tau,
+                eff,
+                loss,
+                torque_drive,
+                torque_regen,
+                choice,
+                torque_points,
+            )
 
         # Thermal envelopes via the capital-T group.
         cont = peak_torque = durations = None
@@ -138,14 +173,17 @@ def convert_driveunit(
     ratio_note = (
         f" (gear ratio {gear_ratio:g} applied at output shaft)" if gear_ratio else ""
     )
+    axes: dict[str, Any] = {
+        "speed_rpm": [round(float(s), 4) for s in speed_rpm],
+        "load_axis": {"torque_nm": [round(float(t), 4) for t in regrid.torque_nm]},
+        "torque_nm": [round(float(t), 4) for t in regrid.torque_nm],
+    }
+    if regrid_stack is not None:
+        axes["vdc_v"] = [round(float(v), 4) for v in regrid_stack.vdc]
     doc: dict[str, Any] = {
-        "schema": "ptm/1.0",
+        "schema": "ptm/1.1" if regrid_stack is not None else "ptm/1.0",
         "kind": "drive_unit",
-        "axes": {
-            "speed_rpm": [round(float(s), 4) for s in speed_rpm],
-            "load_axis": {"torque_nm": [round(float(t), 4) for t in regrid.torque_nm]},
-            "torque_nm": [round(float(t), 4) for t in regrid.torque_nm],
-        },
+        "axes": axes,
         "tables": {"file": maps_path.name, "efficiency": True, "loss_w": True},
         "limits": limits,
         "inertia_kgm2": round(inertia, 6),
@@ -158,7 +196,10 @@ def convert_driveunit(
     }
 
     c.validate_against_schema(doc, "ptm")
-    c.write_maps_parquet(maps_path, regrid)
+    if regrid_stack is not None:
+        c.write_maps_parquet_stack(maps_path, regrid_stack)
+    else:
+        c.write_maps_parquet(maps_path, regrid)
     c.write_yaml(
         out_yaml,
         doc,
@@ -171,6 +212,11 @@ def convert_driveunit(
         "out": str(out_yaml),
         "maps": str(maps_path),
         "vdc": choice.value,
+        "vdc_stack": (
+            [round(float(v), 3) for v in regrid_stack.vdc]
+            if regrid_stack is not None
+            else None
+        ),
         "gear_ratio": gear_ratio,
         "nan_fraction": round(float(np.isnan(regrid.efficiency).mean()), 3),
         "warnings": choice.warnings,

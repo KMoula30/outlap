@@ -188,11 +188,19 @@ def regrid_map(
     torque_regen: np.ndarray,  # (n_speed,) negative envelope
     vdc: VdcChoice,
     torque_points: int,
+    torque_axis: np.ndarray | None = None,
 ) -> Regrid:
-    """Invert load-ratio→torque per speed and mask cells beyond the peak envelope."""
-    tau_max = float(np.nanmax(torque_drive))
-    tau_min = float(np.nanmin(torque_regen))
-    axis = build_torque_axis(tau_min, tau_max, torque_points)
+    """Invert load-ratio→torque per speed and mask cells beyond the peak envelope.
+
+    ``torque_axis`` overrides the per-slice axis with a shared one (used by the Vdc-stack path so
+    every slice pivots onto the same rectilinear torque grid).
+    """
+    if torque_axis is not None:
+        axis = torque_axis
+    else:
+        tau_max = float(np.nanmax(torque_drive))
+        tau_min = float(np.nanmin(torque_regen))
+        axis = build_torque_axis(tau_min, tau_max, torque_points)
     ns, nt = speed_rpm.size, axis.size
     eff = np.full((ns, nt), np.nan)
     loss = np.full((ns, nt), np.nan)
@@ -225,6 +233,91 @@ def write_maps_parquet(path: Path, r: Regrid) -> None:
         {
             "speed_rpm": speed.astype(np.float64),
             "torque_nm": torque.astype(np.float64),
+            "efficiency": r.efficiency.reshape(-1),
+            "loss_w": r.loss_w.reshape(-1),
+        }
+    )
+    pq.write_table(table, path)
+
+
+@dataclass
+class RegridStack:
+    """A Vdc-stacked machine map: a shared (speed, torque) grid replicated across a ``vdc`` axis.
+
+    The 3-D efficiency/loss tensors are ``(n_vdc, n_speed, n_torque)`` (NaN beyond each slice's
+    envelope). Emitted as a ``ptm/1.1`` document with a ``vdc_v`` axis; the Rust core evaluates the
+    map at the pack's SoC-dependent terminal voltage (the Vdc–SoC coupling, §8.4).
+    """
+
+    speed_rpm: np.ndarray
+    torque_nm: np.ndarray
+    vdc: np.ndarray  # (n_vdc,)
+    efficiency: np.ndarray  # (n_vdc, n_speed, n_torque)
+    loss_w: np.ndarray  # (n_vdc, n_speed, n_torque)
+    warnings: list[str] = field(default_factory=list)
+
+
+def regrid_map_stack(
+    speed_rpm: np.ndarray,
+    tau_grid: np.ndarray,  # (n_vdc, n_speed, n_load)
+    eff_grid: np.ndarray,  # (n_vdc, n_speed, n_load)
+    loss_grid: np.ndarray,  # (n_vdc, n_speed, n_load)
+    torque_drive: np.ndarray,  # (n_vdc, n_speed)
+    torque_regen: np.ndarray,  # (n_vdc, n_speed)
+    vdc_grid: np.ndarray,  # (n_vdc,)
+    torque_points: int,
+) -> RegridStack:
+    """Regrid every Vdc slice onto ONE shared torque axis so the stack is a full rectilinear grid.
+
+    The shared axis spans the global drive/regen envelope across all slices; cells beyond a given
+    slice's own envelope are masked NaN (the Rust interpolant fills/flags them).
+    """
+    tau_max = float(np.nanmax(torque_drive))
+    tau_min = float(np.nanmin(torque_regen))
+    axis = build_torque_axis(tau_min, tau_max, torque_points)
+    nvdc = vdc_grid.size
+    ns, nt = speed_rpm.size, axis.size
+    eff = np.full((nvdc, ns, nt), np.nan)
+    loss = np.full((nvdc, ns, nt), np.nan)
+    for iv in range(nvdc):
+        r = regrid_map(
+            speed_rpm,
+            tau_grid[iv],
+            eff_grid[iv],
+            loss_grid[iv],
+            torque_drive[iv],
+            torque_regen[iv],
+            VdcChoice(index=iv, value=float(vdc_grid[iv])),
+            torque_points,
+            torque_axis=axis,
+        )
+        eff[iv] = r.efficiency
+        loss[iv] = r.loss_w
+    return RegridStack(
+        speed_rpm=speed_rpm,
+        torque_nm=axis,
+        vdc=vdc_grid.astype(np.float64),
+        efficiency=eff,
+        loss_w=loss,
+    )
+
+
+def write_maps_parquet_stack(path: Path, r: RegridStack) -> None:
+    """Write the 3-D long/tidy table (``speed_rpm,torque_nm,vdc_v,efficiency,loss_w``).
+
+    Emits one row per ``(speed, torque, vdc)`` cell — every cell is present (NaN where masked) so the
+    Rust pivot sees a full rectilinear grid. Row order is irrelevant (the pivot keys on coordinates).
+    """
+    nvdc, ns, nt = r.efficiency.shape
+    # Tensor order (vdc, speed, torque); the Rust decode keys on the axis columns, not row order.
+    vdc = np.repeat(r.vdc, ns * nt)
+    speed = np.tile(np.repeat(r.speed_rpm, nt), nvdc)
+    torque = np.tile(r.torque_nm, nvdc * ns)
+    table = pa.table(
+        {
+            "speed_rpm": speed.astype(np.float64),
+            "torque_nm": torque.astype(np.float64),
+            "vdc_v": vdc.astype(np.float64),
             "efficiency": r.efficiency.reshape(-1),
             "loss_w": r.loss_w.reshape(-1),
         }

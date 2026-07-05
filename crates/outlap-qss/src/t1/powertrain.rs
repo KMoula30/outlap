@@ -47,6 +47,8 @@ const COL_LOSS_W: &str = "loss_w";
 const AXIS_SPEED: &str = "speed_rpm";
 /// Canonical `.ptm` sidecar axis: shaft torque, N·m.
 const AXIS_TORQUE: &str = "torque_nm";
+/// Canonical `.ptm` sidecar axis: DC-link voltage, V (`ptm/1.1`, the Vdc–SoC coupling axis).
+const AXIS_VDC: &str = "vdc_v";
 /// Lower heating value of the reference fuel, J/kg (petrol ≈ 43 MJ/kg) — used only to turn an ICE
 /// map's thermal efficiency into a fuel-mass rate for accounting. Config-overridable later.
 const FUEL_LHV_J_PER_KG: f64 = 43.0e6;
@@ -168,10 +170,15 @@ struct PtUnit {
     diff: DiffModel,
     /// Left/right driven-wheel indices when the unit drives exactly one axle's pair.
     axle_pair: Option<(usize, usize)>,
-    /// Efficiency map η(rpm, τ) — installed from the sidecar (energy accounting only).
+    /// Efficiency map η(rpm, τ[, vdc]) — installed from the sidecar (energy accounting only).
     eff_map: Option<GriddedMapN<f64>>,
-    /// Loss map loss_w(rpm, τ), W — installed from the sidecar (energy accounting only).
+    /// Loss map loss_w(rpm, τ[, vdc]), W — installed from the sidecar (energy accounting only).
     loss_map: Option<GriddedMapN<f64>>,
+    /// Reference DC-link voltage the map was measured at, V (`.ptm` `meta.dc_voltage_v`). Used to
+    /// fill the Vdc query when a caller does not supply a coupled voltage.
+    ref_vdc: f64,
+    /// Whether the installed maps carry a Vdc axis (3-D) — the Vdc–SoC coupling is live.
+    has_vdc: bool,
 }
 
 impl PtUnit {
@@ -188,6 +195,16 @@ impl PtUnit {
             }
         }
         best
+    }
+
+    /// Evaluate an installed value map at `(rpm, torque)` and, for a 3-D Vdc-stacked map, `vdc`
+    /// (falling back to the reference Vdc when the caller passes `None`). Zero-allocation.
+    fn eval_map(&self, map: &GriddedMapN<f64>, rpm: f64, torque: f64, vdc: Option<f64>) -> f64 {
+        if map.ndim() == 3 {
+            map.eval(&[rpm, torque, vdc.unwrap_or(self.ref_vdc)])
+        } else {
+            map.eval(&[rpm, torque])
+        }
     }
 
     /// Source-shaft operating point `(rpm, torque)` for a commanded wheel force at speed `v`, using
@@ -269,6 +286,8 @@ impl T1Powertrain {
                 axle_pair: axle_pair(driven),
                 eff_map: None,
                 loss_map: None,
+                ref_vdc: ptm.meta.dc_voltage_v.unwrap_or(0.0),
+                has_vdc: false,
             });
         }
         let split_front = spec.drivetrain.control.split.front;
@@ -294,9 +313,14 @@ impl T1Powertrain {
         })
     }
 
-    /// Install the decoded efficiency/loss tables for drive unit `unit_idx` from a `.ptm` sidecar
-    /// (`speed_rpm`, `torque_nm` axes; `efficiency` and optional `loss_w` columns). The parquet
-    /// decode is a native-edge step; this crate stays wasm-clean by consuming the decoded table.
+    /// Install the decoded efficiency/loss tables for drive unit `unit_idx` from a `.ptm` sidecar.
+    ///
+    /// The axes are `(speed_rpm, torque_nm)` for a single-voltage map, or `(speed_rpm, torque_nm,
+    /// vdc_v)` for a Vdc-stacked `ptm/1.1` map (decode it with [`Self::map_axis_names_vdc`]). The Vdc
+    /// axis uses **linear** out-of-domain extrapolation from the boundary slice (Decision #30 /
+    /// `OutOfDomain::Linear`) so a low-SoC terminal voltage below the map grid stays usable; the
+    /// speed/torque axes clamp. The parquet decode is a native-edge step; this crate stays wasm-clean
+    /// by consuming the decoded table.
     ///
     /// # Errors
     /// [`T1Error::PowertrainMap`] if a required column is missing or the grid is not rectilinear;
@@ -310,31 +334,70 @@ impl T1Powertrain {
             .units
             .get_mut(unit_idx)
             .ok_or(T1Error::UnknownDriveUnit { unit: unit_idx })?;
-        // Machine/thermal efficiency and loss are for energy accounting: clamp out of grid (the maps
-        // are not extrapolated — a Vdc axis and its extrapolation policy arrive in PR6).
-        let modes = vec![OutOfDomain::Clamp; 2];
+        // A Vdc axis (ptm/1.1) makes the maps 3-D and enables the coupling; extrapolate on Vdc only.
+        // The Linear mode and `eval_map` both attach positionally to axis index 2, so the decode must
+        // put Vdc last (it does — decode with `map_axis_names_vdc`); assert that contract.
+        let has_vdc = table.axis_names().iter().any(|n| n == AXIS_VDC);
+        debug_assert!(
+            !has_vdc || table.axis_names().last().map(String::as_str) == Some(AXIS_VDC),
+            "a Vdc-stacked table must be decoded with the Vdc axis last (map_axis_names_vdc)"
+        );
+        let modes = || {
+            if has_vdc {
+                vec![OutOfDomain::Clamp, OutOfDomain::Clamp, OutOfDomain::Linear]
+            } else {
+                vec![OutOfDomain::Clamp, OutOfDomain::Clamp]
+            }
+        };
         unit.eff_map = Some(
             table
-                .map(COL_EFFICIENCY, modes.clone())
+                .map(COL_EFFICIENCY, modes())
                 .map_err(T1Error::PowertrainMap)?,
         );
         if table.value_names().any(|n| n == COL_LOSS_W) {
             unit.loss_map = Some(
                 table
-                    .map(COL_LOSS_W, modes)
+                    .map(COL_LOSS_W, modes())
                     .map_err(T1Error::PowertrainMap)?,
             );
         }
+        unit.has_vdc = has_vdc;
+        // If the map is Vdc-stacked but the `.ptm` recorded no reference voltage, fall back to the
+        // middle of the Vdc grid rather than 0 V (which would extrapolate far below the grid) for the
+        // non-coupled `efficiency`/`energy_at_shaft` queries. The coupled path always passes a Vdc.
+        if has_vdc && unit.ref_vdc <= 0.0 {
+            if let Some(eff) = unit.eff_map.as_ref() {
+                let (lo, hi) = eff.domain()[2];
+                unit.ref_vdc = 0.5 * (lo + hi);
+            }
+        }
         self.notes.push(format!(
-            "drive unit {unit_idx}: efficiency/loss map installed — energy accounting is live"
+            "drive unit {unit_idx}: efficiency/loss map installed — energy accounting is live{}",
+            if has_vdc {
+                " (Vdc-coupled; linear extrapolation below/above the voltage grid)"
+            } else {
+                ""
+            }
         ));
         Ok(())
     }
 
-    /// The canonical `.ptm` sidecar axis names, in tensor order, for decoding a unit's map table.
+    /// The canonical `.ptm` sidecar axis names for a single-voltage map, in tensor order.
     #[must_use]
     pub fn map_axis_names() -> [&'static str; 2] {
         [AXIS_SPEED, AXIS_TORQUE]
+    }
+
+    /// The canonical `.ptm` sidecar axis names for a Vdc-stacked (`ptm/1.1`) map, in tensor order.
+    #[must_use]
+    pub fn map_axis_names_vdc() -> [&'static str; 3] {
+        [AXIS_SPEED, AXIS_TORQUE, AXIS_VDC]
+    }
+
+    /// Whether drive unit `unit_idx` has a Vdc-stacked map installed (the coupling is live).
+    #[must_use]
+    pub fn has_vdc_axis(&self, unit_idx: usize) -> bool {
+        self.units.get(unit_idx).is_some_and(|u| u.has_vdc)
     }
 
     /// The maximum wheel **drive** force available at vehicle speed `v` (m/s), N — summed over drive
@@ -403,14 +466,40 @@ impl T1Powertrain {
         rpm: f64,
         torque_nm: f64,
     ) -> Option<EnergyPoint> {
+        self.energy_at_shaft_inner(unit_idx, rpm, torque_nm, None)
+    }
+
+    /// Vdc-coupled energy accounting at a source-shaft operating point: evaluate the drive unit's
+    /// Vdc-stacked efficiency/loss map at the pack's terminal voltage `vdc` (the Vdc–SoC coupling,
+    /// §8.4). The loss it returns is the machine-heating loss PR5's thermal model consumes — looked
+    /// up at the coupled voltage, so a low-SoC (low-voltage) point shifts both traction and heating.
+    /// For a single-voltage map `vdc` is ignored and this equals [`Self::energy_at_shaft`].
+    #[must_use]
+    pub fn energy_at_shaft_vdc(
+        &self,
+        unit_idx: usize,
+        rpm: f64,
+        torque_nm: f64,
+        vdc: f64,
+    ) -> Option<EnergyPoint> {
+        self.energy_at_shaft_inner(unit_idx, rpm, torque_nm, Some(vdc))
+    }
+
+    fn energy_at_shaft_inner(
+        &self,
+        unit_idx: usize,
+        rpm: f64,
+        torque_nm: f64,
+        vdc: Option<f64>,
+    ) -> Option<EnergyPoint> {
         let unit = self.units.get(unit_idx)?;
         let eff = unit.eff_map.as_ref()?;
-        let eta = eff.eval(&[rpm, torque_nm]).clamp(1e-3, 1.0);
+        let eta = unit.eval_map(eff, rpm, torque_nm, vdc).clamp(1e-3, 1.0);
         let p_mech = torque_nm * (rpm * RPM_TO_RAD_PER_S); // source-shaft mechanical power, W
                                                            // With a measured loss map, close energy by construction (source = mech + loss), idle
                                                            // included. Without one, derive the source from the efficiency and the loss from the balance.
         let (source_w, loss_w) = if let Some(m) = unit.loss_map.as_ref() {
-            let loss = m.eval(&[rpm, torque_nm]);
+            let loss = unit.eval_map(m, rpm, torque_nm, vdc);
             (p_mech + loss, loss)
         } else {
             let source = if p_mech >= 0.0 {
@@ -454,8 +543,25 @@ impl T1Powertrain {
     /// importer's source arrays. `None` if `unit_idx` has no installed efficiency map.
     #[must_use]
     pub fn efficiency(&self, unit_idx: usize, rpm: f64, torque_nm: f64) -> Option<f64> {
-        let eff = self.units.get(unit_idx)?.eff_map.as_ref()?;
-        Some(eff.eval(&[rpm, torque_nm]))
+        let unit = self.units.get(unit_idx)?;
+        let eff = unit.eff_map.as_ref()?;
+        Some(unit.eval_map(eff, rpm, torque_nm, None))
+    }
+
+    /// The installed machine/thermal efficiency at `(rpm, torque_nm)` evaluated at DC-link voltage
+    /// `vdc` (the Vdc-coupled lookup; the Vdc axis extrapolates linearly out of grid). For a
+    /// single-voltage map `vdc` is ignored. `None` if `unit_idx` has no installed efficiency map.
+    #[must_use]
+    pub fn efficiency_vdc(
+        &self,
+        unit_idx: usize,
+        rpm: f64,
+        torque_nm: f64,
+        vdc: f64,
+    ) -> Option<f64> {
+        let unit = self.units.get(unit_idx)?;
+        let eff = unit.eff_map.as_ref()?;
+        Some(unit.eval_map(eff, rpm, torque_nm, Some(vdc)))
     }
 
     /// Wheel torque delivered through a unit's gear for a source-shaft torque `tau_source` (N·m):

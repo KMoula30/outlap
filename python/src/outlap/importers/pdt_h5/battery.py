@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """BatteryPack stage file → ``battery.yaml`` (+ ``tables.parquet``) — §10.4.
 
-PROVISIONAL format ``battery/1.0``: there is no Rust schema for it yet (it lands in M3), so the
-emitted document is validated structurally here rather than against a committed JSON Schema. The
-layout is designed so M3 can adopt it verbatim.
+Format ``battery/1.0``: mirrored by the Rust ``outlap_schema::battery::BatteryDoc`` (PR6), so the
+emitted document is validated against the committed ``schemas/battery.json`` in addition to the
+fast structural pre-check here.
 """
 
 from __future__ import annotations
@@ -97,6 +97,7 @@ def convert_batterypack(
         },
     }
     validate_battery_doc(doc)
+    c.validate_against_schema(doc, "battery")
 
     # Long/tidy cell table on (soc, temp).
     n_soc, n_t = ocv.shape

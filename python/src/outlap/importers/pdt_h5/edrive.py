@@ -37,6 +37,7 @@ def convert_edrive(
     """Convert an EDrive HDF5 file to a `.ptm` document + parquet sidecar. Returns a summary."""
     maps_path = maps_path or out_yaml.with_suffix(".maps.parquet")
     emotor_out = emotor_out or out_yaml.with_suffix(".emotor.yaml")
+    regrid_stack: c.RegridStack | None = None
     with h5py.File(src, "r") as f:
         speed_rpm = c.arr(f, "sweep/speed")
         vdc_grid = c.arr(f, "sweep/vdc")
@@ -46,29 +47,54 @@ def convert_edrive(
         )
         iv = choice.index
 
-        # Operating grid at the chosen vdc: torque + system efficiency/loss.
-        tau = c.arr(f, "operating_grid/airgap_torque")[iv]  # (speed, load)
-        mot_eff = c.arr(f, "operating_grid/motor_efficiency")[iv]
-        inv_eff = c.arr(f, "operating_grid/inverter_efficiency")[iv]
-        mot_loss = c.arr(f, "operating_grid/motor_loss_total")[iv]
-        inv_loss = c.arr(f, "operating_grid/inverter_loss_total")[iv]
-        sys_eff = mot_eff * inv_eff
-        sys_loss = mot_loss + inv_loss
-
-        torque_drive = c.arr(f, "peak_capability/torque_drive")[iv]  # (speed,)
-        torque_regen = c.arr(f, "peak_capability/torque_regen")[iv]
+        # System efficiency/loss across ALL vdc slices (motor·inverter, motor+inverter losses).
+        tau_all = c.arr(f, "operating_grid/airgap_torque")  # (vdc, speed, load)
+        sys_eff_all = c.arr(f, "operating_grid/motor_efficiency") * c.arr(
+            f, "operating_grid/inverter_efficiency"
+        )
+        sys_loss_all = c.arr(f, "operating_grid/motor_loss_total") + c.arr(
+            f, "operating_grid/inverter_loss_total"
+        )
+        td_all = c.arr(f, "peak_capability/torque_drive")  # (vdc, speed)
+        tr_all = c.arr(f, "peak_capability/torque_regen")
         drag = c.opt_arr(f, "peak_capability/torque_drag")
 
-        regrid = c.regrid_map(
-            speed_rpm,
-            tau,
-            sys_eff,
-            sys_loss,
-            torque_drive,
-            torque_regen,
-            choice,
-            torque_points,
-        )
+        # Emit the FULL Vdc stack by default (ptm/1.1 vdc_v axis, Vdc–SoC coupling); `--vdc` forces
+        # the single nearest slice.
+        stack_vdc = vdc is None and vdc_grid.size > 1
+        tau = tau_all[iv]
+        torque_drive = td_all[iv]  # (speed,)
+        torque_regen = tr_all[iv]
+
+        if stack_vdc:
+            regrid_stack = c.regrid_map_stack(
+                speed_rpm,
+                tau_all,
+                sys_eff_all,
+                sys_loss_all,
+                td_all,
+                tr_all,
+                vdc_grid,
+                torque_points,
+            )
+            regrid = c.Regrid(
+                speed_rpm=speed_rpm,
+                torque_nm=regrid_stack.torque_nm,
+                efficiency=regrid_stack.efficiency[iv],
+                loss_w=regrid_stack.loss_w[iv],
+                vdc=choice,
+            )
+        else:
+            regrid = c.regrid_map(
+                speed_rpm,
+                tau,
+                sys_eff_all[iv],
+                sys_loss_all[iv],
+                torque_drive,
+                torque_regen,
+                choice,
+                torque_points,
+            )
 
         # Thermal envelopes (continuous + overload) — optional.
         cont = c.opt_arr(f, "peak_capability/thermal/continuous/torque")
@@ -113,14 +139,17 @@ def convert_edrive(
     if drag is not None:
         limits["drag_torque_nm_vs_speed"] = c.torque_curve(speed_rpm, drag)
 
+    axes: dict[str, Any] = {
+        "speed_rpm": [round(float(s), 4) for s in speed_rpm],
+        "load_axis": {"torque_nm": [round(float(t), 4) for t in regrid.torque_nm]},
+        "torque_nm": [round(float(t), 4) for t in regrid.torque_nm],
+    }
+    if regrid_stack is not None:
+        axes["vdc_v"] = [round(float(v), 4) for v in regrid_stack.vdc]
     doc: dict[str, Any] = {
-        "schema": "ptm/1.0",
+        "schema": "ptm/1.1" if regrid_stack is not None else "ptm/1.0",
         "kind": "electric_machine",
-        "axes": {
-            "speed_rpm": [round(float(s), 4) for s in speed_rpm],
-            "load_axis": {"torque_nm": [round(float(t), 4) for t in regrid.torque_nm]},
-            "torque_nm": [round(float(t), 4) for t in regrid.torque_nm],
-        },
+        "axes": axes,
         "tables": {"file": maps_path.name, "efficiency": True, "loss_w": True},
         "limits": limits,
         "inertia_kgm2": round(inertia, 6),
@@ -129,7 +158,10 @@ def convert_edrive(
     }
 
     c.validate_against_schema(doc, "ptm")
-    c.write_maps_parquet(maps_path, regrid)
+    if regrid_stack is not None:
+        c.write_maps_parquet_stack(maps_path, regrid_stack)
+    else:
+        c.write_maps_parquet(maps_path, regrid)
     c.write_yaml(
         out_yaml,
         doc,
@@ -143,6 +175,11 @@ def convert_edrive(
         "out": str(out_yaml),
         "maps": str(maps_path),
         "vdc": choice.value,
+        "vdc_stack": (
+            [round(float(v), 3) for v in regrid_stack.vdc]
+            if regrid_stack is not None
+            else None
+        ),
         "speeds": int(speed_rpm.size),
         "torque_points": int(regrid.torque_nm.size),
         "nan_fraction": round(nan_frac, 3),

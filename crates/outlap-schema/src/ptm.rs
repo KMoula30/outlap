@@ -16,7 +16,7 @@ use crate::version::SchemaVersion;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Ptm {
-    /// Schema version, e.g. `ptm/1.0`.
+    /// Schema version, e.g. `ptm/1.0` (`ptm/1.1` adds the optional Vdc axis).
     pub schema: SchemaVersion,
     /// Source kind — determines how the topology consumes this map.
     pub kind: PtmKind,
@@ -58,6 +58,12 @@ pub struct PtmAxes {
     pub load_axis: LoadAxis,
     /// Torque axis, N·m (the sampled torque grid, paired with `speed_rpm`).
     pub torque_nm: Vec<f64>,
+    /// Optional DC-link voltage axis, V (ascending) — `ptm/1.1`. When present, the sidecar tables
+    /// carry a `vdc_v` column and the map is a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor evaluated
+    /// at the pack's SoC-dependent terminal voltage (the Vdc–SoC coupling, §8.4). When absent the
+    /// map is single-voltage (measured at the scalar [`PtmMeta::dc_voltage_v`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vdc_v: Option<Vec<f64>>,
 }
 
 /// The load-axis declaration: absolute torque or a normalized fraction.

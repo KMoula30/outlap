@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Synthetic Vdc-stacked drive-unit map (PR6). NOT real PDT data.
+# Companion parquet: pdt_synth_du_vdc.maps.parquet (speed_rpm, torque_nm, vdc_v, efficiency, loss_w).
+# The Vdc grid is 730-850 V; a low-SoC pack terminal voltage sits below it and extrapolates linearly.
+schema: ptm/1.1
+kind: drive_unit
+axes:
+  speed_rpm:
+  - 10.0
+  - 81.8
+  - 153.6
+  - 225.4
+  - 297.2
+  - 369.0
+  load_axis:
+    torque_nm:
+    - -150.0
+    - -112.5
+    - -75.0
+    - -37.5
+    - 0.0
+    - 42.0
+    - 84.0
+    - 126.0
+    - 168.0
+  torque_nm:
+  - -150.0
+  - -112.5
+  - -75.0
+  - -37.5
+  - 0.0
+  - 42.0
+  - 84.0
+  - 126.0
+  - 168.0
+  vdc_v:
+  - 730.0
+  - 790.0
+  - 850.0
+tables:
+  file: pdt_synth_du_vdc.maps.parquet
+  efficiency: true
+  loss_w: true
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm:
+    - 10.0
+    - 81.8
+    - 153.6
+    - 225.4
+    - 297.2
+    - 369.0
+    torque_nm:
+    - 168.0
+    - 168.0
+    - 168.0
+    - 168.0
+    - 168.0
+    - 168.0
+inertia_kgm2: 0.021
+mass_kg: 9.5
+meta:
+  source: synthetic Vdc-stacked drive unit (PR6 coupling fixture)
+  dc_voltage_v: 790.0
+  upstream_ratio_applied: true

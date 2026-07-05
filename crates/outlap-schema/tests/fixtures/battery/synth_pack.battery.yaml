@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Synthetic 220S1P Thevenin pack (PR6). NOT real PDT data.
+# Companion parquet: synth_pack.tables.parquet (soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k).
+# Cell OCV 2.85-3.67 V -> pack 627-807 V; under load the terminal drops into/below the 730-850 V DU
+# Vdc grid, so the Vdc-SoC coupling exercises the below-grid linear extrapolation.
+schema: battery/1.0
+model: rc_pairs
+topology:
+  ns: 220
+  np: 1
+capacity:
+  q_pack_ah: 92.0
+  e_pack_wh: 64064.0
+soc_window:
+- 0.05
+- 0.98
+ecm:
+  rc_pairs: 1
+  axes:
+    soc:
+    - 0.05
+    - 0.2
+    - 0.4
+    - 0.6
+    - 0.8
+    - 1.0
+    temp_c:
+    - 0.0
+    - 25.0
+    - 45.0
+  tables:
+    file: synth_pack.tables.parquet
+    level: cell
+limits:
+  peak_discharge_power_w_vs_soc:
+    soc:
+    - 0.05
+    - 0.2
+    - 0.4
+    - 0.6
+    - 0.8
+    - 1.0
+    power_w:
+    - 60000.0
+    - 150000.0
+    - 220000.0
+    - 250000.0
+    - 260000.0
+    - 260000.0
+  peak_regen_power_w_vs_soc:
+    soc:
+    - 0.05
+    - 0.2
+    - 0.4
+    - 0.6
+    - 0.8
+    - 1.0
+    power_w:
+    - 200000.0
+    - 200000.0
+    - 180000.0
+    - 150000.0
+    - 90000.0
+    - 30000.0
+  cell_v_min: 2.7
+  cell_v_max: 4.2
+  max_c_rate: 3.0
+thermal:
+  mass_kg: 430.0
+  cp_j_per_kgk: 900.0
+  thermal_resistance_k_per_w: 0.02
+  coolant_temp_c: 25.0
+meta:
+  source: synthetic 220S1P pack (PR6 coupling fixture)
+  cell: Generic_NMC_800V_class

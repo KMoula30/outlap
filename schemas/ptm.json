@@ -32,7 +32,7 @@
       "default": {}
     },
     "schema": {
-      "description": "Schema version, e.g. `ptm/1.0`.",
+      "description": "Schema version, e.g. `ptm/1.0` (`ptm/1.1` adds the optional Vdc axis).",
       "$ref": "#/$defs/SchemaVersion"
     },
     "tables": {
@@ -137,6 +137,17 @@
         "torque_nm": {
           "description": "Torque axis, N·m (the sampled torque grid, paired with `speed_rpm`).",
           "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "vdc_v": {
+          "description": "Optional DC-link voltage axis, V (ascending) — `ptm/1.1`. When present, the sidecar tables\ncarry a `vdc_v` column and the map is a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor evaluated\nat the pack's SoC-dependent terminal voltage (the Vdc–SoC coupling, §8.4). When absent the\nmap is single-voltage (measured at the scalar [`PtmMeta::dc_voltage_v`]).",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "number",
             "format": "double"

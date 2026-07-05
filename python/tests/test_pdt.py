@@ -134,6 +134,39 @@ def test_driveunit_handles_capital_t_thermal(tmp_path: Path, thermal_name: str):
     assert "cont_torque_nm_vs_speed" in doc["limits"]  # thermal group was found
 
 
+def test_driveunit_emits_full_vdc_stack_by_default(tmp_path: Path):
+    # No --vdc and >1 vdc slice ⇒ a ptm/1.1 map with a vdc_v axis (the Vdc–SoC coupling stack).
+    src = tmp_path / "du.h5"
+    fx.make_driveunit(src, nv=2)  # vdc grid [48, 60]
+    out = tmp_path / "du.ptm.yaml"
+    summary = convert_driveunit(src, out)  # default: stack
+    doc = yaml.safe_load(out.read_text())
+    assert doc["schema"] == "ptm/1.1"
+    assert doc["axes"]["vdc_v"] == [48.0, 60.0]
+    assert summary["vdc_stack"] == [48.0, 60.0]
+    cols = pq.read_table(out.with_suffix(".maps.parquet")).column_names
+    assert "vdc_v" in cols
+    # A full rectilinear (speed × torque × vdc) grid: one row per cell.
+    n = (
+        len(doc["axes"]["speed_rpm"])
+        * len(doc["axes"]["torque_nm"])
+        * len(doc["axes"]["vdc_v"])
+    )
+    assert pq.read_table(out.with_suffix(".maps.parquet")).num_rows == n
+
+
+def test_driveunit_single_vdc_stays_ptm_1_0(tmp_path: Path):
+    # An explicit --vdc keeps the legacy single-voltage ptm/1.0 map (no vdc_v axis).
+    src = tmp_path / "du.h5"
+    fx.make_driveunit(src, nv=2)
+    out = tmp_path / "du.ptm.yaml"
+    summary = convert_driveunit(src, out, vdc=48.0)
+    doc = yaml.safe_load(out.read_text())
+    assert doc["schema"] == "ptm/1.0"
+    assert "vdc_v" not in doc["axes"]
+    assert summary["vdc_stack"] is None
+
+
 def test_driveunit_drag_resampled_from_no_load(tmp_path: Path):
     src = tmp_path / "du.h5"
     fx.make_driveunit(src)

@@ -40,6 +40,7 @@
     clippy::too_many_lines
 )]
 
+pub mod battery;
 pub mod centerline;
 pub mod conditions;
 pub mod diagnostics;
@@ -59,12 +60,13 @@ pub mod tyr;
 pub mod vehicle;
 pub mod version;
 
+pub use battery::BatteryDoc;
 pub use centerline::{parse_centerline, Centerline};
 pub use conditions::Conditions;
 pub use error::SchemaError;
 pub use load::{
-    load_conditions, load_sim, load_track_doc, load_vehicle, load_vehicle_with, resolve_vehicle,
-    LoadOptions, Overrides, ResolvedVehicle,
+    load_battery, load_conditions, load_sim, load_track_doc, load_vehicle, load_vehicle_with,
+    resolve_vehicle, LoadOptions, Overrides, ResolvedVehicle,
 };
 pub use sim::Sim;
 pub use tir::{
@@ -85,6 +87,8 @@ pub mod schema_name {
     pub const TYR: &str = "tyr";
     /// The `.emotor` electric-machine thermal document.
     pub const EMOTOR: &str = "emotor";
+    /// The `battery/1.0` equivalent-circuit parameter document.
+    pub const BATTERY: &str = "battery";
     /// The `track.yaml` document.
     pub const TRACK: &str = "track";
     /// The `conditions.yaml` document.
@@ -96,7 +100,9 @@ pub mod schema_name {
 /// The MAJOR version this build of the loader accepts for every schema (loaders accept same-major).
 pub const SCHEMA_MAJOR: u16 = 1;
 /// The MINOR version this build emits when serializing, and the highest MINOR it fully understands
-/// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block, then to
-/// 2 for the `vehicle/1.2` suspension `static_ride_height_m` (ride-height aero map, §7.4); an
-/// unknown key in a file that declares a newer MINOR than this is flagged as possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 2;
+/// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block, to
+/// 2 for the `vehicle/1.2` suspension `static_ride_height_m` (ride-height aero map, §7.4), then to
+/// 3 for the `ptm/1.1` optional Vdc axis (Vdc–SoC coupling, §8.4) alongside the new `battery/1.0`
+/// document; an unknown key in a file that declares a newer MINOR than this is flagged as
+/// possibly-newer-schema.
+pub const SCHEMA_MINOR: u16 = 3;

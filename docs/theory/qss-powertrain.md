@@ -119,8 +119,8 @@ ICE fuel rate:  ṁ_fuel = P_source / LHV       (η is brake thermal efficiency;
 
 so **energy closes**: `P_source = P_mech + loss`, exactly at the map's grid nodes when the importer
 emits a consistent efficiency/loss pair, and to interpolation accuracy between them. Fuel mass is
-accounted but held constant in M3 (no fuel slow state — that is M4/M5); the machine 2-node thermal
-derating is PR5 and the battery Vdc–SoC coupling PR6.
+accounted but held constant in M3 (no fuel slow state — that is M4/M5); the machine thermal
+derating is PR5 (see `machine-thermal.md`) and the battery Vdc–SoC coupling is the next section.
 
 ### PDT round-trip gate (§10.5 / §13)
 
@@ -142,3 +142,64 @@ efficiencies to 1e-6 through `GriddedMapN`; the open diff splitting driven-wheel
 locked/LSD keeps it equal (in the live trim); a positive traction ceiling that falls with speed for a
 geared engine; and a gearbox map efficiency assembling for T1 (retiring T0's
 `UnsupportedEfficiencyMap` for the double-track tier).
+
+## Battery model and the Vdc–SoC coupling (§8.4)
+
+A battery pack enters the QSS as a **Thevenin equivalent circuit** (`battery/1.0`): open-circuit
+voltage `OCV`, series resistance `R0`, one RC pair `(R1, τ1)`, and the entropic coefficient
+`dU/dT`, all tabulated on a `(SoC, temperature)` grid, plus the `ns × np` pack topology, the SoC
+window, peak-power-vs-SoC limits, and a lumped thermal node. Cell tables scale to the pack by `ns`
+(voltage) and `ns/np` (resistance). The equivalent-circuit form and its state equations follow the
+published NREL `thevenin` model (BSD-3) and the ECM literature it cites (Plett, *Battery Management
+Systems* Vol. 1, 2015, ch. 2–3), re-authored clean-room.
+
+At the pack level, with discharge current `I` positive, the terminal (DC-link) voltage is
+
+```
+V_term = OCV(SoC, T) − I·R0 − V_RC ,        V_RC → I·R1  at time constant τ1.
+```
+
+**Three per-segment slow states** advance alongside PR5's machine node temperatures at the same
+lap-loop hook (wired in PR8), each a zero-allocation, deterministic step:
+
+- **SoC** — Coulomb-counted, `ΔSoC = −I·Δt / (3600·Q_pack)`.
+- **`V_RC`** — advanced by the *exact* exponential integrator for a current held constant over the
+  segment, `V_RC ← V_RC·e^{−Δt/τ1} + I·R1·(1 − e^{−Δt/τ1})`. Over a constant-current pulse this
+  reproduces the closed-form Thevenin response to machine precision (§13 battery row, ≤ 1 % RMS).
+- **`T_batt`** — a lumped node `C = m·c_p` heated by the irreversible `I²R0 + V_RC²/R1` dissipation
+  and the entropic `I·T·dU/dT` term, cooled to the coolant through `R_th`; semi-implicit Euler on
+  the decay term (A-stable, matching §11's slow-state integrator).
+
+**Vdc–SoC coupling (user decision, 2026-07-05).** A machine/drive-unit `.ptm` used with a battery
+is checked for a **Vdc axis** (`ptm/1.1`). If present, its efficiency/loss maps are 3-D
+`(speed, torque, vdc)` and are evaluated at the pack's SoC-dependent terminal voltage `V_term` — so
+a low-SoC (low-voltage) point shifts **both** the traction efficiency and the machine-heating loss
+injected into PR5's `.emotor` network. If absent, the map is single-voltage. No battery ⇒
+single-voltage.
+
+The real 220S pack swings ≈ 620–808 V over its SoC window while a drive-unit map is typically gridded
+730–850 V, so a large low/mid-SoC band sits **below** the map. On the Vdc axis the shared monotone
+Hermite (Decision #30) uses **linear** out-of-domain extrapolation from the boundary slice —
+C¹-continuous with the interior — rather than clamping, so the map stays usable there; extrapolated
+torque/efficiency are floored to feasible bounds and any extrapolated band is recorded in the
+loaded-model report. The battery peak-power limit and PR5's thermal derate are both dynamic caps on
+the traction boundary and **compose** (the lap takes the `min`); neither is baked into PR7's static
+envelope, which stays thermal/SoC-neutral (reference cold, full charge).
+
+![Battery Thevenin + Vdc–SoC coupling](img/battery_coupling.png)
+
+*Driven by the committed Rust model (`python/tools/plot_battery_coupling.py` runs
+`crates/outlap-qss/examples/battery_coupling.rs`): (a) the Thevenin pulse response vs the closed
+form; (b) an SoC sweep of the committed pack — terminal voltage and the drive-unit efficiency at the
+coupled voltage; (c) drive-unit efficiency vs DC-link voltage, with the map grid shaded so the
+below/above-grid linear extrapolation is visible.*
+
+### Battery property tests
+
+Pulse response vs the closed-form Thevenin (RMS ≪ 1 %); a regen pulse lifting the terminal above OCV;
+SoC monotone under discharge; the discharge clipped to zero at the SoC-window floor; determinism of
+the slow-state advance; the Vdc-stacked map reproduced in-grid and **linearly extrapolated** below
+and above the grid (exact, since the synthetic field is linear in Vdc); the coupling presence matrix
+(a map with a Vdc axis tracks the coupled voltage; a single-voltage map ignores it); and the pack's
+terminal voltage driving a lower coupled efficiency as it drains. The slow-state advance is covered
+by the zero-allocation gate.

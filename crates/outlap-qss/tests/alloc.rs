@@ -8,9 +8,12 @@
 
 use std::f64::consts::PI;
 
+use outlap_core::GriddedTable;
 use outlap_qss::path::T0Path;
 use outlap_qss::solver::solve_into;
-use outlap_qss::{MachineThermal, T0Options, T0Vehicle, T0Workspace, T1Vehicle, TrimInput};
+use outlap_qss::{
+    MachineThermal, Pack, PackState, T0Options, T0Vehicle, T0Workspace, T1Vehicle, TrimInput,
+};
 use outlap_schema::centerline::{Centerline, CenterlineRow};
 use outlap_schema::io::MemLoader;
 use outlap_schema::refs::CenterlineRef;
@@ -201,6 +204,86 @@ fn hot_paths_are_zero_alloc() {
         "MachineThermal::step allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
+
+    // --- Battery slow-state advance (SoC / RC / temperature per segment) ---
+    let (pack, mut st) = setup_pack();
+    let _ = pack.step_power(&mut st, 100_000.0, 1.0); // warm
+
+    let before = dhat::HeapStats::get();
+    for _ in 0..16 {
+        let _ = pack.step_power(&mut st, 100_000.0, 1.0);
+        let _ = pack.step_current(&mut st, 200.0, 1.0);
+        let _ = pack.terminal_voltage_v(&st);
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "Pack slow-state advance allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+}
+
+/// A constant-parameter Thevenin pack (cold assembly; allocations allowed here). The runtime
+/// `step_power`/`step_current`/`terminal_voltage_v` must not allocate.
+fn setup_pack() -> (Pack, PackState) {
+    use outlap_schema::battery::{
+        BatteryDoc, BatteryMeta, BatteryModelKind, BatteryTables, Ecm, EcmAxes, PackCapacity,
+        PackLimits, PackThermal, PackTopology, PowerVsSoc, TableLevel,
+    };
+    let axis = |name: &str, v: f64| (name.to_owned(), vec![v, v, v, v]);
+    let cols = vec![
+        ("soc".to_owned(), vec![0.0, 0.0, 1.0, 1.0]),
+        ("temp_c".to_owned(), vec![0.0, 50.0, 0.0, 50.0]),
+        axis("ocv_v", 3.6),
+        axis("r0_ohm", 0.02),
+        axis("r1_ohm", 0.01),
+        axis("tau1_s", 15.0),
+        axis("dudt_v_per_k", -1.0e-4),
+    ];
+    let table = GriddedTable::from_long(&cols, &["soc", "temp_c"]).unwrap();
+    let doc = BatteryDoc {
+        schema: SchemaVersion::new("battery", 1, 0),
+        model: BatteryModelKind::RcPairs,
+        topology: PackTopology { ns: 200, np: 1 },
+        capacity: PackCapacity {
+            q_pack_ah: 90.0,
+            e_pack_wh: 60000.0,
+        },
+        soc_window: [0.05, 0.98],
+        ecm: Ecm {
+            rc_pairs: 1,
+            axes: EcmAxes {
+                soc: vec![0.0, 1.0],
+                temp_c: vec![0.0, 50.0],
+            },
+            tables: BatteryTables {
+                file: "x.parquet".into(),
+                level: TableLevel::Cell,
+            },
+        },
+        limits: PackLimits {
+            peak_discharge_power_w_vs_soc: PowerVsSoc {
+                soc: vec![0.0, 1.0],
+                power_w: vec![300_000.0, 300_000.0],
+            },
+            peak_regen_power_w_vs_soc: PowerVsSoc {
+                soc: vec![0.0, 1.0],
+                power_w: vec![300_000.0, 300_000.0],
+            },
+            cell_v_min: 2.5,
+            cell_v_max: 4.2,
+            max_c_rate: 3.0,
+        },
+        thermal: PackThermal {
+            mass_kg: 400.0,
+            cp_j_per_kgk: 900.0,
+            thermal_resistance_k_per_w: 0.02,
+            coolant_temp_c: 25.0,
+        },
+        meta: BatteryMeta::default(),
+    };
+    Pack::assemble(&doc, &table, None).unwrap()
 }
 
 /// A winding + housing + coolant + ambient lumped network (cold assembly; allocations allowed here).
