@@ -223,12 +223,81 @@ def test_two_node_truth_fit_reproduces_envelopes(tmp_path: Path):
     # The envelopes came from a real 2-node model, so a 2-node fit reproduces them well.
     assert summary["fit_rms"] < 0.03, f"fit RMS {summary['fit_rms']} too high"
     emo = yaml.safe_load(Path(summary["emotor"]).read_text())
-    assert emo["schema"] == "emotor/1.0"
-    assert emo["meta"]["source"] == "pdt_distilled"
-    assert emo["cooling"]["liquid"]["coolant_temp_c"] == 65.0
-    assert emo["loss_routing"]["copper_alpha_per_k"] == 0.00393
+    assert emo["schema"] == "emotor/1.1"
+    assert emo["meta"]["source"] == "pdt_imported"
+    # The 2-node fit maps to a lumped winding+case+ambient network; the fixed sink → ambient temp.
+    assert emo["cooling"]["ambient_fixed_c"] == 65.0
+    assert emo["cu_feedback"]["alpha_per_k"] == 0.00393
+    winding = next(n for n in emo["nodes"] if n["name"] == "winding")
+    assert winding["role"] == "winding"
     # Fitted winding capacitance is in the right ballpark of the ground truth (400 J/K).
-    assert 100.0 < emo["nodes"]["winding"]["c_j_per_k"] < 2000.0
+    assert 100.0 < winding["c_j_per_k"] < 2000.0
+
+
+def test_detailed_emotor_aggregates_and_validates():
+    from outlap.importers.pdt_h5 import common as c
+    from outlap.importers.pdt_h5.thermal_network import (
+        aggregate_network,
+        build_detailed_emotor,
+    )
+
+    # A synthetic PDT LPTN: the reduced-menu member nodes with capacities and a conduction skeleton
+    # (winding→iron→housing; rotor couples only through the air gap, which is NOT in G_const).
+    names = [
+        "ambient",
+        "coolant",
+        "slot_active",
+        "stator_tooth_body",
+        "housing_body",
+        "magnet",
+        "shaft",
+    ]
+    c_vec = np.array([np.inf, np.inf, 400.0, 3000.0, 6000.0, 700.0, 900.0])
+    g = np.zeros((7, 7))
+
+    def edge(a: str, b: str, w: float) -> None:
+        i, j = names.index(a), names.index(b)
+        g[i, j] = g[j, i] = w
+
+    edge("slot_active", "stator_tooth_body", 40.0)  # winding ↔ stator_iron
+    edge("stator_tooth_body", "housing_body", 60.0)  # stator_iron ↔ housing
+
+    cap, edges = aggregate_network(names, c_vec, g)
+    assert cap["winding"] == 400.0
+    assert cap["stator_iron"] == 3000.0
+    assert cap["rotor"] == 700.0 + 900.0  # magnet + shaft merged
+    assert ("stator_iron", "winding") in {tuple(sorted((a, b))) for a, b, _ in edges}
+
+    doc = build_detailed_emotor(
+        node_names=names,
+        c_vec=c_vec,
+        g_const=g,
+        air_gap_mm=1.15,
+        rotor_outer_radius_mm=74.55,
+        stack_length_mm=121.0,
+        jacket={
+            "inlet_c": 65.0,
+            "flow_rate_lps": 0.25,
+            "channel_count": 8,
+            "channel_width_mm": 8.0,
+            "channel_height_mm": 10.0,
+            "wetted_area_m2": 0.025,
+            "fluid": {"named": "ethylene_glycol_50"},
+        },
+        loss_group_fracs={"winding": 0.6, "stator_iron": 0.25, "rotor": 0.15},
+        t_limit_winding_c=180.0,
+        t_limit_magnet_c=150.0,
+        cu_alpha=0.00393,
+        t_ref_c=60.0,
+        provenance="synthetic detailed import",
+    )
+    # Emits a valid emotor/1.1 with the derived cooling blocks and real capacities.
+    c.validate_against_schema(doc, "emotor")
+    assert doc["schema"] == "emotor/1.1"
+    assert doc["cooling"]["jacket"]["fluid"] == {"named": "ethylene_glycol_50"}
+    assert doc["cooling"]["air_gap"]["between"] == ["stator_iron", "rotor"]
+    winding = next(n for n in doc["nodes"] if n["name"] == "winding")
+    assert winding["c_j_per_k"] == 400.0 and winding["t_max_c"] == 180.0
 
 
 def test_no_emotor_flag_skips_distillation(tmp_path: Path):

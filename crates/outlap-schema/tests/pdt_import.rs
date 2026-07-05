@@ -51,11 +51,18 @@ fn driveunit_ptm_loads() {
 }
 
 #[test]
-fn distilled_emotor_loads() {
+fn imported_emotor_loads() {
+    use outlap_schema::emotor::NodeRole;
+
     let em = load_emotor("emotor/pdt_synth.emotor.yaml", &loader()).expect("emotor loads");
-    // The distillation stamps the PdtDistilled source (wire form `pdt_distilled`).
-    assert_eq!(em.meta.source, Some(EmotorSource::PdtDistilled));
-    // Node limits pass check_emotor (t_warn ≤ t_max) and capacities are positive.
-    assert!(em.nodes.winding.c_j_per_k > 0.0 && em.nodes.case.c_j_per_k > 0.0);
-    assert!(em.coupling.g_wc_w_per_k > 0.0 && em.coupling.g_cool_w_per_k > 0.0);
+    // An import stamps the PdtImported source (wire form `pdt_imported`).
+    assert_eq!(em.meta.source, Some(EmotorSource::PdtImported));
+    // The detailed network declares a winding node, positive capacities, and convection edges
+    // (the speed/temperature-dependent conductance path).
+    assert!(em.nodes.iter().any(|n| n.role == Some(NodeRole::Winding)));
+    assert!(em.nodes.iter().all(|n| n.c_j_per_k.is_none_or(|c| c > 0.0)));
+    assert!(
+        !em.convection.is_empty(),
+        "detailed fixture carries convection edges"
+    );
 }

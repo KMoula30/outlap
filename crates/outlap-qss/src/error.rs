@@ -86,4 +86,8 @@ pub enum T1Error {
         /// The out-of-range drive-unit index.
         unit: usize,
     },
+    /// A machine `.emotor` thermal network could not be assembled (too many nodes, a missing
+    /// capacity/conductance with no mass heuristic for the node roles, or a bad node reference).
+    #[error("could not assemble the machine thermal network: {0}")]
+    Thermal(String),
 }

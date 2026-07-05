@@ -773,6 +773,7 @@ dependencies = [
  "dhat",
  "outlap-core",
  "outlap-schema",
+ "outlap-thermal",
  "outlap-tire",
  "outlap-track",
  "proptest",
@@ -808,6 +809,15 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "strsim 0.11.1",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "outlap-thermal"
+version = "0.1.0"
+dependencies = [
+ "dhat",
+ "proptest",
  "thiserror 2.0.18",
 ]
 

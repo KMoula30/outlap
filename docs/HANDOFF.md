@@ -120,7 +120,7 @@ One experienced simulation engineer builds v1 solo.
 
 | # | Question | Decision |
 |---|---|---|
-| 25 | Machine thermal (supersedes #16) | **`emotor.yaml` per machine, 2-node lumped network (winding + case)**, driven by the `.ptm` loss maps; node temps → derating. Deliberately NOT PDT-grade (no 19-node LPTN, no geometry/coolant correlations — that stays in PDT). Community users need only peak envelope + losses; PDT importer *distills* its detailed thermal model into the few emotor parameters. See §8.5, §9.5, §10.2 |
+| 25 | Machine thermal (supersedes #16) | **`emotor.yaml` per machine, an N-node lumped-parameter thermal network (LPTN)**, driven by the `.ptm` loss maps; node temps → derating. **AMENDED 2026-07-05 (author-authorized, supersedes the 2-node/"NOT PDT-grade" wording):** the network is now *any-N* and outlap **builds** the conductance operator from machine internals for the detailed path — the PDT heat-transfer correlations (air-gap film, end-cavity/shaft convection, liquid-jacket channel) are **ported into `outlap-thermal`** and evaluated per segment at the shaft speed and node temperatures. This is a deliberate, narrow reversal of the powertrain firewall (hard rule #1) for the (open-sourced, author-owned) thermal model only. Two authoring tiers share one Crank–Nicolson integrator: **lumped** (a hand-authored reduced node menu — winding/stator-iron/rotor/housing/coolant/ambient — with mass-heuristic-filled capacities/conductances, flagged as estimates; constant `G`) and **detailed** (the full FEA node set with explicit capacities + convection edges, from a PDT import). Loss rule: the `.ptm` supplies the total machine-heating loss; ≥1 node route is required, and whatever total is not routed lands on the winding node. See §8.5, §9.5, §10.2 |
 | 26 | Model composition | **Runtime, data-driven** — one binary loads any vehicle.yaml; blocks assembled + topo-sorted at load; enum dispatch in the loop (required by "car = pure data" + WASM story) |
 | 27 | Errors/panics | **Typed (thiserror) + panic-free core**: all fallible APIs return typed errors; kernels never panic; `debug_assert!` for physics invariants; anyhow only in CLI edges |
 | 28 | Lint strictness | **Strict**: clippy::pedantic baseline (curated allow-list), `deny(missing_docs)` on pub items, `forbid(unsafe_code)` everywhere except the C-ABI/FFI crate, rustfmt defaults |
@@ -629,7 +629,19 @@ Thevenin equivalent-circuit model (ported from NREL `thevenin`, BSD-3): states [
 dU/dT; lumped thermal node with I²R + entropic heating; power derating vs T_batt and SOC window.
 Pack scaling Ns×Np. The PDT BatteryPack importer (§10.4) fills this block directly.
 
-### 8.5 Machine thermal model — `emotor.yaml` 2-node network (Locked Decision #25, supersedes #16)
+### 8.5 Machine thermal model — `emotor.yaml` N-node LPTN (Locked Decision #25, amended 2026-07-05)
+
+**AMENDMENT (2026-07-05, author-authorized — M3/PR5): the model below is generalized from a fixed
+2-node network to a data-declared *N*-node LPTN, and outlap now *builds* the operator from machine
+internals for the detailed path.** The heat-transfer correlations (air-gap film, end-cavity/shaft
+convection, liquid-jacket channel) are ported into `outlap-thermal` and evaluated **per segment** at
+`(ω, T)`; the network state advances with a semi-implicit **Crank–Nicolson** step (A-stable), one
+pinned ambient node, and an optional coolant node closed by a quasi-static jacket balance. This is a
+deliberate, narrow reversal of the firewall for the (author-owned) thermal model only — see Decision
+#25. Two authoring tiers share the integrator: a **lumped** hand-authored reduced-node model
+(mass-heuristic-filled `C`/`G`, constant conductances, flagged as estimates) and a **detailed**
+imported model (full node set, explicit `C`, convection edges). The derating and loss treatment
+below are unchanged. The original 2-node design rationale is retained for context:
 
 **Design rationale (author's correction):** a community user typically has only a **peak torque
 envelope + loss data** for their machine — not continuous/overload envelopes. So outlap does not

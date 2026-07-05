@@ -15,6 +15,7 @@ import h5py
 import numpy as np
 
 from . import common as c
+from .thermal_network import build_detailed_emotor, read_detailed_thermal
 
 
 def convert_edrive(
@@ -80,6 +81,8 @@ def convert_edrive(
         coolant_k = c.scalar(f, "thermal_obj/cooling/coolant_inlet_K", default=338.15)
         winding_loss = c.opt_arr(f, "operating_grid/loss_breakdown/winding_stator")
         total_loss_bd = c.opt_arr(f, "operating_grid/motor_loss_total")
+        # A full LPTN (real export) → detailed reduced-menu network; else the 2-node envelope fit.
+        detailed = read_detailed_thermal(f)
 
         inertia = c.scalar(f, "inertia/rotor_inertia")
         mass = c.scalar(
@@ -146,8 +149,26 @@ def convert_edrive(
         "warnings": choice.warnings,
     }
 
-    # Distil the 2-node .emotor from the loss map + thermal envelopes.
-    if emit_emotor and cont is not None and peak is not None and durations is not None:
+    # Emit the .emotor: a detailed reduced-menu network from the full LPTN when available, else a
+    # 2-node envelope fit (§10.2 step 6).
+    if emit_emotor and detailed is not None:
+        emotor_doc = build_detailed_emotor(
+            provenance=f"EDrive {alias} {git}", **detailed
+        )
+        c.validate_against_schema(emotor_doc, "emotor")
+        c.write_yaml(
+            emotor_out,
+            emotor_doc,
+            [
+                f"Imported by outlap.importers.pdt_h5 from {src.name} (§10.2 step 6)",
+                "detailed emotor/1.1: reduced-menu network aggregated from the PDT LPTN + cooling scalars",
+            ],
+        )
+        summary["emotor"] = str(emotor_out)
+        summary["emotor_kind"] = "detailed"
+    elif (
+        emit_emotor and cont is not None and peak is not None and durations is not None
+    ):
         emotor_doc, rms = _distill_emotor(
             speed_rpm=speed_rpm,
             regrid=regrid,
@@ -171,11 +192,12 @@ def convert_edrive(
             emotor_doc,
             [
                 f"Imported by outlap.importers.pdt_h5 from {src.name} (§10.2 step 6)",
-                "distilled 2-node thermal",
+                "lumped emotor/1.1 (winding+case+ambient) fitted from the loss + envelope data",
             ],
         )
         summary["emotor"] = str(emotor_out)
         summary["fit_rms"] = round(rms, 4)
+        summary["emotor_kind"] = "lumped"
     return summary
 
 

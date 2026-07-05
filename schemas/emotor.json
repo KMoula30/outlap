@@ -1,20 +1,55 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Emotor",
-  "description": "A 2-node electric-machine thermal model.",
+  "description": "A data-declared N-node machine-thermal network.",
   "type": "object",
   "properties": {
+    "conductances": {
+      "description": "Constant conductance edges (the conduction/contact skeleton).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Conductance"
+      }
+    },
+    "convection": {
+      "description": "Speed/temperature-dependent convection edges (detailed path; empty for a lumped model).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ConvectionEdge"
+      }
+    },
     "cooling": {
-      "description": "Cooling sink (liquid or air).",
+      "description": "The ambient boundary node and the optional coolant node.",
       "$ref": "#/$defs/Cooling"
     },
-    "coupling": {
-      "description": "Inter-node and node-to-sink conductances.",
-      "$ref": "#/$defs/Coupling"
+    "cu_feedback": {
+      "description": "Optional DC copper-resistance temperature feedback.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CuFeedback"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "initial_temp": {
+      "description": "Optional initial node temperatures (default: every node at its sink temperature).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InitialTemp"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "loss_routing": {
-      "description": "Loss routing between nodes.",
-      "$ref": "#/$defs/LossRouting"
+      "description": "Loss-component→node routing. Empty ⇒ all of the `.ptm` total loss goes to the winding node;\nany total-loss fraction not routed also lands on the winding node.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LossRoute"
+      }
     },
     "meta": {
       "description": "Provenance/metadata.",
@@ -22,91 +57,434 @@
       "default": {}
     },
     "nodes": {
-      "description": "The winding and case nodes.",
-      "$ref": "#/$defs/EmotorNodes"
+      "description": "Thermal nodes (at least two, one of which is the ambient boundary named in [`Cooling`]).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ThermalNode"
+      }
     },
     "schema": {
-      "description": "Schema version, e.g. `emotor/1.0`.",
+      "description": "Schema version, e.g. `emotor/1.1`.",
       "$ref": "#/$defs/SchemaVersion"
     }
   },
   "required": [
     "schema",
     "nodes",
-    "coupling",
-    "cooling",
-    "loss_routing"
+    "conductances",
+    "cooling"
   ],
   "$defs": {
-    "Cooling": {
-      "description": "Cooling sink.\n\nExternally tagged, so the wire form is `{liquid: {coolant_temp_c: 65}}` or\n`{air: {ambient_c: 25}}`.",
-      "oneOf": [
-        {
-          "description": "Liquid cooling at a fixed coolant temperature.",
-          "type": "object",
-          "properties": {
-            "liquid": {
-              "type": "object",
-              "properties": {
-                "coolant_temp_c": {
-                  "description": "Coolant temperature, °C.",
-                  "type": "number",
-                  "format": "double"
-                }
-              },
-              "required": [
-                "coolant_temp_c"
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "liquid"
-          ]
-        },
-        {
-          "description": "Air cooling at a fixed ambient temperature.",
-          "type": "object",
-          "properties": {
-            "air": {
-              "type": "object",
-              "properties": {
-                "ambient_c": {
-                  "description": "Ambient temperature, °C.",
-                  "type": "number",
-                  "format": "double"
-                }
-              },
-              "required": [
-                "ambient_c"
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "air"
-          ]
-        }
-      ]
-    },
-    "Coupling": {
-      "description": "Inter-node and node-to-sink conductances.",
+    "AirGapSpec": {
+      "description": "An air-gap film coupling, described by raw rotor geometry. The assembly derives the interface\narea `A = 2π·r_gap·L` and evaluates the Becker–Kaye film per segment.",
       "type": "object",
       "properties": {
-        "g_cool_w_per_k": {
-          "description": "Case↔coolant/ambient conductance, W/K.",
+        "between": {
+          "description": "The two nodes the air gap couples (stator side first, rotor side second).",
+          "type": "array",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "gap_mm": {
+          "description": "Radial air-gap thickness, mm.",
           "type": "number",
           "format": "double"
         },
-        "g_wc_w_per_k": {
-          "description": "Winding↔case conductance, W/K.",
+        "rotor_outer_radius_mm": {
+          "description": "Rotor outer radius, mm.",
+          "type": "number",
+          "format": "double"
+        },
+        "stack_length_mm": {
+          "description": "Active (stack) axial length, mm.",
           "type": "number",
           "format": "double"
         }
       },
       "required": [
-        "g_wc_w_per_k",
-        "g_cool_w_per_k"
+        "between",
+        "rotor_outer_radius_mm",
+        "gap_mm",
+        "stack_length_mm"
+      ]
+    },
+    "Conductance": {
+      "description": "A constant conductance edge `g = 1/R` (W/K) between two nodes.",
+      "type": "object",
+      "properties": {
+        "between": {
+          "description": "The two node names this conductance connects (order irrelevant; must differ).",
+          "type": "array",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "w_per_k": {
+          "description": "Conductance `g = 1/R`, W/K (> 0). Omit on a lumped edge to have it estimated from the machine\nmass and the two nodes' roles.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "required": [
+        "between"
+      ]
+    },
+    "ConvModel": {
+      "description": "A convection correlation and its geometry parameters. Externally tagged, e.g.\n`{air_gap: {r_gap_m: 0.05, gap0_m: 5.0e-4}}`.",
+      "oneOf": [
+        {
+          "description": "Air-gap film (Becker–Kaye).",
+          "type": "object",
+          "properties": {
+            "air_gap": {
+              "type": "object",
+              "properties": {
+                "gap0_m": {
+                  "description": "Cold radial gap, m.",
+                  "type": "number",
+                  "format": "double"
+                },
+                "kappa_fe": {
+                  "description": "Iron linear thermal-expansion coefficient, 1/K (defaults to electrical steel).",
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "format": "double"
+                },
+                "r_gap_m": {
+                  "description": "Mean air-gap radius, m.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "r_gap_m",
+                "gap0_m"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "air_gap"
+          ]
+        },
+        {
+          "description": "Rotor-driven cavity/end-winding convection.",
+          "type": "object",
+          "properties": {
+            "rotor_air": {
+              "type": "object",
+              "properties": {
+                "law": {
+                  "description": "Which Kylander form.",
+                  "$ref": "#/$defs/RotorAirLaw"
+                },
+                "r_rotor_m": {
+                  "description": "Rotor radius setting the peripheral speed `u = |ω|·r`, m.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "r_rotor_m",
+                "law"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rotor_air"
+          ]
+        },
+        {
+          "description": "Rotating-shaft external convection to ambient (Etemad).",
+          "type": "object",
+          "properties": {
+            "shaft_external": {
+              "type": "object",
+              "properties": {
+                "d_shaft_m": {
+                  "description": "Shaft diameter, m.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "d_shaft_m"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "shaft_external"
+          ]
+        },
+        {
+          "description": "Liquid-cooled channel (Gnielinski/laminar); pump-driven, speed-independent.",
+          "type": "object",
+          "properties": {
+            "liquid_channel": {
+              "type": "object",
+              "properties": {
+                "fluid": {
+                  "description": "Coolant properties at the film temperature.",
+                  "$ref": "#/$defs/FluidProps"
+                },
+                "hydraulic_diameter_m": {
+                  "description": "Hydraulic diameter, m.",
+                  "type": "number",
+                  "format": "double"
+                },
+                "velocity_mps": {
+                  "description": "Mean coolant velocity, m/s.",
+                  "type": "number",
+                  "format": "double"
+                }
+              },
+              "required": [
+                "hydraulic_diameter_m",
+                "velocity_mps",
+                "fluid"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "liquid_channel"
+          ]
+        },
+        {
+          "description": "Free convection plus linearized radiation to ambient on a cylinder.",
+          "type": "object",
+          "properties": {
+            "free_convection": {
+              "type": "object",
+              "properties": {
+                "char_length_m": {
+                  "description": "Characteristic length, m.",
+                  "type": "number",
+                  "format": "double"
+                },
+                "emissivity": {
+                  "description": "Surface emissivity for the radiation term.",
+                  "type": "number",
+                  "format": "double"
+                },
+                "orientation": {
+                  "description": "Cylinder orientation.",
+                  "$ref": "#/$defs/Orientation"
+                }
+              },
+              "required": [
+                "char_length_m",
+                "orientation",
+                "emissivity"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "free_convection"
+          ]
+        }
+      ]
+    },
+    "ConvectionEdge": {
+      "description": "A convection edge whose conductance is recomputed each segment from a heat-transfer correlation.",
+      "type": "object",
+      "properties": {
+        "area_m2": {
+          "description": "Interface area, m².",
+          "type": "number",
+          "format": "double"
+        },
+        "between": {
+          "description": "The two node names (by convention solid/stator first, rotor/fluid second for the air-gap film).",
+          "type": "array",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "model": {
+          "description": "The correlation used.",
+          "$ref": "#/$defs/ConvModel"
+        }
+      },
+      "required": [
+        "between",
+        "area_m2",
+        "model"
+      ]
+    },
+    "CoolantProps": {
+      "description": "Explicit coolant-fluid properties at the film temperature.",
+      "type": "object",
+      "properties": {
+        "cp": {
+          "description": "Specific heat `c_p`, J/(kg·K).",
+          "type": "number",
+          "format": "double"
+        },
+        "lam": {
+          "description": "Thermal conductivity λ, W/(m·K).",
+          "type": "number",
+          "format": "double"
+        },
+        "nu": {
+          "description": "Kinematic viscosity ν, m²/s.",
+          "type": "number",
+          "format": "double"
+        },
+        "pr": {
+          "description": "Prandtl number, dimensionless.",
+          "type": "number",
+          "format": "double"
+        },
+        "rho": {
+          "description": "Density ρ, kg/m³.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "rho",
+        "cp",
+        "lam",
+        "nu",
+        "pr"
+      ]
+    },
+    "CoolantSpec": {
+      "description": "A liquid-jacket coolant node: `T_coolant = inlet + Q_in / (2·ρ·c_p·ṁ)`.",
+      "type": "object",
+      "properties": {
+        "inlet_c": {
+          "description": "Coolant inlet temperature, °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "node": {
+          "description": "Name of the coolant node.",
+          "type": "string"
+        },
+        "rho_cp_mdot_w_per_k": {
+          "description": "Thermal mass-flow capacity `ρ·c_p·ṁ`, W/K (> 0).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "node",
+        "inlet_c",
+        "rho_cp_mdot_w_per_k"
+      ]
+    },
+    "Cooling": {
+      "description": "The ambient boundary and optional coolant node.",
+      "type": "object",
+      "properties": {
+        "air_gap": {
+          "description": "An air-gap film coupling declared by raw geometry. The assembly derives an air-gap convection\nedge between the two named nodes (interface area from the rotor radius and stack length).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AirGapSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ambient_fixed_c": {
+          "description": "Fixed ambient temperature override, °C. When omitted, `conditions.yaml` `ambient_c` is used.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ambient_node": {
+          "description": "Name of the pinned ambient node (its heat capacity is ignored).",
+          "type": "string"
+        },
+        "coolant": {
+          "description": "Low-level coolant node (explicit `ρ·c_p·ṁ`) — the escape hatch. Prefer `jacket` for a\nliquid jacket, which derives this from raw settings.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoolantSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "jacket": {
+          "description": "A liquid-jacket cooling loop declared by raw settings. The assembly derives the coolant node's\n`ρ·c_p·ṁ` and a `housing↔coolant` channel-convection edge (velocity, hydraulic diameter, area).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JacketSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ambient_node"
+      ]
+    },
+    "CuFeedback": {
+      "description": "DC copper-resistance feedback: the loss injected at the listed winding nodes is rescaled by\n`1 + α·(T − T_ref)` each step.",
+      "type": "object",
+      "properties": {
+        "alpha_per_k": {
+          "description": "Resistance-rise coefficient α, per K.",
+          "type": "number",
+          "format": "double"
+        },
+        "nodes": {
+          "description": "Winding node names whose loss is temperature-scaled.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "t_ref_c": {
+          "description": "Reference temperature the loss maps were computed at, °C.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "nodes",
+        "t_ref_c",
+        "alpha_per_k"
       ]
     },
     "EmotorMeta": {
@@ -133,24 +511,6 @@
         }
       }
     },
-    "EmotorNodes": {
-      "description": "The two thermal nodes.",
-      "type": "object",
-      "properties": {
-        "case": {
-          "description": "Case node.",
-          "$ref": "#/$defs/ThermalNode"
-        },
-        "winding": {
-          "description": "Winding node.",
-          "$ref": "#/$defs/ThermalNode"
-        }
-      },
-      "required": [
-        "winding",
-        "case"
-      ]
-    },
     "EmotorSource": {
       "description": "Source/provenance category for emotor parameters.",
       "oneOf": [
@@ -165,32 +525,277 @@
           "const": "estimated"
         },
         {
-          "description": "Distilled from a detailed PDT thermal model.",
+          "description": "Imported from a PDT detailed thermal model (network integrated as-is).",
           "type": "string",
-          "const": "pdt_distilled"
+          "const": "pdt_imported"
         }
       ]
     },
-    "LossRouting": {
-      "description": "How machine losses are routed into the thermal nodes.",
+    "FluidProps": {
+      "description": "Liquid-coolant properties at the film temperature.",
       "type": "object",
       "properties": {
-        "copper_alpha_per_k": {
-          "description": "Optional copper resistance-rise coefficient `α`, per K (omit to disable the feedback).",
-          "type": [
-            "number",
-            "null"
-          ],
+        "lam": {
+          "description": "Thermal conductivity λ, W/(m·K).",
+          "type": "number",
           "format": "double"
         },
-        "winding_split": {
-          "description": "Fraction of total loss deposited in the winding node, 0..1.\nIgnored if the `.ptm` carries a loss breakdown (then computed per operating point).",
+        "nu": {
+          "description": "Kinematic viscosity ν, m²/s.",
+          "type": "number",
+          "format": "double"
+        },
+        "pr": {
+          "description": "Prandtl number, dimensionless.",
           "type": "number",
           "format": "double"
         }
       },
       "required": [
-        "winding_split"
+        "lam",
+        "nu",
+        "pr"
+      ]
+    },
+    "FluidSpec": {
+      "description": "A coolant fluid: a named preset (resolved against a built-in table) or explicit properties.\nExternally tagged: `{named: ethylene_glycol_50}` or `{props: {rho, cp, lam, nu, pr}}`.",
+      "oneOf": [
+        {
+          "description": "A named preset (e.g. `water`, `ethylene_glycol_50`, `oil`).",
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "named"
+          ]
+        },
+        {
+          "description": "Explicit fluid properties.",
+          "type": "object",
+          "properties": {
+            "props": {
+              "$ref": "#/$defs/CoolantProps"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "props"
+          ]
+        }
+      ]
+    },
+    "InitialTemp": {
+      "description": "Optional initial node temperatures. Externally tagged: `{uniform_c: 25}` or\n`{per_node_c: [{node: winding, temp_c: 90}]}`. Absent ⇒ each node starts at its sink temperature.",
+      "oneOf": [
+        {
+          "description": "Every node starts at a uniform temperature, °C.",
+          "type": "object",
+          "properties": {
+            "uniform_c": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "uniform_c"
+          ]
+        },
+        {
+          "description": "Named per-node starting temperatures, °C; unlisted nodes start at their sink temperature.",
+          "type": "object",
+          "properties": {
+            "per_node_c": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/NodeTemp"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "per_node_c"
+          ]
+        }
+      ]
+    },
+    "JacketSpec": {
+      "description": "A liquid-jacket cooling loop, described by raw settings a user or importer can read directly\n(channel geometry + flow + coolant). The assembly derives the coolant thermal-capacity rate\n`ρ·c_p·ṁ` and the `housing↔coolant` channel-convection edge (`velocity = Q/(n·w·h)`,\n`D_h = 2wh/(w+h)`, `g = h(velocity, D_h, fluid)·A_wetted`).",
+      "type": "object",
+      "properties": {
+        "channel_count": {
+          "description": "Number of parallel channels.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "channel_height_mm": {
+          "description": "Channel height, mm.",
+          "type": "number",
+          "format": "double"
+        },
+        "channel_width_mm": {
+          "description": "Channel width, mm.",
+          "type": "number",
+          "format": "double"
+        },
+        "coolant_node": {
+          "description": "The coolant node the jacket feeds (closed by the quasi-static balance).",
+          "type": "string"
+        },
+        "flow_rate_lps": {
+          "description": "Volumetric coolant flow, litres/s.",
+          "type": "number",
+          "format": "double"
+        },
+        "fluid": {
+          "description": "The coolant fluid (a named preset or explicit properties).",
+          "$ref": "#/$defs/FluidSpec"
+        },
+        "housing_node": {
+          "description": "The (housing-side) node the jacket cools.",
+          "type": "string"
+        },
+        "inlet_c": {
+          "description": "Coolant inlet temperature, °C.",
+          "type": "number",
+          "format": "double"
+        },
+        "wetted_area_m2": {
+          "description": "Total wetted inner area, m².",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "housing_node",
+        "coolant_node",
+        "inlet_c",
+        "flow_rate_lps",
+        "channel_count",
+        "channel_width_mm",
+        "channel_height_mm",
+        "wetted_area_m2",
+        "fluid"
+      ]
+    },
+    "LossRoute": {
+      "description": "A loss-component→node routing entry.",
+      "type": "object",
+      "properties": {
+        "component": {
+          "description": "The `.ptm` loss-map column to draw from. Omit for the total-loss column (`loss_w`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fraction": {
+          "description": "Fraction of the component routed to this node, 0..1 (default 1).",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "node": {
+          "description": "The node the loss is deposited into.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "node"
+      ]
+    },
+    "NodeRole": {
+      "description": "The physical role of a node, used for heuristics and for identifying the boundary/winding nodes.",
+      "oneOf": [
+        {
+          "description": "Copper winding (the binding thermal limit; the default loss target).",
+          "type": "string",
+          "const": "winding"
+        },
+        {
+          "description": "Stator core/iron.",
+          "type": "string",
+          "const": "stator_iron"
+        },
+        {
+          "description": "Rotor / magnet lump (carries the magnet limit for PM machines).",
+          "type": "string",
+          "const": "rotor"
+        },
+        {
+          "description": "Housing / case / frame.",
+          "type": "string",
+          "const": "housing"
+        },
+        {
+          "description": "Liquid-jacket coolant.",
+          "type": "string",
+          "const": "coolant"
+        },
+        {
+          "description": "Ambient boundary.",
+          "type": "string",
+          "const": "ambient"
+        },
+        {
+          "description": "An FEA-resolved node with no lumped role (detailed path).",
+          "type": "string",
+          "const": "other"
+        }
+      ]
+    },
+    "NodeTemp": {
+      "description": "A named node temperature, °C.",
+      "type": "object",
+      "properties": {
+        "node": {
+          "description": "Node name.",
+          "type": "string"
+        },
+        "temp_c": {
+          "description": "Temperature, °C.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "node",
+        "temp_c"
+      ]
+    },
+    "Orientation": {
+      "description": "Cylinder orientation for the free-convection correlation.",
+      "oneOf": [
+        {
+          "description": "Horizontal cylinder (characteristic length = diameter).",
+          "type": "string",
+          "const": "horizontal"
+        },
+        {
+          "description": "Vertical cylinder (characteristic length = axial length).",
+          "type": "string",
+          "const": "vertical"
+        }
+      ]
+    },
+    "RotorAirLaw": {
+      "description": "The rotor-driven convection law.",
+      "oneOf": [
+        {
+          "description": "End-winding to internal cavity air.",
+          "type": "string",
+          "const": "end_winding"
+        },
+        {
+          "description": "Internal cavity air to housing inner.",
+          "type": "string",
+          "const": "internal_air"
+        }
       ]
     },
     "SchemaVersion": {
@@ -202,29 +807,51 @@
       "pattern": "^[a-z_]+/\\d+\\.\\d+$"
     },
     "ThermalNode": {
-      "description": "A single thermal node: capacity and temperature limits.",
+      "description": "One thermal node.",
       "type": "object",
       "properties": {
         "c_j_per_k": {
-          "description": "Thermal capacity, J/K.",
-          "type": "number",
+          "description": "Heat capacity, J/K. Omit on a lumped node to have it estimated from the machine mass and role.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
+        "name": {
+          "description": "Node name (unique), referenced by conductances, loss routing, and the boundary.",
+          "type": "string"
+        },
+        "role": {
+          "description": "Physical role — drives the mass-based capacity/conductance heuristics and identifies the\nwinding node (the required loss target). Optional for the detailed path, where capacities and\nconductances are all explicit.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "t_max_c": {
-          "description": "Maximum allowable temperature (derating cutoff), °C.",
-          "type": "number",
+          "description": "Maximum temperature °C — where the commanded torque limit reaches zero.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "t_warn_c": {
-          "description": "Warning temperature, °C.",
-          "type": "number",
+          "description": "Warning temperature °C — where linear derating begins. Set with `t_max_c` (or neither).",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         }
       },
       "required": [
-        "c_j_per_k",
-        "t_max_c",
-        "t_warn_c"
+        "name"
       ]
     }
   }

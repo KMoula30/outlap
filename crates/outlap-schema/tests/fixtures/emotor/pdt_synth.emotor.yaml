@@ -1,29 +1,42 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# Synthetic PDT-distilled emotor (importer output on a synthetic 2-node fixture). NOT real PDT data.
-# Imported by outlap.importers.pdt_h5 from e.h5 (§10.2 step 6)
-# distilled 2-node thermal
-schema: emotor/1.0
+# Synthetic DETAILED machine-thermal network (import-style, NOT real PDT data): explicit node
+# capacities, a constant conduction skeleton, and speed/temperature-dependent convection edges
+# (air-gap film + liquid-jacket channel), driven by per-component .ptm loss maps.
+schema: emotor/1.1
 nodes:
-  winding:
-    c_j_per_k: 369.73
-    t_max_c: 180.0
-    t_warn_c: 150.0
-  case:
-    c_j_per_k: 3012.7
-    t_max_c: 120.0
-    t_warn_c: 105.0
-coupling:
-  g_wc_w_per_k: 139.2968
-  g_cool_w_per_k: 196.7918
+  - { name: slot_active, role: winding, c_j_per_k: 370.0, t_warn_c: 150.0, t_max_c: 180.0 }
+  - { name: stator_iron, role: stator_iron, c_j_per_k: 3000.0 }
+  - { name: magnet, role: rotor, c_j_per_k: 800.0, t_warn_c: 150.0, t_max_c: 180.0 }
+  - { name: airgap, role: other, c_j_per_k: 5.0 }
+  - { name: housing, role: housing, c_j_per_k: 6000.0 }
+  - { name: coolant, role: coolant }
+  - { name: ambient, role: ambient }
+conductances:
+  - { between: [slot_active, stator_iron], w_per_k: 40.0 }
+  - { between: [stator_iron, housing], w_per_k: 60.0 }
+  - { between: [housing, ambient], w_per_k: 3.0 }
+convection:
+  - between: [stator_iron, airgap]
+    area_m2: 0.02
+    model: { air_gap: { r_gap_m: 0.05, gap0_m: 0.0005 } }
+  - between: [airgap, magnet]
+    area_m2: 0.02
+    model: { air_gap: { r_gap_m: 0.05, gap0_m: 0.0005 } }
+  - between: [housing, coolant]
+    area_m2: 0.025
+    model:
+      liquid_channel:
+        hydraulic_diameter_m: 0.0089
+        velocity_mps: 3.1
+        fluid: { lam: 0.401, nu: 1.74e-6, pr: 15.6 }
 cooling:
-  liquid:
-    coolant_temp_c: 65.0
+  ambient_node: ambient
+  coolant: { node: coolant, inlet_c: 65.0, rho_cp_mdot_w_per_k: 900.0 }
 loss_routing:
-  winding_split: 0.7
-  copper_alpha_per_k: 0.00393
+  - { component: winding_active, node: slot_active }
+  - { component: core_stator, node: stator_iron }
+  - { component: magnet, node: magnet }
+cu_feedback: { nodes: [slot_active], t_ref_c: 60.0, alpha_per_k: 0.00393 }
 meta:
-  source: pdt_distilled
-  notes: Distilled from PDT 19-node LPTN (EDrive synth_2node unknown). Fit RMS 0.13%
-    over 12 envelope points (cont + [10, 20, 30] s at 3 speeds). T_max/T_warn assumed
-    (class-H defaults); case capacitance is weakly constrained by winding-limited
-    envelopes; copper feedback on.
+  source: pdt_imported
+  notes: synthetic detailed network; air-gap + liquid-jacket convection
