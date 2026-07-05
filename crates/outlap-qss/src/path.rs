@@ -46,6 +46,21 @@ impl T0Path {
     /// Sample a track into a uniform-station path. `ds_target` is rounded so the step divides the
     /// length exactly (the wrap segment of a closed lap is then also `ds`).
     pub fn from_track(track: &Track, ds_target: f64) -> Self {
+        Self::from_track_opts(track, ds_target, false)
+    }
+
+    /// Sample a track in **flat-track** mode: the road-plane lateral curvature `κ_l` keeps the
+    /// horizontal curvature `κ_h(s)` but grade, banking, and vertical curvature are zeroed, so the
+    /// g-g-g-v envelope collapses to a flat g-g (`g_normal ≡ g`). This is the 2-D oracle-comparison
+    /// mode (`sim.flat_track`); the physical [`Track`] is untouched. Recorded in the result.
+    pub fn from_track_flat(track: &Track, ds_target: f64) -> Self {
+        Self::from_track_opts(track, ds_target, true)
+    }
+
+    /// Shared sampler. `flat` zeroes grade/banking/vertical curvature (see [`from_track_flat`]).
+    ///
+    /// [`from_track_flat`]: Self::from_track_flat
+    fn from_track_opts(track: &Track, ds_target: f64, flat: bool) -> Self {
         let length = track.length();
         let closed = track.is_closed();
         let n_seg = ((length / ds_target).round() as usize).max(MIN_STATIONS);
@@ -67,9 +82,10 @@ impl T0Path {
         for i in 0..n_stations {
             let s = i as f64 * ds;
             let kappa_h = track.curvature_h(s);
-            let kappa_v = track.curvature_v(s);
-            let grade = track.grade(s);
-            let banking = track.banking(s);
+            // Flat-track: no grade/banking/vertical curvature — the ribbon lies in the road plane.
+            let kappa_v = if flat { 0.0 } else { track.curvature_v(s) };
+            let grade = if flat { 0.0 } else { track.grade(s) };
+            let banking = if flat { 0.0 } else { track.banking(s) };
             let (sb, cb) = banking.sin_cos();
             let (sg, cg) = grade.sin_cos();
             p.s.push(s);

@@ -26,19 +26,22 @@
 
 use std::path::Path;
 
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
 
 use outlap_qss::{
-    solve_lap as qss_solve_lap, LineDescriptor, T0Options, T0Path, T0Vehicle, DEFAULT_DS_M,
+    solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, QssLap, SetupLog,
+    SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
 };
 use outlap_raceline::{min_curvature_line, RacelineOptions};
 use outlap_schema::io::FsLoader;
 use outlap_schema::load::load_tyr;
 use outlap_schema::load::report::ReportEntry;
+use outlap_schema::sim::{Sim, Tier};
 use outlap_schema::{
-    load_conditions, load_vehicle_with, Conditions, LoadOptions, Overrides, ResolvedVehicle,
+    load_conditions, load_sim, load_vehicle_with, Conditions, LoadOptions, Overrides,
+    ResolvedVehicle,
 };
 use outlap_tire::{peak_mu_x, peak_mu_y, Mf61, SlipState};
 
@@ -430,7 +433,52 @@ fn min_curvature(
     })
 }
 
-/// A T0 point-mass lap result (arrays over arc-length stations).
+/// A queryable g-g-g-v envelope (the returnable `lap.envelope`): the T1-derived tyre-grip boundary
+/// the QSS lap ran on. Zero-copy scalar queries; `to_dataset` is built on the Python side.
+#[pyclass(frozen)]
+pub struct Envelope {
+    inner: GgvEnvelope,
+}
+
+#[pymethods]
+impl Envelope {
+    /// Lateral-acceleration boundary at `(v, a_x, g_normal)` (velocity frame), m/s².
+    fn ay_boundary(&self, v: f64, ax: f64, g_normal: f64) -> f64 {
+        self.inner.ay_boundary(v, ax, g_normal)
+    }
+    /// Maximum positive longitudinal acceleration (net of drag) at `(v, g_normal)`, m/s².
+    fn accel_limit(&self, v: f64, g_normal: f64) -> f64 {
+        self.inner.accel_limit(v, g_normal)
+    }
+    /// Maximum braking deceleration magnitude at `(v, g_normal)`, m/s².
+    fn brake_limit(&self, v: f64, g_normal: f64) -> f64 {
+        self.inner.brake_limit(v, g_normal)
+    }
+    /// Reference straight-line drag as an acceleration at speed `v`, m/s².
+    fn drag_accel(&self, v: f64) -> f64 {
+        self.inner.drag_accel(v)
+    }
+    /// The `[first, last]` bounds of the `(v, â_x, g_normal)` axes (`â_x` normalised to ±1).
+    fn domain(&self) -> [[f64; 2]; 3] {
+        self.inner.domain().map(|(lo, hi)| [lo, hi])
+    }
+    /// The grid shape `[n_v, n_âx, n_g_normal]`.
+    fn shape(&self) -> [usize; 3] {
+        self.inner.shape()
+    }
+    /// The reference mass the envelope was generated at, kg.
+    fn mass_ref(&self) -> f64 {
+        self.inner.mass_ref()
+    }
+    /// Generation notes / simplifications (nothing silent).
+    #[getter]
+    fn notes(&self) -> Vec<String> {
+        self.inner.notes().to_vec()
+    }
+}
+
+/// A solved QSS lap: point-mass channels over arc-length stations always; for `tier="t1"` also the
+/// per-wheel (`s × wheel`) loads/slips/forces, the setup metrics, and any slow-state channels.
 #[pyclass(frozen)]
 pub struct Lap {
     s: Vec<f64>,
@@ -441,15 +489,50 @@ pub struct Lap {
     x: Vec<f64>,
     y: Vec<f64>,
     z: Vec<f64>,
+    // Per-wheel channels (row-major `n × 4`, wheel order FL/FR/RL/RR); `None` for t0.
+    vertical_load_n: Option<Vec<f64>>,
+    slip_ratio: Option<Vec<f64>>,
+    slip_angle_rad: Option<Vec<f64>>,
+    force_long_n: Option<Vec<f64>>,
+    force_lat_n: Option<Vec<f64>>,
+    // Setup metrics (per station); `None` for t0.
+    understeer_gradient: Option<Vec<f64>>,
+    aero_front_share: Option<Vec<f64>>,
+    // Slow-state channels (per station); `None` unless a coupled electrified stack was active.
+    state_of_charge: Option<Vec<f64>>,
+    machine_temp_c: Option<Vec<f64>>,
+    envelope: Option<GgvEnvelope>,
     /// Total lap time, s.
     #[pyo3(get)]
     lap_time_s: f64,
-    /// T0 simplification/degradation notes (nothing silent).
+    /// The resolved solver tier (`"t0"` / `"t1"`).
+    #[pyo3(get)]
+    tier: String,
+    /// The recorded normal-load coupling mode (`"one_step_lag"` / `"fixed_point"`).
+    #[pyo3(get)]
+    fz_coupling: String,
+    /// Whether the lap ran in flat-track analysis mode.
+    #[pyo3(get)]
+    flat_track: bool,
+    /// The wheel-channel order for the per-wheel arrays (`["FL","FR","RL","RR"]`).
+    #[pyo3(get)]
+    wheels: Vec<String>,
+    /// Simplification/degradation notes (nothing silent).
     #[pyo3(get)]
     notes: Vec<String>,
     /// blake3 hash of the resolved vehicle spec that produced this lap.
     #[pyo3(get)]
     resolved_hash: String,
+}
+
+/// Build a `n × 4` numpy array (row-major) from a flat per-wheel channel, or `None`.
+fn wheel_array<'py>(py: Python<'py>, v: Option<&Vec<f64>>) -> Option<Bound<'py, PyArray2<f64>>> {
+    v.map(|flat| {
+        let n = flat.len() / 4;
+        numpy::ndarray::Array2::from_shape_vec((n, 4), flat.clone())
+            .expect("n×4 per-wheel channel")
+            .into_pyarray(py)
+    })
 }
 
 #[pymethods]
@@ -486,24 +569,136 @@ impl Lap {
     fn z<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         self.z.clone().into_pyarray(py)
     }
+    /// Per-wheel vertical (normal) load `F_z`, N — shape `n × 4` (FL/FR/RL/RR), or `None` for t0.
+    fn vertical_load_n<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.vertical_load_n.as_ref())
+    }
+    /// Per-wheel longitudinal slip ratio `κ`, shape `n × 4`, or `None` for t0.
+    fn slip_ratio<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.slip_ratio.as_ref())
+    }
+    /// Per-wheel slip angle `α`, rad, shape `n × 4`, or `None` for t0.
+    fn slip_angle_rad<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.slip_angle_rad.as_ref())
+    }
+    /// Per-wheel longitudinal force `F_x`, N, shape `n × 4`, or `None` for t0.
+    fn force_long_n<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.force_long_n.as_ref())
+    }
+    /// Per-wheel lateral force `F_y`, N, shape `n × 4`, or `None` for t0.
+    fn force_lat_n<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.force_lat_n.as_ref())
+    }
+    /// Understeer gradient per station (rad·s²/m), or `None` for t0.
+    fn understeer_gradient<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.understeer_gradient
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Front axle downforce share per station (0..1), or `None` for t0.
+    fn aero_front_share<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.aero_front_share
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Pack state of charge per station (0..1), or `None` when no coupled stack was active.
+    fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.state_of_charge
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Machine winding temperature per station (°C), or `None` when no coupled stack was active.
+    fn machine_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.machine_temp_c
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// The g-g-g-v envelope this lap ran on (queryable), or `None` for the degenerate path.
+    #[getter]
+    fn envelope(&self) -> Option<Envelope> {
+        self.envelope.clone().map(|inner| Envelope { inner })
+    }
 }
 
-/// Solve a T0 point-mass lap of `track` for the vehicle in `vehicle_dir`.
+/// Build the `Sim` for a run: the vehicle-dir `sim.yaml` (or defaults), deep-merged with the `sim`
+/// override dict, then the `tier=` convenience override. A missing `sim.yaml` is fine (defaults); a
+/// present-but-broken one is a real error.
+fn build_sim(
+    vl: &FsLoader,
+    sim_patch: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tier: Option<&str>,
+) -> PyResult<Sim> {
+    let base = match load_sim("sim.yaml", vl) {
+        Ok(s) => s,
+        Err(e) if is_not_found(&e) => Sim::default(),
+        Err(e) => return Err(schema_err(e)),
+    };
+    let mut value = serde_json::to_value(&base).map_err(err)?;
+    if let Some(patch) = sim_patch {
+        merge_json(&mut value, &py_to_json(patch.as_any())?, "sim")?;
+    }
+    if let Some(t) = tier {
+        value["tier"] = serde_json::Value::String(t.to_owned());
+    }
+    serde_json::from_value(value).map_err(|e| PyValueError::new_err(format!("invalid sim: {e}")))
+}
+
+/// Deep-merge a JSON `patch` onto `value`, erroring on an unknown object key (a product surface).
+fn merge_json(
+    value: &mut serde_json::Value,
+    patch: &serde_json::Value,
+    path: &str,
+) -> PyResult<()> {
+    match (value, patch) {
+        (serde_json::Value::Object(v), serde_json::Value::Object(p)) => {
+            for (k, pv) in p {
+                let sub = format!("{path}.{k}");
+                if let Some(slot) = v.get_mut(k) {
+                    merge_json(slot, pv, &sub)?;
+                } else {
+                    let known: Vec<&String> = v.keys().collect();
+                    return Err(PyValueError::new_err(format!(
+                        "unknown sim field `{sub}` (known fields here: {known:?})"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        (slot, p) => {
+            *slot = p.clone();
+            Ok(())
+        }
+    }
+}
+
+/// Row-major flatten of a per-wheel SoA channel (`Vec<[f64; 4]>` → `Vec<f64>`).
+fn flat4(v: &[[f64; 4]]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for row in v {
+        out.extend_from_slice(row);
+    }
+    out
+}
+
+/// Solve a QSS lap of `track` for the vehicle in `vehicle_dir` at the tier `sim.tier` selects.
 ///
-/// `vehicle_dir` must hold a `vehicle.yaml` (plus its referenced `.ptm`/`.tyr` files); an optional
-/// `conditions.yaml` next to it overrides the ISA defaults (a *malformed* one is an error — never
-/// silently ignored). When `track` is a generated racing line, pass `raceline_ds_m` (the step the
-/// line was generated with, `Raceline.ds_m`) so the result records honest line provenance.
+/// `vehicle_dir` must hold a `vehicle.yaml` (plus its referenced `.ptm`/`.tyr` files); optional
+/// `conditions.yaml` / `sim.yaml` next to it override the defaults (a *malformed* one is an error —
+/// never silently ignored). `tier=` (`"t0"`/`"t1"`) and `sim=` (a nested override dict, e.g.
+/// `{"flat_track": True, "envelope": {"v_points": 24}}`) override the file/defaults; `tier=` wins.
 ///
-/// What-if experiments (Decision #35): `overrides` is a `{dotted.path: value}` dict patched onto
-/// the vehicle between merge and validation (e.g. `{"chassis.mass_kg": 750.0}`) — invalid paths
-/// or types fail loudly; `conditions` is a nested dict deep-merged onto the session conditions
-/// (e.g. `{"air": {"temp_c": 35.0}}`).
+/// `t0` runs the point-mass velocity profile on the corrected g-g-g-v envelope; `t1` adds a
+/// per-station re-trim for per-wheel loads/slips/forces + setup metrics; `t2`/`t3` raise (they land
+/// in M4/M6). When `track` is a generated racing line, pass `raceline_ds_m` for honest provenance.
 ///
-/// The call holds the GIL for its duration (~tens of ms per lap); releasing it is deferred to the
-/// batch/sweep API milestone.
+/// What-if experiments (Decision #35): `overrides` is a `{dotted.path: value}` vehicle patch;
+/// `conditions` is a nested dict deep-merged onto the session conditions.
+///
+/// The call holds the GIL for its duration (envelope generation is a seconds-scale cold step in a
+/// debug build); releasing it is deferred to the batch/sweep API milestone.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, overrides = None, conditions = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, overrides = None, conditions = None, tier = None, sim = None))]
+#[allow(clippy::too_many_arguments)]
 fn solve_lap(
     vehicle_dir: &str,
     track: &Track,
@@ -511,11 +706,13 @@ fn solve_lap(
     raceline_ds_m: Option<f64>,
     overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
     conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tier: Option<&str>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<Lap> {
     check_ds(ds_m)?;
     let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
-    // Missing conditions.yaml → ISA defaults; a PRESENT-but-broken one is a real error
-    // (config errors are a product surface — nothing silent).
+    let sim_cfg = build_sim(&vl, sim, tier)?;
+    // Missing conditions.yaml → ISA defaults; a PRESENT-but-broken one is a real error.
     let base_conditions = match load_conditions("conditions.yaml", &vl) {
         Ok(c) => c,
         Err(e) if is_not_found(&e) => Conditions::default(),
@@ -527,11 +724,14 @@ fn solve_lap(
     };
     let opts = T0Options {
         ds_m,
+        allow_degraded: sim_cfg.allow_degraded,
         ..T0Options::default()
     };
-    let veh = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
-
-    let path = T0Path::from_track(&track.inner, ds_m);
+    let path = if sim_cfg.flat_track {
+        T0Path::from_track_flat(&track.inner, ds_m)
+    } else {
+        T0Path::from_track(&track.inner, ds_m)
+    };
     let line = match raceline_ds_m {
         Some(g) => LineDescriptor::MinCurvature {
             ds_m: g,
@@ -539,15 +739,59 @@ fn solve_lap(
         },
         None => LineDescriptor::Centerline,
     };
-    let lap = qss_solve_lap(
-        &veh,
-        &path,
-        line,
-        resolved.report.resolved_hash.clone(),
-        veh.notes().to_vec(),
-    )
-    .map_err(err)?;
+    let hash = resolved.report.resolved_hash.clone();
 
+    // Enum dispatch on the resolved tier (assembly-time, never in the loop).
+    let qss: QssLap = match sim_cfg.tier {
+        tier @ (Tier::T2 | Tier::T3) => return Err(err(tier_not_implemented(tier))),
+        wanted => {
+            let t1v = T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded)
+                .map_err(err)?;
+            let env =
+                GgvEnvelope::generate(&t1v, &sim_cfg.envelope, sim_cfg.fz_coupling).map_err(err)?;
+            let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
+            let mut notes = t0v.notes().to_vec();
+            notes.extend(t1v.notes().iter().cloned());
+            notes.extend(env.notes().iter().cloned());
+            // The committed vehicles carry no battery+emotor stack, so the slow-state coupling is
+            // inert here (`None`); the coupled path is exercised by the Rust full-stack fixture.
+            if wanted == Tier::T0 {
+                solve_t0(
+                    &t0v,
+                    env,
+                    None,
+                    &path,
+                    line,
+                    hash,
+                    notes,
+                    sim_cfg.fz_coupling,
+                    sim_cfg.flat_track,
+                )
+                .map_err(err)?
+            } else {
+                solve_t1(
+                    &t1v,
+                    &t0v,
+                    env,
+                    None,
+                    &path,
+                    line,
+                    hash,
+                    notes,
+                    sim_cfg.fz_coupling,
+                    sim_cfg.flat_track,
+                )
+                .map_err(err)?
+            }
+        }
+    };
+
+    Ok(qss_lap_to_py(qss, track))
+}
+
+/// Convert a solved [`QssLap`] into the Python `Lap`, reconstructing world positions from the track.
+fn qss_lap_to_py(qss: QssLap, track: &Track) -> Lap {
+    let lap = qss.lap;
     let n = lap.s.len();
     let (mut x, mut y, mut z) = (
         Vec::with_capacity(n),
@@ -560,7 +804,10 @@ fn solve_lap(
         y.push(p[1]);
         z.push(p[2]);
     }
-    Ok(Lap {
+    let wheels: Option<&WheelLog> = qss.wheels.as_ref();
+    let setup: Option<&SetupLog> = qss.setup.as_ref();
+    let slow: Option<&SlowLog> = qss.slow.as_ref();
+    Lap {
         s: lap.s,
         v: lap.v,
         ax: lap.ax,
@@ -569,10 +816,32 @@ fn solve_lap(
         x,
         y,
         z,
+        vertical_load_n: wheels.map(|w| flat4(&w.vertical_load_n)),
+        slip_ratio: wheels.map(|w| flat4(&w.slip_ratio)),
+        slip_angle_rad: wheels.map(|w| flat4(&w.slip_angle_rad)),
+        force_long_n: wheels.map(|w| flat4(&w.force_long_n)),
+        force_lat_n: wheels.map(|w| flat4(&w.force_lat_n)),
+        understeer_gradient: setup.map(|s| s.understeer_gradient.clone()),
+        aero_front_share: setup.map(|s| s.aero_front_share.clone()),
+        state_of_charge: slow.map(|s| s.state_of_charge.clone()),
+        machine_temp_c: slow.map(|s| s.machine_temp_c.clone()),
+        envelope: qss.envelope,
         lap_time_s: lap.lap_time_s,
+        tier: format!("{:?}", qss.tier).to_lowercase(),
+        fz_coupling: fz_coupling_str(qss.fz_coupling),
+        flat_track: qss.flat_track,
+        wheels: WHEEL_ORDER.iter().map(|s| (*s).to_owned()).collect(),
         notes: lap.notes,
         resolved_hash: lap.resolved_hash,
-    })
+    }
+}
+
+/// The recorded `fz_coupling` mode as its snake_case schema string.
+fn fz_coupling_str(c: outlap_schema::sim::FzCoupling) -> String {
+    match c {
+        outlap_schema::sim::FzCoupling::OneStepLag => "one_step_lag".to_owned(),
+        outlap_schema::sim::FzCoupling::FixedPoint => "fixed_point".to_owned(),
+    }
 }
 
 /// Load and resolve a vehicle, returning its loaded-model report as a dict:
@@ -614,6 +883,7 @@ fn outlap_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Track>()?;
     m.add_class::<Raceline>()?;
     m.add_class::<Lap>()?;
+    m.add_class::<Envelope>()?;
     m.add_function(wrap_pyfunction!(min_curvature, m)?)?;
     m.add_function(wrap_pyfunction!(solve_lap, m)?)?;
     m.add_function(wrap_pyfunction!(vehicle_report, m)?)?;

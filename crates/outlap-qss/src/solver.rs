@@ -153,11 +153,34 @@ impl GripModel for EllipseGrip<'_> {
 struct GgvGrip<'a> {
     veh: &'a T0Vehicle,
     env: &'a GgvEnvelope,
+    /// Optional per-station **traction scale** in `[0, 1]` (`None` ⇒ uncoupled, scale ≡ 1). The QSS
+    /// slow-state coupling fills this from the machine-thermal derate ∧ battery peak-power cap
+    /// marched along the previous pass; it multiplies the powertrain traction ceiling in the forward
+    /// step. Braking is unaffected (it draws no drive power). See [`crate::qss`].
+    traction_scale: Option<&'a [f64]>,
 }
 
 impl<'a> GgvGrip<'a> {
     fn new(veh: &'a T0Vehicle, env: &'a GgvEnvelope) -> Self {
-        Self { veh, env }
+        Self {
+            veh,
+            env,
+            traction_scale: None,
+        }
+    }
+
+    /// As [`Self::new`] but with a per-station traction scale (the slow-state coupling).
+    fn with_scale(veh: &'a T0Vehicle, env: &'a GgvEnvelope, scale: &'a [f64]) -> Self {
+        Self {
+            veh,
+            env,
+            traction_scale: Some(scale),
+        }
+    }
+
+    /// The traction scale at station `i` (`1.0` when uncoupled).
+    fn scale(&self, i: usize) -> f64 {
+        self.traction_scale.map_or(1.0, |s| s[i])
     }
 
     /// The envelope's lateral-acceleration boundary at `(v, a_x, g_normal)`, scaled by the local
@@ -261,7 +284,10 @@ impl GripModel for GgvGrip<'_> {
         let (ay_dem, gn) = demand_and_gn(p, i, v_i);
         let accel = if self.planted(v_i, gn) {
             let ax_grip = self.ax_forward(v_i, gn, ay_dem.abs(), p.grip[i]);
-            let pt_net = self.veh.tractive_force(v_i) / self.veh.mass_kg - self.env.drag_accel(v_i);
+            // Slow-state coupling: the machine-thermal derate ∧ battery peak-power cap scale the
+            // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1.
+            let pt_net = self.veh.tractive_force(v_i) * self.scale(i) / self.veh.mass_kg
+                - self.env.drag_accel(v_i);
             ax_grip.min(pt_net) - G * p.sin_g[i]
         } else {
             // Airborne (crest unloading beyond aero downforce): no traction, just drag + grade coast.
@@ -403,6 +429,41 @@ pub fn solve_into_ggv(
     solve_generic(&GgvGrip::new(veh, env), path, ws)
 }
 
+/// As [`solve_into_ggv`] but with a per-station **traction scale** (`scale.len() == path.len()`),
+/// the machine-thermal derate ∧ battery peak-power cap the QSS slow-state coupling marches along the
+/// previous pass. `scale[i] ∈ [0, 1]` multiplies the powertrain traction ceiling in the forward
+/// step; braking is unaffected. Zero-allocation.
+///
+/// # Errors
+/// As [`solve_into`]; also [`T0Error::WorkspaceMismatch`] if `scale` is not `path.len()` long.
+pub fn solve_into_ggv_scaled(
+    veh: &T0Vehicle,
+    env: &GgvEnvelope,
+    scale: &[f64],
+    path: &T0Path,
+    ws: &mut T0Workspace,
+) -> Result<f64, T0Error> {
+    if scale.len() != path.len() {
+        return Err(T0Error::WorkspaceMismatch {
+            workspace: scale.len(),
+            path: path.len(),
+        });
+    }
+    solve_generic(&GgvGrip::with_scale(veh, env, scale), path, ws)
+}
+
+/// Central segment longitudinal acceleration `(v_{i+1}² − v_i²)/2ds` at each station into `ax_out`
+/// (`ax_out.len() == path.len()`; the last open-path station keeps its prior value, 0 by default).
+/// Shared by the owning wrappers and the slow-state coupling march.
+pub(crate) fn derive_ax(path: &T0Path, v: &[f64], ax_out: &mut [f64]) {
+    let n = v.len();
+    for seg in 0..path.segments() {
+        let i = seg;
+        let j = if path.closed { (seg + 1) % n } else { seg + 1 };
+        ax_out[i] = (v[j] * v[j] - v[i] * v[i]) / (2.0 * path.ds);
+    }
+}
+
 /// Lap time from a solved speed profile: `Σ 2·ds/(v_i + v_{i+1})` (fixed-order).
 fn lap_time(path: &T0Path, v: &[f64]) -> f64 {
     let n = v.len();
@@ -429,7 +490,54 @@ pub fn solve_lap(
 ) -> Result<LapResult, T0Error> {
     let mut ws = T0Workspace::for_path(path);
     let lap_time_s = solve_into(veh, path, &mut ws)?;
+    Ok(lap_result_from_ws(
+        path,
+        &ws,
+        lap_time_s,
+        line,
+        resolved_hash,
+        notes,
+    ))
+}
 
+/// Solve a lap on a T1-derived g-g-g-v envelope, returning an owned [`LapResult`] with the SoA
+/// point-mass channels (allocates). The owning convenience wrapper around [`solve_into_ggv`] — the
+/// T0-on-envelope production path (`sim.tier = t0`).
+///
+/// # Errors
+/// As [`solve_into`].
+pub fn solve_lap_ggv(
+    veh: &T0Vehicle,
+    env: &GgvEnvelope,
+    path: &T0Path,
+    line: LineDescriptor,
+    resolved_hash: String,
+    notes: Vec<String>,
+) -> Result<LapResult, T0Error> {
+    let mut ws = T0Workspace::for_path(path);
+    let lap_time_s = solve_into_ggv(veh, env, path, &mut ws)?;
+    Ok(lap_result_from_ws(
+        path,
+        &ws,
+        lap_time_s,
+        line,
+        resolved_hash,
+        notes,
+    ))
+}
+
+/// Derive the point-mass SoA channels (`ax`, `ay`, `t`) from a solved speed profile and pack them
+/// into an owned [`LapResult`]. Shared by every T0-flavoured owning wrapper (ellipse and envelope).
+/// `ay` is the velocity-frame lateral demand `κ_l·v² + g·sinθ_b·cosθ_g`; `ax` is the central
+/// segment acceleration `(v_{i+1}² − v_i²)/2ds`.
+pub(crate) fn lap_result_from_ws(
+    path: &T0Path,
+    ws: &T0Workspace,
+    lap_time_s: f64,
+    line: LineDescriptor,
+    resolved_hash: String,
+    notes: Vec<String>,
+) -> LapResult {
     let n = path.len();
     let mut ax = vec![0.0; n];
     let mut ay = vec![0.0; n];
@@ -438,16 +546,11 @@ pub fn solve_lap(
         let u = ws.v[i] * ws.v[i];
         ay[i] = path.kappa_l[i] * u + G * path.sin_b_cos_g[i];
     }
-    for seg in 0..path.segments() {
-        let i = seg;
-        let j = if path.closed { (seg + 1) % n } else { seg + 1 };
-        ax[i] = (ws.v[j] * ws.v[j] - ws.v[i] * ws.v[i]) / (2.0 * path.ds);
-    }
+    derive_ax(path, &ws.v, &mut ax);
     for i in 1..n {
         t[i] = t[i - 1] + 2.0 * path.ds / (ws.v[i - 1] + ws.v[i]).max(1e-6);
     }
-
-    Ok(LapResult {
+    LapResult {
         s: path.s.clone(),
         v: ws.v.clone(),
         ax,
@@ -457,5 +560,5 @@ pub fn solve_lap(
         line,
         resolved_hash,
         notes,
-    })
+    }
 }

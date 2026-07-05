@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # A QSS lap with the default numerics (§9.7).
-schema: sim/1.0
+schema: sim/1.1
 tier: t1
 dt_s: 0.001
 fz_coupling: one_step_lag
@@ -12,3 +12,4 @@ envelope:
 raceline:
   generator: min_curvature
 allow_degraded: false
+flat_track: false

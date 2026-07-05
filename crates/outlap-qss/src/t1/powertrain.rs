@@ -538,6 +538,67 @@ impl T1Powertrain {
         self.energy_at_shaft(unit_idx, rpm, tau)
     }
 
+    /// Aggregate source power drawn, machine-heating loss, and a representative machine shaft speed
+    /// for delivering a **positive** wheel drive force `wheel_force_n` (N) at speed `v` (m/s),
+    /// evaluating the Vdc-stacked maps at the pack terminal voltage `vdc` (`None` ⇒ each unit's
+    /// reference Vdc). The requested force is distributed across drive units in proportion to their
+    /// best-gear capacity at this speed; each unit's `(rpm, τ)` operating point is looked up through
+    /// its Vdc-coupled efficiency/loss map. The representative `omega_rad_s` is the fastest
+    /// contributing unit's shaft speed (the air-gap-cooling driver for the thermal step).
+    ///
+    /// This is the per-segment lookup the QSS slow-state coupling uses: `loss_w` feeds the machine
+    /// thermal network, `source_w` feeds the battery Coulomb count / peak-power cap. Returns `None`
+    /// when no unit has an installed efficiency map (⇒ the coupling is inert — a fuel/constant-Vdc
+    /// drive). Zero-allocation.
+    ///
+    /// QSS simplification: with a hybrid ICE + electric drive this attributes the full traction draw
+    /// to the mapped units, so a distinct ICE source is treated as battery-fed; the coupling is exact
+    /// for a pure-electric drive (the case the CI fixture exercises) and conservative otherwise —
+    /// documented in `docs/theory/qss-powertrain.md`.
+    #[must_use]
+    pub fn traction_energy(
+        &self,
+        v: f64,
+        wheel_force_n: f64,
+        vdc: Option<f64>,
+    ) -> Option<TractionEnergy> {
+        // Total mapped capacity at this speed sets each unit's force share.
+        let mut total_cap = 0.0;
+        let mut any_map = false;
+        for u in &self.units {
+            if u.eff_map.is_some() {
+                any_map = true;
+                total_cap += u.max_wheel_force(v);
+            }
+        }
+        if !any_map || total_cap <= 0.0 {
+            return None;
+        }
+        let mut source_w = 0.0f64;
+        let mut loss_w = 0.0f64;
+        let mut omega_rad_s = 0.0f64;
+        for (idx, u) in self.units.iter().enumerate() {
+            if u.eff_map.is_none() {
+                continue;
+            }
+            let share = u.max_wheel_force(v) / total_cap;
+            let unit_force = wheel_force_n * share;
+            let Some((rpm, tau)) = u.source_op(v, unit_force) else {
+                continue;
+            };
+            if let Some(pt) = self.energy_at_shaft_inner(idx, rpm, tau, vdc) {
+                source_w += pt.source_w;
+                loss_w += pt.loss_w;
+                omega_rad_s = omega_rad_s.max(rpm * RPM_TO_RAD_PER_S);
+            }
+        }
+        Some(TractionEnergy {
+            source_w,
+            loss_w,
+            omega_rad_s,
+        })
+    }
+
     /// The installed machine/thermal efficiency at a source-shaft operating point `(rpm, torque_nm)`
     /// — the raw interpolated map value (0..1), unclamped, for round-trip verification against the
     /// importer's source arrays. `None` if `unit_idx` has no installed efficiency map.
@@ -577,6 +638,19 @@ impl T1Powertrain {
     pub fn notes(&self) -> &[String] {
         &self.notes
     }
+}
+
+/// Aggregate traction energy for the per-segment slow-state coupling: the electrical/chemical source
+/// power drawn, the machine-heating loss routed to the thermal network, and the fastest contributing
+/// machine's shaft speed. Produced by [`T1Powertrain::traction_energy`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TractionEnergy {
+    /// Source (electrical / fuel-chemical) power drawn to deliver the requested wheel force, W.
+    pub source_w: f64,
+    /// Machine-heating loss at the operating point (for the `.emotor` thermal network), W.
+    pub loss_w: f64,
+    /// Representative machine shaft speed (fastest contributing unit), rad/s.
+    pub omega_rad_s: f64,
 }
 
 /// An energy-accounting sample at one source operating point (all powers in W).

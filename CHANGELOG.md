@@ -6,10 +6,25 @@ All notable changes to outlap are documented here. This project follows
 
 ## [Unreleased]
 
-Milestone **M2** (tyre model) — in progress, not yet tagged.
+Milestone **M3** (full QSS/T1 tier → v0.2) — in progress, not yet tagged. (M2 tyre model landed.)
 
 ### Added
 
+- **qss/py**: **`sim.tier` dispatch + result surface** — `sim.tier` now selects the lap solver
+  (`t0` = point-mass velocity profile on the corrected g-g-g-v envelope; `t1` = the same profile
+  plus a per-station re-trim emitting per-wheel loads/slips/forces + setup metrics; `t2`/`t3` return
+  a typed "not implemented until M4/M6" error). Machine-thermal derate and battery peak-power now
+  compose as `min` caps on the traction ceiling with the machine temperatures and pack SoC advancing
+  per segment (the QSS slow-state coupling). The Python xarray Dataset gains a `wheel` dimension
+  (FL/FR/RL/RR), per-wheel + slow-state + setup channels, a returnable `lap.envelope`, and `tier`/
+  `fz_coupling`/`flat_track` attrs; `s`-only T0 Datasets stay backward-compatible. `solve_lap` /
+  `solve_lap_dataset` gain `tier=` and `sim=` arguments.
+- **validation**: **flat-track mode + Limebeer cross-check** — a recorded `sim.flat_track` analysis
+  mode zeroes track grade/banking/vertical curvature so the envelope collapses to a flat g-g, and
+  the QSS lap is gated within 1 % of the Perantoni & Limebeer 2014 F1 @ Catalunya oracle (reference
+  car #1 parameterised to the paper; comparison figure + golden parquet laps; QSS-lap perf gate).
+- **schema** (`sim/1.0 → 1.1`, MINOR): optional `flat_track` flag on `sim` documents (additive JSON
+  Schema change; default `false`).
 - **tire**: physical **brush model** (Pacejka ch. 3, parabolic pressure) — a first-principles
   force core (`F_x`, `F_y`, `M_z` with the closed-form pneumatic trail; `M_x = M_y = 0`) from the
   two tread stiffnesses, base friction, and contact half-length. First-order **relaxation** helper

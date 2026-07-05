@@ -24,6 +24,11 @@
         "v_points": 40
       }
     },
+    "flat_track": {
+      "description": "Flat-track analysis mode: zero the track grade, banking, and vertical curvature so the\ng-g-g-v envelope collapses to a flat g-g (the 2-D oracle-comparison mode, e.g. the Limebeer\ncross-check). A recorded simulation setting; the physical track file is left untouched.",
+      "type": "boolean",
+      "default": false
+    },
     "fz_coupling": {
       "description": "Normal-load algebraic-loop coupling mode (Decision #29).",
       "$ref": "#/$defs/FzCoupling",
