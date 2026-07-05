@@ -14,6 +14,13 @@ plots its output.
 
 ![g-g-g-v envelope](img/ggv_envelope.png)
 
+The 4-D envelope is a **funnel**: lateral × longitudinal acceleration in the plane, speed up the
+z-axis, one surface per apparent-gravity `a_z` (`= g_normal`). The funnel widens with speed as
+downforce loads the tyres, and a compression (`a_z = 15 m/s²`) gives more grip than a crest
+(`a_z = 8 m/s²`) at every speed.
+
+![g-g-g-v funnel](img/ggv_envelope_3d.png)
+
 ## The classical g-g and its two extra axes
 
 A **g-g diagram** plots the maximum longitudinal and lateral accelerations a car can reach: the
@@ -143,7 +150,9 @@ result surface that select the envelope path in production land in PR8.
 
 ## References
 
-Clean-room from published literature — no simulator source was read.
+Clean-room from published literature; no code was copied. The **TUM-AVS/GGGVDiagrams** repository
+(GPL-3.0 — the reference implementation of Werner et al. 2025) was consulted for the *approach* only
+and re-authored independently from the papers below.
 
 * R. S. Rice, "Measuring car-driver interaction with the g-g diagram," *SAE Technical Paper* 730018,
   1973.
