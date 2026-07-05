@@ -28,14 +28,22 @@ pub enum SuspensionModel {
 
 /// Per-axle kinematics & compliance.
 ///
-/// `anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**: when omitted, the
-/// estimation stage fills them from documented heuristics (kinematic angles → 0, maps → identity)
-/// and records a line in the loaded-model report.
+/// `static_ride_height_m`, `anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**:
+/// when omitted, the estimation stage fills them from documented heuristics (ride height →
+/// axle-nominal, kinematic angles → 0, maps → identity) and records a line in the loaded-model
+/// report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct AxleKc {
     /// Vertical ride rate at the wheel, N/m.
     pub ride_rate_n_per_m: f64,
+    /// Static (design) ride height at the wheel with the car at rest, m (estimable → axle-nominal).
+    ///
+    /// The reference platform the T1 aero-platform equilibrium (§7.4) compresses under downforce:
+    /// `h = static − ΔF_spring / (2·ride_rate)`. Only consumed by the ride-height aero map; the
+    /// constant-aero degenerate path ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_ride_height_m: Option<f64>,
     /// Fraction of total roll stiffness carried by this axle, 0..1.
     pub roll_stiffness_share: f64,
     /// Roll-centre height, m.

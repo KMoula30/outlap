@@ -164,7 +164,7 @@
       ]
     },
     "AxleKc": {
-      "description": "Per-axle kinematics & compliance.\n\n`anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**: when omitted, the\nestimation stage fills them from documented heuristics (kinematic angles → 0, maps → identity)\nand records a line in the loaded-model report.",
+      "description": "Per-axle kinematics & compliance.\n\n`static_ride_height_m`, `anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**:\nwhen omitted, the estimation stage fills them from documented heuristics (ride height →\naxle-nominal, kinematic angles → 0, maps → identity) and records a line in the loaded-model\nreport.",
       "type": "object",
       "properties": {
         "anti_dive": {
@@ -207,6 +207,14 @@
         "roll_stiffness_share": {
           "description": "Fraction of total roll stiffness carried by this axle, 0..1.",
           "type": "number",
+          "format": "double"
+        },
+        "static_ride_height_m": {
+          "description": "Static (design) ride height at the wheel with the car at rest, m (estimable → axle-nominal).\n\nThe reference platform the T1 aero-platform equilibrium (§7.4) compresses under downforce:\n`h = static − ΔF_spring / (2·ride_rate)`. Only consumed by the ride-height aero map; the\nconstant-aero degenerate path ignores it.",
+          "type": [
+            "number",
+            "null"
+          ],
           "format": "double"
         },
         "toe_map": {

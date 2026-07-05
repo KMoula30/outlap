@@ -57,8 +57,19 @@ pub enum T1Error {
     /// missing and no brush block is present — should not happen after schema validation).
     #[error("could not build the tyre force model: {0}")]
     TireBuild(#[from] outlap_tire::TireBuildError),
-    /// The aero block has no `constant` coefficients and `allow_degraded` was not set. T1/PR2 needs
-    /// constant CdA/CzA (the ride-height aero map arrives in PR3).
-    #[error("aero has no `constant` block; T1 (PR2) needs constant CdA/CzA (set `allow_degraded` to run with zero aero)")]
+    /// The aero block has no `constant` coefficients and no ride-height map was installed, and
+    /// `allow_degraded` was not set. T1 needs either a constant CdA/CzA fallback or an aero map.
+    #[error("aero has no `constant` block and no ride-height map; set `allow_degraded` to run with zero aero")]
     NoConstantAero,
+    /// A ride-height/yaw aero map referenced an axis name T1 does not recognise (expected one of
+    /// `ride_height_f_mm`, `ride_height_r_mm`, `yaw_deg`, `drs_flag`).
+    #[error("aero map axis `{name}` is not recognised (expected ride_height_f_mm | ride_height_r_mm | yaw_deg | drs_flag)")]
+    UnknownAeroAxis {
+        /// The unrecognised axis name.
+        name: String,
+    },
+    /// The ride-height/yaw aero map could not be built into an interpolant (missing value column
+    /// `cz_front_a_m2`/`cz_rear_a_m2`/`cx_a_m2`, a non-rectilinear grid, or a bad axis).
+    #[error("could not build the aero map interpolant: {0}")]
+    AeroMap(#[from] outlap_core::GridMapError),
 }
