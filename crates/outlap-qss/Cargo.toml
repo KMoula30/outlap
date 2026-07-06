@@ -23,6 +23,9 @@ parallel = ["dep:rayon"]
 
 [dev-dependencies]
 outlap-schema = { path = "../outlap-schema" }
+# The Limebeer validation example runs the min-curvature line generator (dev-only; the crate's
+# library stays free of the raceline dependency).
+outlap-raceline = { path = "../outlap-raceline" }
 proptest = { workspace = true }
 dhat = { workspace = true }
 

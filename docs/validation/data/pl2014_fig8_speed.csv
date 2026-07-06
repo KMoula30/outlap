@@ -1,0 +1,46 @@
+# Speed trace of the PL2014 nominal optimal lap, HAND-DIGITISED from Figure 8 of:
+#   G. Perantoni and D. J. N. Limebeer, "Optimal control for a Formula One car with variable
+#   parameters", Vehicle System Dynamics 52(5), 653-678, 2014 (open-access manuscript, Oxford
+#   University Research Archive, uuid:ce1a7106-0a2c-41af-8449-41541220809f).
+# Published lap time: 82.43 s (2 m grid; 82.57 s mesh-asymptotic, Fig. 11).
+# Accuracy: positions ~+/-50 m, speeds ~+/-2 m/s (read by eye off the figure). Facts/data
+# transcribed for validation; not a copy of any protected expression.
+s_m,u_mps
+0,74
+200,79
+400,84
+600,86
+800,88
+880,88
+950,37
+1010,41
+1120,43
+1230,55
+1320,62
+1500,72
+1700,83
+1860,40
+2050,62
+2180,71
+2260,24
+2380,40
+2470,46
+2560,40
+2680,32
+2800,43
+2870,47
+3000,55
+3060,60
+3250,74
+3480,84
+3580,17
+3660,40
+3720,52
+3820,44
+3900,36
+4050,43
+4200,22
+4300,25
+4420,60
+4550,68
+4655,74
