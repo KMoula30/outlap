@@ -14,3 +14,8 @@ dist/
 # Local FSAE TTC test data (membership-locked, NON-redistributable). The tirefit parsers read
 # from here; neither raw TTC files nor TTC-derived fitted parameter sets are ever committed.
 ttc-data/
+
+# Real-PDT-derived artifacts stay local (firewall; M3 user decision #7): the imported drive-unit
+# maps / pack for the Model 3 HV variant, and the real-data twin of the notebook 07 capstone.
+data/vehicles/tesla_model3_rwd/local/
+notebooks/07_qss_t1_local.ipynb

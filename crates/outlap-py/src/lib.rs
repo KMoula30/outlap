@@ -33,8 +33,9 @@ use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
 
 use outlap_qss::{
-    solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, QssLap, SetupLog,
-    SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
+    solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, MachineThermal, Pack,
+    PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle,
+    WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
 };
 use outlap_raceline::{min_curvature_line, RacelineOptions};
 use outlap_schema::io::FsLoader;
@@ -680,6 +681,46 @@ fn merge_json(
     }
 }
 
+/// Load a sidecar table referenced from `referencing` (a YAML path inside the vehicle dir),
+/// resolving `file` relative to the referencing document's directory FIRST (the PDT importers
+/// emit sidecars next to their YAML) and falling back to the vehicle root. Returns the bytes, or
+/// `None` when the file is absent at both locations (the caller notes the skip); a present-but-
+/// unreadable file is a real error.
+fn load_sidecar_bytes(
+    vl: &FsLoader,
+    referencing: &str,
+    file: &str,
+    notes: &mut Vec<String>,
+) -> PyResult<Option<Vec<u8>>> {
+    use outlap_schema::io::{SourceError, SourceLoader};
+    let mut candidates: Vec<String> = Vec::with_capacity(2);
+    if let Some((dir, _)) = referencing.rsplit_once('/') {
+        candidates.push(format!("{dir}/{file}"));
+    }
+    if !candidates.iter().any(|c| c == file) {
+        candidates.push(file.to_owned());
+    }
+    let mut resolved: Option<(usize, Vec<u8>)> = None;
+    for (i, cand) in candidates.iter().enumerate() {
+        match vl.load_bytes(cand) {
+            Ok(bytes) => {
+                if let Some((first, _)) = &resolved {
+                    // Both candidates exist: the yaml-relative one wins — say so (nothing silent).
+                    notes.push(format!(
+                        "sidecar `{file}` exists at both `{}` and `{}` — using `{}`",
+                        candidates[*first], cand, candidates[*first]
+                    ));
+                    break;
+                }
+                resolved = Some((i, bytes));
+            }
+            Err(SourceError::NotFound { .. }) => {}
+            Err(e) => return Err(err(e)),
+        }
+    }
+    Ok(resolved.map(|(_, bytes)| bytes))
+}
+
 /// FNV-1a over a byte slice — the sidecar-content fingerprint folded into the envelope cache key
 /// (the resolved-vehicle hash covers the YAML spec only, not the binary sidecar bytes).
 fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
@@ -732,34 +773,134 @@ fn install_sidecars(
         }
     }
 
-    // Per-unit `.ptm` efficiency/loss tables (energy accounting + the Vdc–SoC coupling).
+    // Per-unit `.ptm` efficiency/loss tables (energy accounting + the Vdc–SoC coupling). The
+    // sidecar resolves next to its `.ptm` first, then from the vehicle root (importer idiom).
     for (idx, unit) in resolved.spec.drivetrain.units.iter().enumerate() {
         let Ok(ptm) = outlap_schema::load::load_ptm(unit.source.as_str(), vl) else {
             continue; // assembly already validated/reported the source itself
         };
         let table_path = ptm.tables.file.as_str();
-        match vl.load_bytes(table_path) {
-            Ok(bytes) => {
-                fp = fnv1a(fp, &bytes);
-                let table = if ptm.axes.vdc_v.is_some() {
-                    read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names_vdc())
-                } else {
-                    read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names())
-                }
-                .map_err(err)?;
-                t1v.install_powertrain_maps(idx, &table).map_err(err)?;
+        if let Some(bytes) = load_sidecar_bytes(vl, unit.source.as_str(), table_path, notes)? {
+            fp = fnv1a(fp, &bytes);
+            let table = if ptm.axes.vdc_v.is_some() {
+                read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names_vdc())
+            } else {
+                read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names())
             }
-            Err(outlap_schema::io::SourceError::NotFound { .. }) => {
-                fp = fnv1a(fp, b"ptm:absent");
-                notes.push(format!(
-                    "powertrain tables `{table_path}` (unit {idx}) not present — peak-envelope \
-                     traction only, no energy accounting"
-                ));
-            }
-            Err(e) => return Err(err(e)),
+            .map_err(err)?;
+            t1v.install_powertrain_maps(idx, &table).map_err(err)?;
+        } else {
+            fp = fnv1a(fp, b"ptm:absent");
+            notes.push(format!(
+                "powertrain tables `{table_path}` (unit {idx}) not present — peak-envelope \
+                 traction only, no energy accounting"
+            ));
         }
     }
     Ok(fp)
+}
+
+/// Assemble the slow-state stack (battery pack + machine thermal network) from the vehicle's own
+/// references: `battery.params` plus the first drive unit carrying a `thermal:` `.emotor` ref. The
+/// same missing-sidecar policy as [`install_sidecars`] applies — a vehicle whose stack files are
+/// not present (e.g. `f1_2026`'s uncommitted `battery/f1_es.yaml`) keeps the coupling inert with a
+/// note, while a present-but-broken file is a real error (nothing silent). Mass-heuristic fills in
+/// the thermal assembly are surfaced as notes.
+///
+/// Returns the owned parts; the [`SlowCoupling`] itself borrows the `T1Vehicle` at the call site.
+fn build_slow_stack(
+    resolved: &ResolvedVehicle,
+    vl: &FsLoader,
+    conditions: &Conditions,
+    notes: &mut Vec<String>,
+) -> PyResult<Option<(MachineThermal, Pack, PackState)>> {
+    use outlap_schema::sidecar::read_gridded_table;
+
+    let Some(batt) = &resolved.spec.battery else {
+        return Ok(None); // no battery block ⇒ single-voltage evaluation (PR6 coupling rule)
+    };
+    let params_path = batt.params.as_str();
+    let doc = match outlap_schema::load::load_battery(params_path, vl) {
+        Ok(doc) => doc,
+        Err(e) if is_not_found(&e) => {
+            notes.push(format!(
+                "battery params `{params_path}` not present — slow-state coupling inert"
+            ));
+            return Ok(None);
+        }
+        Err(e) => return Err(schema_err(e)),
+    };
+    // The ECM sidecar resolves next to the battery YAML first, then from the vehicle root
+    // (importer idiom — `pdt_h5 batterypack` writes the parquet beside its YAML).
+    let ecm_path = doc.ecm.tables.file.as_str();
+    let Some(ecm_bytes) = load_sidecar_bytes(vl, params_path, ecm_path, notes)? else {
+        notes.push(format!(
+            "battery ECM tables `{ecm_path}` not present — slow-state coupling inert"
+        ));
+        return Ok(None);
+    };
+    let ecm = read_gridded_table(&ecm_bytes, &Pack::ecm_axis_names()).map_err(err)?;
+    // The first drive unit with a `.emotor` thermal ref carries the machine slow state (the QSS
+    // coupling marches ONE thermal network this milestone; multi-machine stacks arrive with the
+    // ERS energy manager). Extra thermal declarations are dropped WITH a note (nothing silent).
+    let thermal_units: Vec<usize> = resolved
+        .spec
+        .drivetrain
+        .units
+        .iter()
+        .enumerate()
+        .filter_map(|(i, u)| u.thermal.as_ref().map(|_| i))
+        .collect();
+    let Some(&unit_idx) = thermal_units.first() else {
+        notes.push(
+            "battery present but no drive unit declares a `.emotor` thermal model — slow-state \
+             coupling inert"
+                .to_owned(),
+        );
+        return Ok(None);
+    };
+    if thermal_units.len() > 1 {
+        notes.push(format!(
+            "{} drive units declare `.emotor` thermal models — the QSS coupling marches ONE \
+             network (unit {unit_idx}); the aggregate powertrain loss heats it and the others \
+             are not integrated this milestone",
+            thermal_units.len()
+        ));
+    }
+    let unit = &resolved.spec.drivetrain.units[unit_idx];
+    let emotor_path = unit.thermal.as_ref().expect("filtered on thermal").as_str();
+    let em = match outlap_schema::load::load_emotor(emotor_path, vl) {
+        Ok(em) => em,
+        Err(e) if is_not_found(&e) => {
+            notes.push(format!(
+                "machine thermal `{emotor_path}` not present — slow-state coupling inert"
+            ));
+            return Ok(None);
+        }
+        Err(e) => return Err(schema_err(e)),
+    };
+    let ptm = match outlap_schema::load::load_ptm(unit.source.as_str(), vl) {
+        Ok(ptm) => ptm,
+        // Unreachable in practice (T1 assembly hard-errors on a broken/missing unit source
+        // first), but keep the policy symmetric with the battery/emotor refs above.
+        Err(e) if is_not_found(&e) => {
+            notes.push(format!(
+                "drive-unit source `{}` not present — slow-state coupling inert",
+                unit.source.as_str()
+            ));
+            return Ok(None);
+        }
+        Err(e) => return Err(schema_err(e)),
+    };
+    let thermal = MachineThermal::assemble(&em, conditions, ptm.mass_kg).map_err(err)?;
+    notes.extend(
+        thermal
+            .estimates()
+            .iter()
+            .map(|e| format!("machine thermal: {e}")),
+    );
+    let (pack, state) = Pack::assemble(&doc, &ecm, None).map_err(err)?;
+    Ok(Some((thermal, pack, state)))
 }
 
 /// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
@@ -881,13 +1022,20 @@ fn solve_lap(
             notes.extend(t0v.notes().iter().cloned());
             notes.extend(t1v.notes().iter().cloned());
             notes.extend(env.notes().iter().cloned());
-            // The committed vehicles carry no battery+emotor stack, so the slow-state coupling is
-            // inert here (`None`); the coupled path is exercised by the Rust full-stack fixture.
+            // Slow-state coupling from the vehicle's own battery + `.emotor` refs (inert with a
+            // note when the stack files are not present — the status quo for `f1_2026`).
+            let stack = build_slow_stack(&resolved, &vl, &conditions, &mut notes)?;
+            let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
+                vehicle: &t1v,
+                thermal: thermal.clone(),
+                pack: pack.clone(),
+                pack_state: *state,
+            });
             if wanted == Tier::T0 {
                 solve_t0(
                     &t0v,
                     env,
-                    None,
+                    coupling.as_ref(),
                     &path,
                     line,
                     hash,
@@ -901,7 +1049,7 @@ fn solve_lap(
                     &t1v,
                     &t0v,
                     env,
-                    None,
+                    coupling.as_ref(),
                     &path,
                     line,
                     hash,

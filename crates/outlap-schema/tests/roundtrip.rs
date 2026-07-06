@@ -173,3 +173,30 @@ fn dotted_override_applies_and_is_recorded() {
         "override should change the hash"
     );
 }
+
+#[test]
+fn dotted_override_indexes_into_sequences() {
+    use outlap_schema::load::Origin;
+    let l = loader();
+    let base = load_vehicle("ev_1du_rwd/vehicle.yaml", &l, &LoadOptions::default()).unwrap();
+    // A what-if drive-unit swap: numeric segments index EXISTING sequence elements.
+    let overrides =
+        Overrides::new().with("drivetrain.units.0.source", "ptm/front_drive_unit.ptm.yaml");
+    let r = resolve_vehicle(&base.spec, &overrides, &l, &LoadOptions::default()).unwrap();
+    assert_eq!(
+        r.spec.drivetrain.units[0].source.as_str(),
+        "ptm/front_drive_unit.ptm.yaml"
+    );
+    assert!(matches!(
+        r.provenance.get("/drivetrain/units/0/source"),
+        Some(Origin::DottedOverride { .. })
+    ));
+
+    // Out-of-bounds index and non-numeric segment on a sequence are loud errors.
+    let oob = Overrides::new().with("drivetrain.units.3.source", "x");
+    let e = resolve_vehicle(&base.spec, &oob, &l, &LoadOptions::default()).unwrap_err();
+    assert!(e.to_string().contains("out of bounds"), "{e}");
+    let non_numeric = Overrides::new().with("drivetrain.units.first.source", "x");
+    let e = resolve_vehicle(&base.spec, &non_numeric, &l, &LoadOptions::default()).unwrap_err();
+    assert!(e.to_string().contains("numeric index"), "{e}");
+}
