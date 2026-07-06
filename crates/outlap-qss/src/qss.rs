@@ -195,12 +195,7 @@ fn march_slow_states(
     let pt = c.vehicle.powertrain();
     let m = c.vehicle.mass_kg;
     let n = path.len();
-    // Seed the last (open-path) station; the loop fills 0..segments.
     scale.fill(1.0);
-    for i in 0..n {
-        soc[i] = st.soc;
-        temp_c[i] = thermal.winding_temp_c();
-    }
     for seg in 0..path.segments() {
         let i = seg;
         let j = if path.closed { (seg + 1) % n } else { seg + 1 };
@@ -223,9 +218,18 @@ fn march_slow_states(
             };
             let out = c.pack.step_power(&mut st, te.source_w, dt);
             scale[i] = (derate.min(batt_scale)).clamp(0.0, 1.0);
-            soc[i] = out.soc;
-            temp_c[i] = thermal.winding_temp_c();
+            debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
         }
+        // ALWAYS log the marched state — a station where no mapped unit can deliver (no gear
+        // on-envelope, or no maps at all) advances nothing but must still report the current
+        // state, or the log would show the initial state mid-lap (a non-monotone artefact).
+        soc[i] = st.soc;
+        temp_c[i] = thermal.winding_temp_c();
+    }
+    // An open path's final station is not a segment start: it carries the end-of-lap state.
+    if !path.closed && n > 0 {
+        soc[n - 1] = st.soc;
+        temp_c[n - 1] = thermal.winding_temp_c();
     }
 }
 
