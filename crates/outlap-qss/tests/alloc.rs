@@ -132,6 +132,7 @@ fn install_map(car: &mut T1Vehicle) {
 /// `#[test]`s would race under the parallel runner (same pattern as `outlap-tire/tests/alloc.rs`).
 /// Each kernel is measured in its own before/after window.
 #[test]
+#[allow(clippy::too_many_lines)] // one linear sequence of before/after windows; splitting races dhat.
 fn hot_paths_are_zero_alloc() {
     let _profiler = dhat::Profiler::builder().testing().build();
 
@@ -249,6 +250,28 @@ fn hot_paths_are_zero_alloc() {
         after.total_blocks,
         before.total_blocks,
         "Pack slow-state advance allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+
+    // --- Coupled traction-scale solve + the per-segment traction-energy lookup (PR8) ---
+    // `solve_into_ggv_scaled` is the coupled velocity-profile kernel; `traction_energy` is the
+    // per-segment aggregate the slow-state march evaluates. Both must not allocate. (The march's
+    // per-lap workspace vectors and thermal reset are cold, per-lap allocations by design.)
+    let scale = vec![0.97; path.len()];
+    outlap_qss::solver::solve_into_ggv_scaled(&veh, &env, &scale, &path, &mut ws).unwrap(); // warm
+    let _ = t1.powertrain().traction_energy(30.0, 2000.0, Some(760.0));
+
+    let before = dhat::HeapStats::get();
+    for _ in 0..16 {
+        outlap_qss::solver::solve_into_ggv_scaled(&veh, &env, &scale, &path, &mut ws).unwrap();
+        let _ = t1.powertrain().traction_energy(30.0, 2000.0, Some(760.0));
+        let _ = t1.powertrain().traction_energy(45.0, 3500.0, None);
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "coupled solve / traction_energy allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
 }
