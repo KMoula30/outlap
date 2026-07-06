@@ -13,16 +13,20 @@ mf61:
   PDX1: 1.575
   PDX2: -0.35
   PEX1: 0.0
-  PKX1: 30.84
-  PKX2: -3.94
+  PKX1: 40.80
+  PKX2: -5.21
   # Lateral: peak mu 1.80 @ 2000 N -> 1.45 @ 6000 N (Table 3, exact linear-in-dfz mapping).
   PCY1: 1.9
   PDY1: 1.625
   PDY2: -0.35
   PEY1: 0.0
-  PKY1: -52.25
+  PKY1: -69.13
   PKY2: 4.40
   PKY4: 2.0
+  # Combined-slip weighting (Pacejka 4.E50-4.E67), fitted so the MF6.1 attainable (Fx, Fy)
+  # boundary reproduces PL2014's normalised-rho coupling (A.7-A.16) at the reference loads.
+  RBX1: 10.985
+  RBY1: 15.775
   LMUX: 1.0
   LMUY: 1.0
 # Thermal/wear blocks are REQUIRED by tyr/1.0 but are NOT part of PL2014 (the paper models neither):
