@@ -12,6 +12,14 @@ outlap-thermal = { path = "../outlap-thermal" }
 # default-features = false keeps outlap-qss wasm-clean; the example/tests bring the std FsLoader.
 outlap-schema = { path = "../outlap-schema", default-features = false }
 thiserror = { workspace = true }
+# Optional, native-edge only: parallel g-g-g-v envelope generation over the independent
+# (v, g_normal) fibres. NON-default so the wasm build stays thread-free (wasm-clean rule);
+# enabled by outlap-py. Deterministic: fibres are independent and merged in fixed order.
+rayon = { version = "1.10", optional = true }
+
+[features]
+# Parallel envelope generation (rayon fibre sweep). Native-only; never enabled for wasm targets.
+parallel = ["dep:rayon"]
 
 [dev-dependencies]
 outlap-schema = { path = "../outlap-schema" }
