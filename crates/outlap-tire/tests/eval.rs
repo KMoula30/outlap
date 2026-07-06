@@ -119,7 +119,14 @@ fn finite_at_extreme_inputs() {
 
 #[test]
 fn param_notes_report_degradations() {
-    let loader = MemLoader::new().with("slick.tyr.yaml", SLICK);
+    // The slick fixture now carries RBX1/RBY1 (combined-slip coupling), so strip them here to keep
+    // exercising the absent-combined-coefficients degradation note.
+    let stripped = SLICK
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("RBX") && !l.trim_start().starts_with("RBY"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let loader = MemLoader::new().with("slick.tyr.yaml", stripped.as_str());
     let (tyr, _) = load_tyr("slick.tyr.yaml", &loader).unwrap();
     let (_, notes) = Mf61Params::<f64>::from_tyr(&tyr).unwrap();
     // Notes are ReportEntry values pointed at `/mf61/<family>` so they merge into the
@@ -135,6 +142,13 @@ fn param_notes_report_degradations() {
     ] {
         assert!(ptrs.contains(&expected), "missing {expected} in {notes:?}");
     }
+
+    // And the fixture itself (with RB present) must NOT carry the combined-slip notes.
+    let loader = MemLoader::new().with("slick.tyr.yaml", SLICK);
+    let (tyr, _) = load_tyr("slick.tyr.yaml", &loader).unwrap();
+    let (_, notes) = Mf61Params::<f64>::from_tyr(&tyr).unwrap();
+    let ptrs: Vec<&str> = notes.iter().map(|n| n.pointer.as_str()).collect();
+    assert!(!ptrs.contains(&"/mf61/RBX*") && !ptrs.contains(&"/mf61/RBY*"));
 }
 
 #[test]
