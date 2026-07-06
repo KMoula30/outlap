@@ -50,6 +50,19 @@ const MAX_NEWTON: usize = 80;
 const MAX_LINE_SEARCH: usize = 40;
 /// Scaled-residual convergence tolerance (dimensionless; residuals normalised by `m·g` etc.).
 const TOL: f64 = 1e-10;
+/// Iteration window for the infeasibility stall test (see `solve_lm`).
+const STALL_WINDOW: usize = 6;
+/// Required residual-reduction factor per stall window: a converging LM drops `‖R‖` by orders of
+/// magnitude every few iterations, while an *infeasible* target parks the solver at a nonzero
+/// least-squares minimum where each step shaves only a microscopic strictly-positive amount. If a
+/// whole window passes without at least this reduction (and the residual is still far from
+/// tolerance), the solve is stalled at that minimum — the commanded point is infeasible; stop
+/// immediately instead of burning the remaining Newton budget (the boundary bisection makes ~half
+/// its probes infeasible by construction, so this is the envelope generator's dominant cost).
+const STALL_FACTOR: f64 = 0.7;
+/// Residual floor for the stall test: only declare a stall well above the convergence tolerance so
+/// a near-root solve with a slow tail can never be cut short.
+const STALL_MIN_RN: f64 = 1e3 * TOL;
 /// Relative step for the finite-difference Jacobian.
 const FD_H: f64 = 1e-7;
 /// Minimum speed for a meaningful QSS trim, m/s. The steady-cornering kinematics divide by `v`
@@ -325,6 +338,9 @@ impl T1Vehicle {
         let mut rn = norm(&r);
         let mut mu = 1e-3;
         let mut iterations = 0;
+        // Infeasibility stall test state: the residual at the start of the current window.
+        let mut rn_window = rn;
+        let mut window_iters = 0;
         while iterations < MAX_NEWTON && rn > TOL {
             iterations += 1;
             // Finite-difference Jacobian J (column j = ∂R/∂z_j).
@@ -398,6 +414,19 @@ impl T1Vehicle {
             }
             if !accepted {
                 break; // cannot reduce the residual further
+            }
+            // Infeasibility stall test: strict decrease alone is not progress — an infeasible
+            // target converges to a nonzero-residual least-squares minimum where every LM step
+            // still reduces `‖R‖` by a vanishing amount. Cut the solve as soon as a full window
+            // passes without a real reduction (never near the tolerance, where a slow tail on a
+            // genuinely feasible point must be allowed to finish).
+            window_iters += 1;
+            if window_iters >= STALL_WINDOW {
+                if rn > STALL_MIN_RN && rn > STALL_FACTOR * rn_window {
+                    break; // stalled at a nonzero-residual minimum ⇒ infeasible
+                }
+                rn_window = rn;
+                window_iters = 0;
             }
         }
         (z, rn, iterations)
