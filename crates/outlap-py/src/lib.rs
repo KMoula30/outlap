@@ -24,7 +24,9 @@
     clippy::struct_field_names
 )]
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
 use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
@@ -671,6 +673,39 @@ fn merge_json(
     }
 }
 
+/// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
+/// a notebook or sweep running many laps of the same car+grid pays it once. Keyed by the resolved
+/// vehicle hash, the session conditions, the envelope grid, and the coupling mode — everything that
+/// changes the boundary. Bounded implicitly by the small number of distinct (car, grid) combos a
+/// session touches; not evicted (a session is short-lived).
+static ENV_CACHE: LazyLock<Mutex<HashMap<String, GgvEnvelope>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The generated (or cached) envelope for a resolved car + numerics. Envelope generation ignores the
+/// flat-track flag (it only reshapes the path), so that is not part of the key.
+fn cached_envelope(
+    t1v: &T1Vehicle,
+    sim_cfg: &Sim,
+    resolved_hash: &str,
+    conditions: &Conditions,
+) -> PyResult<GgvEnvelope> {
+    let e = &sim_cfg.envelope;
+    let cond = serde_json::to_string(conditions).map_err(err)?;
+    let key = format!(
+        "{resolved_hash}|{cond}|{}x{}x{}|{:?}",
+        e.v_points, e.ax_points, e.g_normal_points, sim_cfg.fz_coupling
+    );
+    if let Some(env) = ENV_CACHE.lock().expect("env cache mutex").get(&key) {
+        return Ok(env.clone());
+    }
+    let env = GgvEnvelope::generate(t1v, e, sim_cfg.fz_coupling).map_err(err)?;
+    ENV_CACHE
+        .lock()
+        .expect("env cache mutex")
+        .insert(key, env.clone());
+    Ok(env)
+}
+
 /// Row-major flatten of a per-wheel SoA channel (`Vec<[f64; 4]>` → `Vec<f64>`).
 fn flat4(v: &[[f64; 4]]) -> Vec<f64> {
     let mut out = Vec::with_capacity(v.len() * 4);
@@ -747,8 +782,7 @@ fn solve_lap(
         wanted => {
             let t1v = T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded)
                 .map_err(err)?;
-            let env =
-                GgvEnvelope::generate(&t1v, &sim_cfg.envelope, sim_cfg.fz_coupling).map_err(err)?;
+            let env = cached_envelope(&t1v, &sim_cfg, &hash, &conditions)?;
             let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
             let mut notes = t0v.notes().to_vec();
             notes.extend(t1v.notes().iter().cloned());
