@@ -38,8 +38,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out = std::env::args()
         .skip_while(|a| a != "--out")
         .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data("../python/examples/output/limebeer_catalunya.csv"));
+        .map_or_else(
+            || data("../python/examples/output/limebeer_catalunya.csv"),
+            PathBuf::from,
+        );
 
     let vl = FsLoader::new(data("vehicles/limebeer_2014_f1"));
     let resolved = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default())?;
