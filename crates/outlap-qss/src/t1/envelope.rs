@@ -221,6 +221,12 @@ impl GgvEnvelope {
              filtered for open-loop stability — a T2+ concern)."
                 .to_owned(),
         );
+        notes.push(
+            "Decision #31 sensitivities sampled at every 2nd â_x node (full v and g_normal \
+             resolution) and linearly interpolated along the fibre — near-flat along â_x in the \
+             near-peak bulk; accuracy is guarded by the corrected-envelope CI gate."
+                .to_owned(),
+        );
 
         // --- Sweep the grid ---
         let n_nodes = nv * nax * ngn;
@@ -280,12 +286,18 @@ impl GgvEnvelope {
                     base[(iv * nax + iax) * ngn + ign] = b.ay_corr;
                 }
 
-                // Pass 2: central-difference sensitivities in the fibre's near-peak bulk.
+                // Pass 2: central-difference sensitivities in the fibre's near-peak bulk — on
+                // every 2nd â_x node only (the skipped nodes are filled by linear interpolation
+                // below). `v` and `g_normal` keep full resolution: the fields vary strongly with
+                // speed through the downforce transition (a v-subsampled variant failed the
+                // Decision #31 gate at 6%), but are near-flat along â_x in the near-peak bulk
+                // where corrections apply. Each sampled node costs SIX extra boundary searches,
+                // so this halves the dominant sensitivity cost; the #31 CI gate guards accuracy.
                 let peak = fibre.iter().fold(0.0_f64, |m, b| m.max(b.ay_corr));
                 let thresh = (CORR_MIN_FRAC * peak).max(AY_FLOOR);
                 for (iax, &axn) in axn_axis.iter().enumerate() {
                     let h = fibre[iax].hint();
-                    if fibre[iax].ay_corr < thresh || h.is_none() {
+                    if !sens_sampled(iax, nax) || fibre[iax].ay_corr < thresh || h.is_none() {
                         continue;
                     }
                     let ax = ax_of(axn);
@@ -303,6 +315,12 @@ impl GgvEnvelope {
                 }
             }
         }
+        fill_sensitivities(
+            [&mut s_mu, &mut s_mass, &mut s_cla],
+            &base,
+            &axn_axis,
+            [nv, nax, ngn],
+        );
 
         // Reference straight-line drag-as-acceleration vs speed (the currency the a_x axis embeds).
         let drag_vals: Vec<f64> = v_axis
@@ -631,6 +649,46 @@ fn max_straight_ax(car: &T1Vehicle, v: f64, gn: f64, coupling: FzCoupling, sign:
         }
     }
     sign * lo
+}
+
+/// Whether grid index `i` of `n` is a sensitivity sample node: every 2nd index, plus the last (so
+/// the fill below always interpolates between two samples, never extrapolates past the edge).
+fn sens_sampled(i: usize, n: usize) -> bool {
+    i.is_multiple_of(2) || i + 1 == n
+}
+
+/// Fill the unsampled `â_x` nodes of the Decision #31 sensitivity fields by linear interpolation
+/// along each fibre (sensitivities are sampled at every 2nd `â_x` node; `v` and `g_normal` keep
+/// full resolution). Only bulk nodes — boundary ≥ the fibre's correction threshold — are filled;
+/// the rest keep the suppressed 0, matching the full-grid semantics.
+fn fill_sensitivities(
+    mut fields: [&mut Vec<f64>; 3],
+    base: &[f64],
+    axn_axis: &[f64],
+    [nv, nax, ngn]: [usize; 3],
+) {
+    let node = |iv: usize, iax: usize, ign: usize| (iv * nax + iax) * ngn + ign;
+    for iv in 0..nv {
+        for ign in 0..ngn {
+            let peak = (0..nax).fold(0.0_f64, |m, iax| m.max(base[node(iv, iax, ign)]));
+            let thresh = (CORR_MIN_FRAC * peak).max(AY_FLOOR);
+            for iax in (0..nax).filter(|&i| !sens_sampled(i, nax)) {
+                if base[node(iv, iax, ign)] < thresh {
+                    continue;
+                }
+                // Bracketing sampled neighbours (indices 0 and nax−1 are always sampled).
+                let lo = (0..iax).rev().find(|&i| sens_sampled(i, nax)).unwrap_or(0);
+                let hi = ((iax + 1)..nax)
+                    .find(|&i| sens_sampled(i, nax))
+                    .unwrap_or(nax - 1);
+                let w = (axn_axis[iax] - axn_axis[lo]) / (axn_axis[hi] - axn_axis[lo]);
+                for f in &mut fields {
+                    let (a, b) = (f[node(iv, lo, ign)], f[node(iv, hi, ign)]);
+                    f[node(iv, iax, ign)] = a + w * (b - a);
+                }
+            }
+        }
+    }
 }
 
 /// Estimate the top speed for the `v` axis: the speed at which the powertrain drive force can no
