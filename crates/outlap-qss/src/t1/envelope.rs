@@ -250,69 +250,103 @@ impl GgvEnvelope {
             .min_by(|&a, &b| axn_axis[a].abs().total_cmp(&axn_axis[b].abs()))
             .unwrap_or(0);
 
-        for (iv, &v) in v_axis.iter().enumerate() {
-            for (ign, &gn) in gn_axis.iter().enumerate() {
-                // Per-point longitudinal capability (the â_x = ±1 shoulders).
-                let a_cap = max_straight_ax(car, v, gn, coupling, 1.0).max(CAP_FLOOR);
-                let b_cap = (-max_straight_ax(car, v, gn, coupling, -1.0)).max(CAP_FLOOR);
-                accel[iv * ngn + ign] = a_cap;
-                brake[iv * ngn + ign] = b_cap;
-                let ax_of = |axn: f64| axn * if axn >= 0.0 { a_cap } else { b_cap };
+        // The sweep decomposes into nv × ngn fully independent (v, g_normal) FIBRES (each fibre
+        // owns its â_x march and its sensitivity probes; no fibre reads another's state). Each
+        // fibre solves into an owned `FibreOut`, and the outputs are merged into the tensors in
+        // fixed (iv, ign) order — so the result is bit-identical whether the fibre map runs
+        // serially or, with the `parallel` feature (native edge only; the wasm build stays
+        // thread-free), on a rayon pool.
+        let solve_fibre = |&(iv, ign): &(usize, usize)| -> FibreOut {
+            let v = v_axis[iv];
+            let gn = gn_axis[ign];
+            // Per-point longitudinal capability (the â_x = ±1 shoulders).
+            let a_cap = max_straight_ax(car, v, gn, coupling, 1.0).max(CAP_FLOOR);
+            let b_cap = (-max_straight_ax(car, v, gn, coupling, -1.0)).max(CAP_FLOOR);
+            let ax_of = |axn: f64| axn * if axn >= 0.0 { a_cap } else { b_cap };
 
-                // Pass 1: the base boundary over the â_x fibre, marching outward from â_x = 0.
-                let mut fibre: Vec<Boundary> = vec![Boundary::zero(); nax];
-                fibre[i0] = max_lateral(car, v, ax_of(axn_axis[i0]), gn, coupling, None);
-                for iax in (i0 + 1)..nax {
-                    fibre[iax] = max_lateral(
-                        car,
-                        v,
-                        ax_of(axn_axis[iax]),
-                        gn,
-                        coupling,
-                        fibre[iax - 1].hint(),
-                    );
-                }
-                for iax in (0..i0).rev() {
-                    fibre[iax] = max_lateral(
-                        car,
-                        v,
-                        ax_of(axn_axis[iax]),
-                        gn,
-                        coupling,
-                        fibre[iax + 1].hint(),
-                    );
-                }
-                for (iax, b) in fibre.iter().enumerate() {
-                    base[(iv * nax + iax) * ngn + ign] = b.ay_corr;
-                }
+            // Pass 1: the base boundary over the â_x fibre, marching outward from â_x = 0.
+            let mut fibre: Vec<Boundary> = vec![Boundary::zero(); nax];
+            fibre[i0] = max_lateral(car, v, ax_of(axn_axis[i0]), gn, coupling, None);
+            for iax in (i0 + 1)..nax {
+                fibre[iax] = max_lateral(
+                    car,
+                    v,
+                    ax_of(axn_axis[iax]),
+                    gn,
+                    coupling,
+                    fibre[iax - 1].hint(),
+                );
+            }
+            for iax in (0..i0).rev() {
+                fibre[iax] = max_lateral(
+                    car,
+                    v,
+                    ax_of(axn_axis[iax]),
+                    gn,
+                    coupling,
+                    fibre[iax + 1].hint(),
+                );
+            }
 
-                // Pass 2: central-difference sensitivities in the fibre's near-peak bulk — on
-                // every 2nd â_x node only (the skipped nodes are filled by linear interpolation
-                // below). `v` and `g_normal` keep full resolution: the fields vary strongly with
-                // speed through the downforce transition (a v-subsampled variant failed the
-                // Decision #31 gate at 6%), but are near-flat along â_x in the near-peak bulk
-                // where corrections apply. Each sampled node costs SIX extra boundary searches,
-                // so this halves the dominant sensitivity cost; the #31 CI gate guards accuracy.
-                let peak = fibre.iter().fold(0.0_f64, |m, b| m.max(b.ay_corr));
-                let thresh = (CORR_MIN_FRAC * peak).max(AY_FLOOR);
-                for (iax, &axn) in axn_axis.iter().enumerate() {
-                    let h = fibre[iax].hint();
-                    if !sens_sampled(iax, nax) || fibre[iax].ay_corr < thresh || h.is_none() {
-                        continue;
-                    }
-                    let ax = ax_of(axn);
-                    let d_mu = max_lateral(&car_mu_p, v, ax, gn, coupling, h).ay_corr
-                        - max_lateral(&car_mu_m, v, ax, gn, coupling, h).ay_corr;
-                    let d_m = max_lateral(&car_m_p, v, ax, gn, coupling, h).ay_corr
-                        - max_lateral(&car_m_m, v, ax, gn, coupling, h).ay_corr;
-                    let d_cla = max_lateral(&car_cla_p, v, ax, gn, coupling, h).ay_corr
-                        - max_lateral(&car_cla_m, v, ax, gn, coupling, h).ay_corr;
-                    let ay0 = fibre[iax].ay_corr;
-                    let node = (iv * nax + iax) * ngn + ign;
-                    s_mu[node] = clamp_s(d_mu / (2.0 * H_MU * ay0));
-                    s_mass[node] = clamp_s(d_m / (2.0 * H_MASS * ay0));
-                    s_cla[node] = clamp_s(d_cla / (2.0 * H_CLA * ay0));
+            // Pass 2: central-difference sensitivities in the fibre's near-peak bulk — on
+            // every 2nd â_x node only (the skipped nodes are filled by linear interpolation
+            // below). `v` and `g_normal` keep full resolution: the fields vary strongly with
+            // speed through the downforce transition (a v-subsampled variant failed the
+            // Decision #31 gate at 6%), but are near-flat along â_x in the near-peak bulk
+            // where corrections apply. Each sampled node costs SIX extra boundary searches,
+            // so this halves the dominant sensitivity cost; the #31 CI gate guards accuracy.
+            let peak = fibre.iter().fold(0.0_f64, |m, b| m.max(b.ay_corr));
+            let thresh = (CORR_MIN_FRAC * peak).max(AY_FLOOR);
+            let mut sens = vec![[0.0; 3]; nax];
+            for (iax, &axn) in axn_axis.iter().enumerate() {
+                let h = fibre[iax].hint();
+                if !sens_sampled(iax, nax) || fibre[iax].ay_corr < thresh || h.is_none() {
+                    continue;
                 }
+                let ax = ax_of(axn);
+                let d_mu = max_lateral(&car_mu_p, v, ax, gn, coupling, h).ay_corr
+                    - max_lateral(&car_mu_m, v, ax, gn, coupling, h).ay_corr;
+                let d_m = max_lateral(&car_m_p, v, ax, gn, coupling, h).ay_corr
+                    - max_lateral(&car_m_m, v, ax, gn, coupling, h).ay_corr;
+                let d_cla = max_lateral(&car_cla_p, v, ax, gn, coupling, h).ay_corr
+                    - max_lateral(&car_cla_m, v, ax, gn, coupling, h).ay_corr;
+                let ay0 = fibre[iax].ay_corr;
+                sens[iax] = [
+                    clamp_s(d_mu / (2.0 * H_MU * ay0)),
+                    clamp_s(d_m / (2.0 * H_MASS * ay0)),
+                    clamp_s(d_cla / (2.0 * H_CLA * ay0)),
+                ];
+            }
+
+            FibreOut {
+                a_cap,
+                b_cap,
+                ay: fibre.iter().map(|b| b.ay_corr).collect(),
+                sens,
+            }
+        };
+
+        // Fixed (iv, ign) work list; the ordered collect keeps the merge deterministic.
+        let jobs: Vec<(usize, usize)> = (0..nv)
+            .flat_map(|iv| (0..ngn).map(move |ign| (iv, ign)))
+            .collect();
+        #[cfg(feature = "parallel")]
+        let outs: Vec<FibreOut> = {
+            use rayon::prelude::*;
+            jobs.par_iter().map(solve_fibre).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let outs: Vec<FibreOut> = jobs.iter().map(solve_fibre).collect();
+
+        for (&(iv, ign), out) in jobs.iter().zip(&outs) {
+            accel[iv * ngn + ign] = out.a_cap;
+            brake[iv * ngn + ign] = out.b_cap;
+            for iax in 0..nax {
+                let node = (iv * nax + iax) * ngn + ign;
+                base[node] = out.ay[iax];
+                s_mu[node] = out.sens[iax][0];
+                s_mass[node] = out.sens[iax][1];
+                s_cla[node] = out.sens[iax][2];
             }
         }
         fill_sensitivities(
@@ -462,6 +496,20 @@ impl GgvEnvelope {
     pub fn notes(&self) -> &[String] {
         &self.notes
     }
+}
+
+/// One (v, g_normal) fibre's solved outputs: the ±â_x shoulders, the base boundary over the â_x
+/// nodes, and the (subsampled) `[μ, mass, ClA]` sensitivities. Owned per fibre so the sweep can run
+/// the fibre map serially or in parallel and merge in fixed order (bit-identical either way).
+struct FibreOut {
+    /// Straight-line acceleration capability `a_x,cap⁺`, m/s².
+    a_cap: f64,
+    /// Straight-line braking capability magnitude `a_x,cap⁻`, m/s².
+    b_cap: f64,
+    /// Velocity-frame lateral boundary per â_x node, m/s².
+    ay: Vec<f64>,
+    /// `[s_mu, s_mass, s_cla]` per â_x node (0 where suppressed/unsampled).
+    sens: Vec<[f64; 3]>,
 }
 
 /// A solved lateral-acceleration boundary at one `(v, a_x, g_normal)` node.
