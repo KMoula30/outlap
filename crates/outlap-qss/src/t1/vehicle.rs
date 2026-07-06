@@ -296,8 +296,24 @@ impl T1Vehicle {
     ///
     /// `yaw_deg` is the aerodynamic yaw (vehicle sideslip β) in degrees; `drs` the DRS flag.
     pub(crate) fn aero_lumped(&self, v: f64, ax: f64, yaw_deg: f64, drs: f64) -> AeroLumped {
+        self.aero_lumped_warm(v, ax, yaw_deg, drs, None)
+    }
+
+    /// As [`Self::aero_lumped`] but seeding the platform fixed point from `warm` ride heights (the
+    /// trim solver threads the previous residual evaluation's heights through — physically
+    /// identical result, ~10× fewer map evaluations; see `AeroPlatform::equilibrium_warm`).
+    pub(crate) fn aero_lumped_warm(
+        &self,
+        v: f64,
+        ax: f64,
+        yaw_deg: f64,
+        drs: f64,
+        warm: Option<(f64, f64)>,
+    ) -> AeroLumped {
         let mut aero = match &self.aero_map {
-            Some(map) => self.platform().equilibrium(map, v, ax, yaw_deg, drs),
+            Some(map) => self
+                .platform()
+                .equilibrium_warm(map, v, ax, yaw_deg, drs, warm),
             None => AeroLumped {
                 qx: self.qx,
                 qz_f: self.qz_f,

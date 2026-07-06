@@ -206,6 +206,25 @@ impl AeroPlatform {
         yaw_deg: f64,
         drs: f64,
     ) -> AeroLumped {
+        self.equilibrium_warm(map, v, ax, yaw_deg, drs, None)
+    }
+
+    /// As [`Self::equilibrium`] but seeding the fixed point from `warm` ride heights (m). Because
+    /// the fixed point converges to `AERO_TOL_M` (0.1 nm) regardless of its start, the result is
+    /// physically identical to the cold solve — only the iteration count changes. The trim solver
+    /// threads the previous residual evaluation's heights through, cutting the ~20-iteration cold
+    /// contraction to ~1–2 warm iterations (the map eval inside every residual is otherwise the
+    /// dominant cost of a map-equipped trim, and with it the whole g-g-g-v generation).
+    #[must_use]
+    pub fn equilibrium_warm(
+        &self,
+        map: &AeroMap,
+        v: f64,
+        ax: f64,
+        yaw_deg: f64,
+        drs: f64,
+        warm: Option<(f64, f64)>,
+    ) -> AeroLumped {
         let qdyn = 0.5 * self.rho * v * v; // dynamic pressure factor: F = qdyn · (C·A)
                                            // Longitudinal load transfer moved onto the springs (signed per axle; + compresses).
         let t = self.mass_kg * ax * self.h_cg / self.wheelbase_m; // + under acceleration
@@ -217,8 +236,7 @@ impl AeroPlatform {
             ((1.0 - self.anti_dive) * (-t), t)
         };
 
-        let mut h_f = self.h_ref_f_m;
-        let mut h_r = self.h_ref_r_m;
+        let (mut h_f, mut h_r) = warm.unwrap_or((self.h_ref_f_m, self.h_ref_r_m));
         let mut coeffs = map.eval(h_f * 1000.0, h_r * 1000.0, yaw_deg, drs);
         let mut converged = false;
         for _ in 0..MAX_AERO_ITERS {
