@@ -76,3 +76,59 @@ fn solve_is_under_50ms() {
         median * 1e3
     );
 }
+
+/// The §11.5 QSS-lap perf target for the PRODUCTION path (T0-on-envelope, Decision #31): the
+/// velocity-profile solve on a pre-generated envelope stays under 50 ms. Envelope generation is
+/// the documented cold assembly step and is excluded (user decision, M3 PR8+9). Release only —
+/// the target is a production number, not a debug-build property. (The instruction-count
+/// iai-callgrind trend gate is deferred until a valgrind-equipped runner exists; the dhat
+/// zero-alloc gate covers the same kernels in `tests/alloc.rs`.)
+#[cfg(not(debug_assertions))]
+#[test]
+fn ggv_solve_is_under_50ms() {
+    use outlap_qss::solver::solve_into_ggv;
+    use outlap_qss::{GgvEnvelope, T1Vehicle};
+    use outlap_schema::sim::{Envelope as EnvelopeRes, FzCoupling};
+
+    let veh_dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/vehicles/limebeer_2014_f1"
+    );
+    let vl = FsLoader::new(veh_dir);
+    let rv = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).expect("loads");
+    let conditions =
+        outlap_schema::load_conditions("conditions.yaml", &vl).expect("conditions load");
+    let t1 = T1Vehicle::assemble(&rv, &conditions, &vl, false).expect("t1 assembles");
+    // Test-speed grid: the SOLVE cost is grid-independent (interpolated queries), so a coarse
+    // envelope times the same hot path the production 40x25x7 grid does.
+    let res = EnvelopeRes {
+        v_points: 10,
+        ax_points: 7,
+        g_normal_points: 2,
+    };
+    let env = GgvEnvelope::generate(&t1, &res, FzCoupling::OneStepLag).expect("envelope");
+    let veh = {
+        let opts = outlap_qss::T0Options::default();
+        T0Vehicle::assemble(&rv, &conditions, &vl, &opts).expect("t0 assembles")
+    };
+    let track_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/tracks/catalunya");
+    let track = Track::load("track.yaml", &FsLoader::new(track_dir)).expect("track loads");
+    let path = T0Path::from_track_flat(&track, DEFAULT_DS_M);
+    let mut ws = T0Workspace::for_path(&path);
+    solve_into_ggv(&veh, &env, &path, &mut ws).unwrap(); // warm
+
+    let mut times = Vec::new();
+    for _ in 0..11 {
+        let t = Instant::now();
+        solve_into_ggv(&veh, &env, &path, &mut ws).unwrap();
+        times.push(t.elapsed().as_secs_f64());
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = times[times.len() / 2];
+    eprintln!("Catalunya solve_into_ggv median: {:.3} ms", median * 1e3);
+    assert!(
+        median < 0.050,
+        "ggv solve took {:.1} ms (> 50 ms)",
+        median * 1e3
+    );
+}
