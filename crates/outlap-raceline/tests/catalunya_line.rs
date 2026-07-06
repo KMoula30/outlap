@@ -26,7 +26,10 @@ fn lap_time(veh: &T0Vehicle, track: &Track) -> f64 {
 #[test]
 fn min_curvature_line_lowers_the_catalunya_lap() {
     let veh_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/vehicles/f1_2026");
-    let track_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/tracks/catalunya");
+    let track_dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/tracks/catalunya_osm"
+    );
     let vl = FsLoader::new(veh_dir);
     let rv = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).unwrap();
     let veh = T0Vehicle::assemble(&rv, &Conditions::default(), &vl, &T0Options::default()).unwrap();

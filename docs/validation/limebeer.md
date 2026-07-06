@@ -21,9 +21,9 @@ choice, so its published lap times are **not** comparable oracles. No code was t
 
 ## Configuration
 
-`limebeer_2014_f1` (see its README for per-parameter provenance) on the Catalunya import's
-min-curvature line, `sim.flat_track: true` (PL2014 is a 2-D study), production 40×25×7 envelope,
-ρ pinned to the paper's 1.2 kg/m³. Reproduce with:
+`limebeer_2014_f1` (see its README for per-parameter provenance) on the OSM+DEM Catalunya import's
+(`catalunya_osm`) min-curvature line, `sim.flat_track: true` (PL2014 is a 2-D study), production
+40×25×7 envelope, ρ pinned to the paper's 1.2 kg/m³. Reproduce with:
 
 ```sh
 cargo run --release -p outlap-qss --features parallel --example limebeer_lap
@@ -42,10 +42,20 @@ python python/tools/plot_limebeer.py
 | Lap time | 92.36 s (committed track) / 87.08 s (paper's geometry) | 82.43 s | recorded, **not gated** (decomposition below) |
 
 The CI test (`python/tests/test_limebeer.py`) gates what the committed track geometry supports:
-top speed and the slowest-corner apex. The fast-corner band was validated against the paper's own
-centre-line curvature (extracted from the Fig. 6 vector data during the 2026-07-06 analysis
-session; +5.64% lap time); it becomes a CI gate when an era-consistent measured-width track lands
-(the TUMFTM racetrack-database import, PR10).
+top speed and the slowest-corner apex, on the `catalunya_osm` import. The fast-corner band was
+validated against the paper's own centre-line curvature (extracted from the Fig. 6 vector data
+during the 2026-07-06 analysis session; +5.64% lap time), and **stays deferred to M4**.
+
+**Why the TUMFTM Catalunya did not turn the fast gate on (PR10).** PR10 vendored the TUMFTM
+`racetrack-database` (an era-consistent, measured-width Catalunya was expected to unlock the
+fast-corner gate). It does not: its centre line is a class-C **smoothed** layout that rounds the
+slow chicane open and tightens the fast corners, so under QSS-on-min-curvature it reproduces
+*neither* apex band — slowest apex **19.65 m/s (+15.6%)** (vs 17.7/+4.1% on `catalunya_osm`) and
+fast apexes **57.0 / 58.4 m/s (−5.0% / −5.8%)**, with top speed still −0.15%. A corridor-width sweep
+barely moves the slow apex (19.65 → 19.18 at an absurd 8 m car), confirming this is the
+line-optimality residual (decomposition #2 below), **not** a width or import artefact. The
+fast-corner gate therefore lands in M4 with the time-weighted raceline QP (Decision #48), which is
+the machinery that closes this gap; the M3 cross-check remains on `catalunya_osm`.
 
 ## Lap-time decomposition — why the delta is structural, not a model error
 

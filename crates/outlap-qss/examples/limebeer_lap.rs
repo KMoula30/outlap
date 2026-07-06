@@ -46,7 +46,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vl = FsLoader::new(data("vehicles/limebeer_2014_f1"));
     let resolved = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default())?;
     let conditions = load_conditions("conditions.yaml", &vl)?; // pins rho = 1.2 kg/m^3 (Table 4)
-    let track = Track::load("track.yaml", &FsLoader::new(data("tracks/catalunya")))?;
+
+    // The OSM+DEM 3D Catalunya (era-appropriate slow chicane). The flat TUMFTM `catalunya` is a
+    // class-C smoothed layout that does not reproduce the PL2014 apex bands (see docs/validation).
+    let track = Track::load("track.yaml", &FsLoader::new(data("tracks/catalunya_osm")))?;
 
     // The min-curvature line on the corridor, then the FLAT path (Decision #48 / sim.flat_track:
     // PL2014 is a 2-D study, so grade/banking/vertical curvature are zeroed).

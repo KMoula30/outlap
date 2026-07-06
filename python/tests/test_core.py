@@ -29,7 +29,9 @@ _DATA = _ROOT / "data"
 PACEJKA = str(_DATA / "tires/pacejka_2006_205_60r15/car.tyr.yaml")
 F1_DIR = str(_DATA / "vehicles/f1_2026")
 F1_SLICK = str(_DATA / "vehicles/f1_2026/tyr/slick.tyr.yaml")
-CATALUNYA = str(_DATA / "tracks/catalunya")
+# The OSM+DEM 3D import: these core tests exercise elevation and flat-track flattening, which the
+# flat TUMFTM `catalunya` (z=0) cannot. `catalunya_osm` is the same geometry these were written on.
+CATALUNYA = str(_DATA / "tracks/catalunya_osm")
 
 # CI-speed envelope for the plumbing tests below: what they assert (dataset shape, attrs,
 # overrides plumbing, determinism) is fidelity-independent, and every distinct override /

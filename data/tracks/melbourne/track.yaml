@@ -1,0 +1,10 @@
+# Imported by outlap.importers.tumftm_track — TUMFTM racetrack-database (LGPL-3.0 data).
+schema: track/1.0
+name: Albert Park Circuit
+closed: true
+centerline: centerline.csv
+meta:
+  source: tumftm
+  accuracy_class: C
+  attribution: "Centerline © TU München, Institute of Automotive Technology (TUMFTM racetrack-database), LGPL-3.0"
+  notes: "flat 2-D: elevation and banking are zero (the TUMFTM data is strictly 2-D); corridor widths are measured from satellite imagery; converted from upstream commit e59595d. See data/tracks/LICENSE-tumftm-LGPL-3.0.txt."

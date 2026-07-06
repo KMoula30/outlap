@@ -37,15 +37,19 @@ fn loads_fixture_through_loader() {
     assert!(samples.width_left.iter().all(|&w| (w - 6.0).abs() < 1e-6));
 }
 
-/// Cross-check the real OSM+DEM Catalunya import (if it has been generated locally) through the
-/// authoritative Rust geometry. `#[ignore]`d so CI never depends on real-world data (Decision #23 /
-/// §13): run with `cargo test -p outlap-track -- --ignored`.
+/// Cross-check the committed OSM+DEM 3D Catalunya (`catalunya_osm`) through the authoritative Rust
+/// geometry. `#[ignore]`d so CI stays on synthetic fixtures and never depends on the noisy
+/// real-world import (Decision #23 / §13): run with `cargo test -p outlap-track -- --ignored`.
+/// (The flat TUMFTM `catalunya` is covered, un-ignored, by `tumftm_tracks.rs`.)
 #[test]
-#[ignore = "requires a local `outlap import` of Catalunya under data/tracks/"]
+#[ignore = "cross-checks the committed OSM 3D catalunya_osm; kept off the synthetic-only CI path"]
 fn loads_real_catalunya_if_present() {
     use outlap_schema::io::FsLoader;
 
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/tracks/catalunya");
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/tracks/catalunya_osm"
+    );
     if !std::path::Path::new(dir).join("track.yaml").exists() {
         eprintln!("skipping: {dir}/track.yaml not present");
         return;

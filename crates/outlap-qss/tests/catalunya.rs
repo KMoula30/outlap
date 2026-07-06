@@ -14,7 +14,10 @@ use outlap_track::Track;
 
 fn f1_on_catalunya() -> (T0Vehicle, Track) {
     let veh_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/vehicles/f1_2026");
-    let track_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/tracks/catalunya");
+    let track_dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/tracks/catalunya_osm"
+    );
     let vl = FsLoader::new(veh_dir);
     let rv = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).expect("f1_2026 loads");
     let veh = T0Vehicle::assemble(&rv, &Conditions::default(), &vl, &T0Options::default())
@@ -111,7 +114,10 @@ fn ggv_solve_is_under_50ms() {
         let opts = outlap_qss::T0Options::default();
         T0Vehicle::assemble(&rv, &conditions, &vl, &opts).expect("t0 assembles")
     };
-    let track_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/tracks/catalunya");
+    let track_dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/tracks/catalunya_osm"
+    );
     let track = Track::load("track.yaml", &FsLoader::new(track_dir)).expect("track loads");
     let path = T0Path::from_track_flat(&track, DEFAULT_DS_M);
     let mut ws = T0Workspace::for_path(&path);
