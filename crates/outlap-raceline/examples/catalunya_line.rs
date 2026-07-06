@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let vl = FsLoader::new(data("vehicles/f1_2026"));
     let rv = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default())?;
     let veh = T0Vehicle::assemble(&rv, &Conditions::default(), &vl, &T0Options::default())?;
-    let track = Track::load("track.yaml", &FsLoader::new(data("tracks/catalunya")))?;
+    let track = Track::load("track.yaml", &FsLoader::new(data("tracks/catalunya_osm")))?;
 
     let half_width = rv.spec.chassis.track_m[0] / 2.0 + 0.3;
     let opts = RacelineOptions::default();

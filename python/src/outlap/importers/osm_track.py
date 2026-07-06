@@ -18,7 +18,7 @@ This is network-facing tooling and is **never run in CI**. It reads only public 
 touches proprietary sources (firewall, §1).
 
 Example:
-    python -m outlap.importers.osm_track --preset catalunya --out data/tracks/catalunya
+    python -m outlap.importers.osm_track --preset catalunya --out data/tracks/catalunya_osm
 """
 
 from __future__ import annotations

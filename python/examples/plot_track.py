@@ -6,7 +6,7 @@ independently (numpy gradients on the raw centerline) purely as an import sanity
 authoritative κ(s) is the outlap-track Rust spline.
 
 Example:
-    python examples/plot_track.py data/tracks/catalunya --out examples/output
+    python examples/plot_track.py data/tracks/catalunya_osm --out examples/output
 """
 
 from __future__ import annotations

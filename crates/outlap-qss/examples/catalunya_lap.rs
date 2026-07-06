@@ -45,7 +45,7 @@ fn parse_args() -> (PathBuf, Option<PathBuf>) {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let (veh_dir, out_arg) = parse_args();
-    let track_dir = data("tracks/catalunya");
+    let track_dir = data("tracks/catalunya_osm");
 
     let vl = FsLoader::new(&veh_dir);
     let resolved = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default())?;

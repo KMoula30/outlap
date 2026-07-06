@@ -2,10 +2,13 @@
 """The Decision #48 Limebeer gates + the golden-lap regression suite (HANDOFF §13/§14).
 
 The PL2014 cross-check runs at the PRODUCTION envelope resolution (this is a physics gate, not a
-plumbing test) on the committed Catalunya import, flat-track mode. It gates what this geometry
-supports — top speed and the slowest-corner apex; the fast-corner band was validated against the
-paper's own extracted centre-line curvature and becomes a CI gate with the TUMFTM track (PR10).
-See docs/validation/limebeer.md for the oracle provenance and the lap-time decomposition.
+plumbing test) on the committed OSM+DEM Catalunya import (``catalunya_osm``), flat-track mode. It
+gates what this geometry supports — top speed and the slowest-corner apex. The fast-corner band
+stays deferred to M4: the TUMFTM racetrack-database Catalunya vendored in PR10 is a class-C
+*smoothed* centre line that rounds the slow chicane open (QSS slow apex +15.6%) and tightens the
+fast corners, so it does not reproduce the PL2014 apex bands under QSS-on-min-curvature; the
+residual is the line-optimality gap the M4 time-weighted raceline QP addresses (Decision #48). See
+docs/validation/limebeer.md for the oracle provenance and the lap-time decomposition.
 
 Golden laps: committed parquet channel sets per vehicle × track × tier, compared within
 per-channel tolerances. Regenerate ONLY via `OUTLAP_BLESS=1 uv run pytest tests/test_limebeer.py`
@@ -30,7 +33,9 @@ GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
 LIMEBEER = str(_DATA / "vehicles/limebeer_2014_f1")
 F1_2026 = str(_DATA / "vehicles/f1_2026")
-CATALUNYA = str(_DATA / "tracks/catalunya")
+# The OSM+DEM 3D import (era-appropriate slow chicane); the flat TUMFTM `catalunya` is a class-C
+# smoothed layout that does not reproduce the PL2014 apex bands — see the module docstring.
+CATALUNYA = str(_DATA / "tracks/catalunya_osm")
 
 # PL2014 published values (docs/validation/limebeer.md; digitised Fig. 8 where noted).
 ORACLE_LAP_S = 82.43
