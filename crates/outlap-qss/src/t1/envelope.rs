@@ -153,12 +153,18 @@ const CAP_FLOOR: f64 = 0.5;
 pub struct GgvEnvelope {
     /// Base boundary `a_y,corr(v, â_x, g_normal)`, m/s², on the normalised `â_x ∈ [−1, 1]` axis.
     base: GriddedMapN<f64>,
-    /// Per-node relative sensitivity `∂ln a_y,corr/∂ln μ_tire` at the reference.
-    s_mu: GriddedMapN<f64>,
-    /// Per-node relative sensitivity `∂ln a_y,corr/∂ln m` at the reference.
-    s_mass: GriddedMapN<f64>,
-    /// Per-node relative sensitivity `∂ln a_y,corr/∂ln ClA` at the reference.
-    s_cla: GriddedMapN<f64>,
+    /// Per-node upward relative secant `(b(μ₀(1+h)) − b)/(h·b)` of the boundary in μ_tire.
+    s_mu_up: GriddedMapN<f64>,
+    /// Per-node downward relative secant `(b − b(μ₀(1−h)))/(h·b)` of the boundary in μ_tire.
+    s_mu_dn: GriddedMapN<f64>,
+    /// Per-node upward relative secant of the boundary in mass.
+    s_mass_up: GriddedMapN<f64>,
+    /// Per-node downward relative secant of the boundary in mass.
+    s_mass_dn: GriddedMapN<f64>,
+    /// Per-node upward relative secant of the boundary in ClA.
+    s_cla_up: GriddedMapN<f64>,
+    /// Per-node downward relative secant of the boundary in ClA.
+    s_cla_dn: GriddedMapN<f64>,
     /// Straight-line acceleration capability `a_x,cap⁺(v, g_normal)`, m/s² (the `â_x = +1` shoulder).
     accel_cap: GriddedMapN<f64>,
     /// Straight-line braking capability magnitude `a_x,cap⁻(v, g_normal)`, m/s² (the `â_x = −1`
@@ -232,9 +238,12 @@ impl GgvEnvelope {
         let n_nodes = nv * nax * ngn;
         let n_vg = nv * ngn;
         let mut base = vec![0.0; n_nodes];
-        let mut s_mu = vec![0.0; n_nodes];
-        let mut s_mass = vec![0.0; n_nodes];
-        let mut s_cla = vec![0.0; n_nodes];
+        let mut s_mu_up = vec![0.0; n_nodes];
+        let mut s_mu_dn = vec![0.0; n_nodes];
+        let mut s_mass_up = vec![0.0; n_nodes];
+        let mut s_mass_dn = vec![0.0; n_nodes];
+        let mut s_cla_up = vec![0.0; n_nodes];
+        let mut s_cla_dn = vec![0.0; n_nodes];
         let mut accel = vec![CAP_FLOOR; n_vg];
         let mut brake = vec![CAP_FLOOR; n_vg];
         // Perturbed vehicles for the central-difference sensitivities (cold clones).
@@ -297,24 +306,31 @@ impl GgvEnvelope {
             // so this halves the dominant sensitivity cost; the #31 CI gate guards accuracy.
             let peak = fibre.iter().fold(0.0_f64, |m, b| m.max(b.ay_corr));
             let thresh = (CORR_MIN_FRAC * peak).max(AY_FLOOR);
-            let mut sens = vec![[0.0; 3]; nax];
+            let mut sens = vec![[0.0; 6]; nax];
             for (iax, &axn) in axn_axis.iter().enumerate() {
                 let h = fibre[iax].hint();
                 if !sens_sampled(iax, nax) || fibre[iax].ay_corr < thresh || h.is_none() {
                     continue;
                 }
                 let ax = ax_of(axn);
-                let d_mu = max_lateral(&car_mu_p, v, ax, gn, coupling, h).ay_corr
-                    - max_lateral(&car_mu_m, v, ax, gn, coupling, h).ay_corr;
-                let d_m = max_lateral(&car_m_p, v, ax, gn, coupling, h).ay_corr
-                    - max_lateral(&car_m_m, v, ax, gn, coupling, h).ay_corr;
-                let d_cla = max_lateral(&car_cla_p, v, ax, gn, coupling, h).ay_corr
-                    - max_lateral(&car_cla_m, v, ax, gn, coupling, h).ay_corr;
                 let ay0 = fibre[iax].ay_corr;
+                // One-sided secants: exact at each band edge by construction. A symmetric secant
+                // assumes a linear response; with a friction-circle-coupled tyre the boundary's μ
+                // response is measurably convex (the fixed drag-balancing drive force weighs less
+                // as grip grows), which the up/down split captures at no extra probe cost.
+                let b_mu_p = max_lateral(&car_mu_p, v, ax, gn, coupling, h).ay_corr;
+                let b_mu_m = max_lateral(&car_mu_m, v, ax, gn, coupling, h).ay_corr;
+                let b_m_p = max_lateral(&car_m_p, v, ax, gn, coupling, h).ay_corr;
+                let b_m_m = max_lateral(&car_m_m, v, ax, gn, coupling, h).ay_corr;
+                let b_cla_p = max_lateral(&car_cla_p, v, ax, gn, coupling, h).ay_corr;
+                let b_cla_m = max_lateral(&car_cla_m, v, ax, gn, coupling, h).ay_corr;
                 sens[iax] = [
-                    clamp_s(d_mu / (2.0 * H_MU * ay0)),
-                    clamp_s(d_m / (2.0 * H_MASS * ay0)),
-                    clamp_s(d_cla / (2.0 * H_CLA * ay0)),
+                    clamp_s((b_mu_p - ay0) / (H_MU * ay0)),
+                    clamp_s((ay0 - b_mu_m) / (H_MU * ay0)),
+                    clamp_s((b_m_p - ay0) / (H_MASS * ay0)),
+                    clamp_s((ay0 - b_m_m) / (H_MASS * ay0)),
+                    clamp_s((b_cla_p - ay0) / (H_CLA * ay0)),
+                    clamp_s((ay0 - b_cla_m) / (H_CLA * ay0)),
                 ];
             }
 
@@ -344,13 +360,23 @@ impl GgvEnvelope {
             for iax in 0..nax {
                 let node = (iv * nax + iax) * ngn + ign;
                 base[node] = out.ay[iax];
-                s_mu[node] = out.sens[iax][0];
-                s_mass[node] = out.sens[iax][1];
-                s_cla[node] = out.sens[iax][2];
+                s_mu_up[node] = out.sens[iax][0];
+                s_mu_dn[node] = out.sens[iax][1];
+                s_mass_up[node] = out.sens[iax][2];
+                s_mass_dn[node] = out.sens[iax][3];
+                s_cla_up[node] = out.sens[iax][4];
+                s_cla_dn[node] = out.sens[iax][5];
             }
         }
         fill_sensitivities(
-            [&mut s_mu, &mut s_mass, &mut s_cla],
+            [
+                &mut s_mu_up,
+                &mut s_mu_dn,
+                &mut s_mass_up,
+                &mut s_mass_dn,
+                &mut s_cla_up,
+                &mut s_cla_dn,
+            ],
             &base,
             &axn_axis,
             [nv, nax, ngn],
@@ -378,9 +404,12 @@ impl GgvEnvelope {
         };
         Ok(Self {
             base: build3(base)?,
-            s_mu: build3(s_mu)?,
-            s_mass: build3(s_mass)?,
-            s_cla: build3(s_cla)?,
+            s_mu_up: build3(s_mu_up)?,
+            s_mu_dn: build3(s_mu_dn)?,
+            s_mass_up: build3(s_mass_up)?,
+            s_mass_dn: build3(s_mass_dn)?,
+            s_cla_up: build3(s_cla_up)?,
+            s_cla_dn: build3(s_cla_dn)?,
             accel_cap: build2(accel)?,
             brake_cap: build2(brake)?,
             drag_accel,
@@ -437,10 +466,23 @@ impl GgvEnvelope {
     ) -> f64 {
         let x = [v, self.normalize_ax(v, ax, g_normal), g_normal];
         let base = self.base.eval(&x);
-        let f = |s: f64, delta: f64| (1.0 + s * delta).clamp(F_MIN, F_MAX);
-        let f_mu = f(self.s_mu.eval(&x), mu_scale - 1.0);
-        let f_mass = f(self.s_mass.eval(&x), mass_kg / self.mass_ref - 1.0);
-        let f_cla = f(self.s_cla.eval(&x), cla_scale - 1.0);
+        // Piecewise-linear per parameter: the upward secant for a value above the reference, the
+        // downward one below — exact at each probe band edge by construction (Decision #31).
+        let f = |up: &GriddedMapN<f64>, dn: &GriddedMapN<f64>, delta: f64| {
+            let s = if delta >= 0.0 {
+                up.eval(&x)
+            } else {
+                dn.eval(&x)
+            };
+            (1.0 + s * delta).clamp(F_MIN, F_MAX)
+        };
+        let f_mu = f(&self.s_mu_up, &self.s_mu_dn, mu_scale - 1.0);
+        let f_mass = f(
+            &self.s_mass_up,
+            &self.s_mass_dn,
+            mass_kg / self.mass_ref - 1.0,
+        );
+        let f_cla = f(&self.s_cla_up, &self.s_cla_dn, cla_scale - 1.0);
         (base * f_mu * f_mass * f_cla).max(0.0)
     }
 
@@ -508,8 +550,9 @@ struct FibreOut {
     b_cap: f64,
     /// Velocity-frame lateral boundary per â_x node, m/s².
     ay: Vec<f64>,
-    /// `[s_mu, s_mass, s_cla]` per â_x node (0 where suppressed/unsampled).
-    sens: Vec<[f64; 3]>,
+    /// `[s_mu_up, s_mu_dn, s_mass_up, s_mass_dn, s_cla_up, s_cla_dn]` per â_x node (0 where
+    /// suppressed/unsampled).
+    sens: Vec<[f64; 6]>,
 }
 
 /// A solved lateral-acceleration boundary at one `(v, a_x, g_normal)` node.
@@ -575,8 +618,8 @@ fn max_lateral(
         if hay >= AY_FLOOR {
             let lo = (hay * (1.0 - NARROW_W)).max(0.0);
             let hi = hay * (1.0 + NARROW_W);
-            if let Some(lo_state) = car.trim_warm(&inp(lo), Some(hs)).state().copied() {
-                if car.trim_warm(&inp(hi), Some(&lo_state)).state().is_none() {
+            if let Some(lo_state) = probe(car, &inp(lo), Some(hs)) {
+                if probe(car, &inp(hi), Some(&lo_state)).is_none() {
                     return bisect(car, &inp, lo, lo_state, hi, MAX_BISECT_NARROW, ax);
                 }
             }
@@ -589,7 +632,7 @@ fn max_lateral(
     let mut hi = AY_SEED;
     let mut bracketed = false;
     for _ in 0..MAX_EXPAND {
-        if let Some(st) = car.trim_warm(&inp(hi), Some(&lo_state)).state().copied() {
+        if let Some(st) = probe(car, &inp(hi), Some(&lo_state)) {
             lo = hi;
             lo_state = st;
             hi = (hi * 2.0).min(A_CAP);
@@ -612,6 +655,22 @@ fn max_lateral(
     }
 }
 
+/// One boundary probe: the warm solve first, then — if it fails — a cold DIRECT solve (physics
+/// initial guess, no continuation) before declaring the point infeasible. A stale warm start (e.g.
+/// a perturbed-vehicle sensitivity probe hinted from the reference fibre) can miss a feasible trim
+/// the direct solve finds; without the fallback the bisection pins the boundary low (caught by the
+/// Decision #31 accuracy gate on a friction-circle-coupled tyre). Infeasible probes cost one extra
+/// fast-failing LM — cheap next to a wrong boundary.
+fn probe(car: &T1Vehicle, inp: &TrimInput, warm: Option<&TrimState>) -> Option<TrimState> {
+    if let Some(st) = car.trim_warm(inp, warm).state().copied() {
+        return Some(st);
+    }
+    if warm.is_some() {
+        return car.trim_warm(inp, None).state().copied();
+    }
+    None
+}
+
 /// Bisect a feasible (`lo`, `lo_state`) / infeasible (`hi`) lateral-acceleration bracket, warm-starting
 /// each probe from the last feasible state, and return the boundary.
 fn bisect(
@@ -625,7 +684,7 @@ fn bisect(
 ) -> Boundary {
     for _ in 0..iters {
         let mid = 0.5 * (lo + hi);
-        match car.trim_warm(&inp(mid), Some(&lo_state)).state().copied() {
+        match probe(car, &inp(mid), Some(&lo_state)) {
             Some(st) => {
                 lo = mid;
                 lo_state = st;
@@ -710,7 +769,7 @@ fn sens_sampled(i: usize, n: usize) -> bool {
 /// full resolution). Only bulk nodes — boundary ≥ the fibre's correction threshold — are filled;
 /// the rest keep the suppressed 0, matching the full-grid semantics.
 fn fill_sensitivities(
-    mut fields: [&mut Vec<f64>; 3],
+    mut fields: [&mut Vec<f64>; 6],
     base: &[f64],
     axn_axis: &[f64],
     [nv, nax, ngn]: [usize; 3],
@@ -968,7 +1027,10 @@ mod tests {
             (1.12, 1.08, 1.22),
         ];
         let mut gate = 0.0_f64;
+        let mut worst = (0.0, 0.0, 0.0, 0, 0, 0.0, 0.0);
+        let mut per_case: Vec<f64> = Vec::new();
         for &(mu, mm, cla) in &cases {
+            let mut cmax = 0.0_f64;
             let pcar = car
                 .with_mu_scale(mu)
                 .with_mass(car.mass_kg * mm)
@@ -980,10 +1042,21 @@ mod tests {
                     // free of the velocity-frame −a_x·sinβ projection.
                     let truth = max_lateral(&pcar, v, 0.0, gn, coupling, None).ay_corr;
                     let interp = env.ay_boundary_corrected(v, 0.0, gn, mu, car.mass_kg * mm, cla);
-                    gate = gate.max((interp - truth).abs() / peak(v, gn));
+                    let e = (interp - truth).abs() / peak(v, gn);
+                    cmax = cmax.max(e);
+                    if e > gate {
+                        gate = e;
+                        worst = (mu, mm, cla, iv, ign, truth, interp);
+                    }
                 }
             }
+            per_case.push(cmax);
         }
+        println!("per-case max error: {per_case:.4?}");
+        println!(
+            "worst case: mu={} mass_x={} cla={} iv={} ign={} truth={:.3} interp={:.3}",
+            worst.0, worst.1, worst.2, worst.3, worst.4, worst.5, worst.6
+        );
         println!(
             "Decision #31 corrected-envelope max error vs full T1 re-solve (pure lateral): {:.3}%",
             gate * 100.0

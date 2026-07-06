@@ -148,6 +148,7 @@ One experienced simulation engineer builds v1 solo.
 | 45 | Slipstream/dirty air | **Stage-2 empirical** (drag/downforce deltas vs gap scaling the aero map); v1 strictly single-car; no co-simulated wake, no multi-car state layout tax |
 | 46 | Session conditions | **Fourth input `conditions.yaml`**: air temp/pressure→density, constant wind vector (v1), track surface temp, thermal ambient; full ISA defaults. The input quartet: **vehicle + track + conditions + sim** |
 | 47 | Solid axle / karts | **`type: solid` in the axle/diff block from day 1** (locked-diff limit case, nearly free); actual kart reference car (frame-flex) is post-1.0/community territory |
+| 48 | Limebeer gate re-scope (author-decided 2026-07-06, M3/PR8+9) | The §13 "lap time ≤1%" row compared a **QSS solver on a fixed heuristic line** against a **transient OCP that co-optimises the driven line** — unattainable by construction (PL2014 itself cites a 2.19 s QSS-vs-OCP gap at Barcelona, its ref [14]; measured floor for this solver class ≈ +5–8% once car and geometry are validated). **Re-scoped:** the M3 QSS gate hard-gates what the tier can honestly certify — top speed ≤1% and slow/fast-corner apex-speed bands ≤5% vs the PL2014 published traces; the lap-time delta is **recorded with its decomposition** in `docs/validation/`, not gated. The ≤1% lap-time ambition moves to **M4** via the honest chain (QSS↔T2 parity ≤0.3%, then T2 vs the OCP oracle). A **time-weighted raceline QP** (the dominant recoverable share of the gap) is scheduled as M4 work alongside the transient tier — a validation-motivated amendment to Decision #14's "min-curvature only in v1" scope |
 
 ---
 
@@ -1165,7 +1166,7 @@ ends in something runnable and demo-able (public repo).
 | M1 | `outlap-schema` (incl. drivetrain topology graph §8.0) + `outlap-track` (**3D ribbon**: κ(s), grade, banking, vertical curvature) + **OSM+DEM track importer** (§9.3) + min-curvature line generator (§6.3) + point-mass T0 with 3D normal-load corrections → first lap time on Catalunya. WASM build in CI from here | 4–6 wk | 0.1 |
 | M2 | MF6.1 + `.tir` parser/writer + Python fitting pipeline + 3 citation-backed reference `.tyr` files | 4–5 wk | |
 | M3 | Full QSS tier (T1 double-track trim → **g-g-g-v envelopes** on the 3D ribbon, ride-height/yaw aero maps, topology-graph powertrain with map-based ICE/EM + gearbox + static splits/diffs + **machine thermal-budget derating §8.5**) — cross-checked vs fastest-lap Limebeer F1 numbers (flat-track mode for the oracle comparison). **PDT importers (§10) land here** | 6–8 wk | 0.2 |
-| M4 | Transient tier (T2 in the **curvilinear 3D road frame**, split integrator, ideal driver model, shift events, rule-based TV controller) + QSS↔transient parity gate in CI | 5–7 wk | |
+| M4 | Transient tier (T2 in the **curvilinear 3D road frame**, split integrator, ideal driver model, shift events, rule-based TV controller) + QSS↔transient parity gate in CI + **time-weighted raceline QP + the deferred ≤1% Limebeer lap-time gate (Decision #48)** | 5–7 wk | |
 | M5 | **Tire thermal ring + wear in both tiers — the headline. Stint-simulation demo** | 4–6 wk | 0.3 |
 | M6 | ERS 2026-style (deploy taper, override mode, recharge phases) + battery ECM + fuel mass + T3 14-DOF | 4–5 wk | |
 | M7 | `outlap-batch` (rayon, SoA) + sweep API + working CLI (§11.1b) + **all four reference vehicles** (Locked Decision #1) + the **hero demo as redefined by the author (Decision #22)**: F1 2026-config vs GT hybrid vs EV sports 2-DU AWD vs EV sports 1-DU RWD — each on **its own min-curvature line**, compared lap times + energy on Catalunya/Spa/Silverstone (4-DU TV + FWD ship as extra example configs) + docs site + WASM demo widget | 6–8 wk | **1.0** |
@@ -1197,7 +1198,8 @@ ends in something runnable and demo-able (public repo).
 |---|---|---|
 | MF6.1 | Pacejka-book worked figures; golden CSVs generated once from MFeval (MATLAB outputs used as *data*) | Fx/Fy/Mz ≤ 0.5% over slip/load/pressure sweeps |
 | Chassis 7/14-DOF | Chrono::Vehicle same-parameter skidpad / step-steer / sine-dwell; CommonRoad benchmark models; AV21 params | yaw-rate gain, understeer gradient, response time ≤ 3% |
-| Lap level | fastest-lap (MIT): Limebeer-2014 F1 @ Catalunya published traces | lap time ≤ 1%; speed/gear traces qualitatively matched |
+| Lap level (M3, QSS — re-scoped by Decision #48) | Perantoni & Limebeer 2014 (VSD 52(5)) published Catalunya results: 82.43 s lap + Fig. 8 speed trace; fastest-lap (MIT) as a parameterisation cross-check only (its powertrain differs) | **top speed ≤ 1%; slow-corner and fast-corner apex-speed bands ≤ 5%**; lap-time delta recorded with decomposition in `docs/validation/limebeer.md` (QSS-on-heuristic-line floor vs OCP ≈ +5–8%), NOT gated |
+| Lap level (M4, transient) | same oracle, via QSS↔T2 parity then T2 vs OCP; time-weighted raceline QP (Decision #48) | lap time ≤ 1% |
 | Tire thermal | Farroni TRT published temperature traces; F1 broadcast tire-temp ranges | warm-up time constants + steady temps in published bands |
 | Wear/cliff | FastF1 stint pace deltas (2022+ regs) | monotone pace loss + cliff lap reproduced after inverse calibration |
 | Battery | NREL `thevenin` pulse-response on identical inputs | voltage RMS ≤ 1% |

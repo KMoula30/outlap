@@ -13,6 +13,11 @@ mf61:
   PDY1: 1.25
   PEY1: -1.0
   PKY1: -20.0
+  # Combined-slip weighting (Pacejka 4.E50-4.E67): book-magnitude SYNTHETIC values (same status as
+  # the rest of this file). Without them the MF6.1 defaults (RBX1 = RBY1 = 0) silently disable the
+  # friction-circle interaction, leaving an unphysical rectangular combined boundary.
+  RBX1: 13.0
+  RBY1: 9.0
   LMUX: 1.0
   LMUY: 1.0
 thermal:
