@@ -93,20 +93,38 @@ def lap_dataset(lap: Lap) -> xr.Dataset:
     s = lap.s()
     data: dict[str, object] = {
         "v": ("s", lap.v(), {"units": "m/s", "long_name": "speed"}),
-        "ax": ("s", lap.ax(), {"units": "m/s²", "long_name": "longitudinal acceleration"}),
-        "ay": ("s", lap.ay(), {"units": "m/s²", "long_name": "lateral acceleration (+left)"}),
+        "ax": (
+            "s",
+            lap.ax(),
+            {"units": "m/s²", "long_name": "longitudinal acceleration"},
+        ),
+        "ay": (
+            "s",
+            lap.ay(),
+            {"units": "m/s²", "long_name": "lateral acceleration (+left)"},
+        ),
         "t": ("s", lap.t(), {"units": "s", "long_name": "cumulative time"}),
         "x": ("s", lap.x(), {"units": "m"}),
         "y": ("s", lap.y(), {"units": "m"}),
         "z": ("s", lap.z(), {"units": "m", "long_name": "elevation"}),
     }
-    coords: dict[str, object] = {"s": ("s", s, {"units": "m", "long_name": "arc length"})}
+    coords: dict[str, object] = {
+        "s": ("s", s, {"units": "m", "long_name": "arc length"})
+    }
 
     # Per-wheel channels (t1 only): dims (s, wheel) with wheel = FL/FR/RL/RR.
     fz = lap.vertical_load_n()
     if fz is not None:
-        coords["wheel"] = ("wheel", list(lap.wheels), {"long_name": "wheel (FL, FR, RL, RR)"})
-        data["vertical_load_n"] = (("s", "wheel"), fz, {"units": "N", "long_name": "normal load"})
+        coords["wheel"] = (
+            "wheel",
+            list(lap.wheels),
+            {"long_name": "wheel (FL, FR, RL, RR)"},
+        )
+        data["vertical_load_n"] = (
+            ("s", "wheel"),
+            fz,
+            {"units": "N", "long_name": "normal load"},
+        )
         data["slip_ratio"] = (
             ("s", "wheel"),
             lap.slip_ratio(),
@@ -145,7 +163,11 @@ def lap_dataset(lap: Lap) -> xr.Dataset:
     # Slow-state channels (only when a coupled electrified stack was active).
     soc = lap.state_of_charge()
     if soc is not None:
-        data["state_of_charge"] = ("s", soc, {"units": "1", "long_name": "pack state of charge"})
+        data["state_of_charge"] = (
+            "s",
+            soc,
+            {"units": "1", "long_name": "pack state of charge"},
+        )
         data["machine_temp_c"] = (
             "s",
             lap.machine_temp_c(),

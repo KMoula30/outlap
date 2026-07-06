@@ -23,6 +23,11 @@ jobs:
 
   python:
     runs-on: ubuntu-latest
+    # Build the outlap-core extension in RELEASE: g-g-g-v envelope generation (now on the default
+    # t1 lap path) is a seconds-scale cold step in release but minutes in debug — a debug wheel
+    # would blow the pytest/notebook time budgets. maturin honours this under PEP517 (uv sync).
+    env:
+      MATURIN_PEP517_ARGS: --profile release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable   # uv sync builds the outlap-core extension (maturin)
