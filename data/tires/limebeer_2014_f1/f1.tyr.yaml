@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Perantoni & Limebeer 2014 reference F1 tyre, transcribed into MF6.1 form (clean-room from the
+# published Table 3 — see README.md for the per-coefficient provenance and the mapping derivation).
+# The paper's load-linear peak friction maps EXACTLY onto MF6.1's (PD_1 + PD_2·dfz) form; the
+# stiffness coefficients place the friction peaks at the paper's slip locations (fitted numerically
+# against this repository's MF6.1 implementation; see README.md).
+schema: tyr/1.0
+mf61:
+  FNOMIN: 4000.0
+  UNLOADED_RADIUS: 0.33
+  # Longitudinal: peak mu 1.75 @ 2000 N -> 1.40 @ 6000 N (Table 3, exact linear-in-dfz mapping).
+  PCX1: 1.9
+  PDX1: 1.575
+  PDX2: -0.35
+  PEX1: 0.0
+  PKX1: 30.84
+  PKX2: -3.94
+  # Lateral: peak mu 1.80 @ 2000 N -> 1.45 @ 6000 N (Table 3, exact linear-in-dfz mapping).
+  PCY1: 1.9
+  PDY1: 1.625
+  PDY2: -0.35
+  PEY1: 0.0
+  PKY1: -52.25
+  PKY2: 4.40
+  PKY4: 2.0
+  LMUX: 1.0
+  LMUY: 1.0
+# Thermal/wear blocks are REQUIRED by tyr/1.0 but are NOT part of PL2014 (the paper models neither):
+# synthetic racing-slick placeholders copied from the repository's synthetic slick; unused by the
+# QSS validation laps (tyre thermal/wear land in M5).
+thermal:
+  c_s: 8000.0
+  c_c: 22000.0
+  c_g: 1500.0
+  g_sc: 90.0
+  g_cg: 40.0
+  g_road: 250.0
+  h0: 15.0
+  h1: 5.5
+  p_t: 0.65
+  t_opt: 95.0
+  c_t: 2.2
+  k_c: 0.0015
+  t_c_ref: 80.0
+  p_cold: 138.0
+  t_cold: 20.0
+wear:
+  k_w: 0.0009
+  w_max: 8.0
+  w_c: 2.0
+  tau_d: 600.0
+  t_deg: 120.0
+  delta_t_ref: 20.0
+  beta: 2.0
+  delta_c: 0.25
+  s_w: 0.5
+  delta_d: 0.30
+provenance:
+  citation: "Perantoni & Limebeer, Optimal control for a Formula One car with variable parameters, Vehicle System Dynamics 52(5), 2014, Table 3 (open-access manuscript, ORA uuid:ce1a7106-0a2c-41af-8449-41541220809f)"
+  source: "transcribed to MF6.1 from the published PL2014 tyre parameters; see README.md"
+  synthetic: false

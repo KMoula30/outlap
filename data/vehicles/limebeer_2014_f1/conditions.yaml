@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# PL2014 air density rho = 1.2 kg/m^3 (Table 4): 1013.25 hPa at 21.0 C gives
+# rho = 101325/(287.05 * 294.15) = 1.2000 kg/m^3 through outlap's ideal-gas conversion.
+schema: conditions/1.0
+air:
+  temperature_c: 21.0
+  pressure_hpa: 1013.25
