@@ -116,6 +116,11 @@ def test_golden_lap(name: str, vehicle: str, tier: str, flat: bool) -> None:
         g = gold[var].to_numpy()
         o = got[var].to_numpy()
         assert g.shape == o.shape, f"{name}/{var} shape {o.shape} vs golden {g.shape}"
-        scale = np.nanmax(np.abs(g)) or 1.0
-        worst = np.nanmax(np.abs(o - g)) / scale
+        # Feasibility drift first: per-wheel channels are NaN at infeasible re-trim stations, and
+        # a NaN on either side would silently drop out of nanmax below.
+        assert np.array_equal(np.isnan(o), np.isnan(g)), f"{name}/{var} NaN pattern drifted"
+        scale = float(np.nanmax(np.abs(g)))
+        if not np.isfinite(scale) or scale == 0.0:
+            scale = 1.0
+        worst = float(np.nanmax(np.abs(o - g))) / scale if np.isfinite(g).any() else 0.0
         assert worst < tol, f"{name}/{var} drifted: {worst:.4f} > {tol}"

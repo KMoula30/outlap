@@ -201,6 +201,11 @@ fn march_slow_states(
         let j = if path.closed { (seg + 1) % n } else { seg + 1 };
         let vi = v[i];
         let dt = 2.0 * path.ds / (v[i] + v[j]).max(1e-6);
+        // Log the ENTRY state at station i (the state the car carries INTO segment i): station 0
+        // reports the initial SoC/temperature, and the channels line up with the stations rather
+        // than leading the car by one segment.
+        soc[i] = st.soc;
+        temp_c[i] = thermal.winding_temp_c();
         // Wheel drive force actually demanded (positive part): F_t = m·(a_x + drag_accel + g·sinθ_g).
         let f_drive = (m * (ax[i] + env.drag_accel(vi) + G * path.sin_g[i])).max(0.0);
         let vdc = c.pack.terminal_voltage_v(&st);
@@ -220,11 +225,6 @@ fn march_slow_states(
             scale[i] = (derate.min(batt_scale)).clamp(0.0, 1.0);
             debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
         }
-        // ALWAYS log the marched state — a station where no mapped unit can deliver (no gear
-        // on-envelope, or no maps at all) advances nothing but must still report the current
-        // state, or the log would show the initial state mid-lap (a non-monotone artefact).
-        soc[i] = st.soc;
-        temp_c[i] = thermal.winding_temp_c();
     }
     // An open path's final station is not a segment start: it carries the end-of-lap state.
     if !path.closed && n > 0 {
@@ -262,8 +262,9 @@ fn solve_profile(
     derive_ax(path, &ws.v, &mut ax);
     march_slow_states(c, env, path, &ws.v, &ax, &mut scale, &mut soc, &mut temp_c);
     // A coupling with no mapped units (`traction_energy` always `None`) leaves the states pinned —
-    // report it only when it actually did something (SoC moved or the winding heated).
-    let active = soc.iter().any(|&s| (s - soc[0]).abs() > 0.0)
+    // report it only when it actually did something (SoC moved or the winding heated). Station 0
+    // logs the ENTRY (initial) state, so any change shows up against it.
+    let active = soc.iter().any(|&s| (s - c.pack_state.soc).abs() > 0.0)
         || temp_c.iter().any(|&t| (t - temp_c[0]).abs() > 0.0)
         || scale.iter().any(|&s| s < 1.0);
     let slow = active.then_some(SlowLog {
