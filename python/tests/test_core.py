@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from outlap.core import (
     Track,
@@ -29,6 +30,21 @@ PACEJKA = str(_DATA / "tires/pacejka_2006_205_60r15/car.tyr.yaml")
 F1_DIR = str(_DATA / "vehicles/f1_2026")
 F1_SLICK = str(_DATA / "vehicles/f1_2026/tyr/slick.tyr.yaml")
 CATALUNYA = str(_DATA / "tracks/catalunya")
+
+# CI-speed envelope for the plumbing tests below: what they assert (dataset shape, attrs,
+# overrides plumbing, determinism) is fidelity-independent, and every distinct override /
+# conditions combination generates its own g-g-g-v envelope (a cold step). The physics gates
+# (Limebeer <=1%, golden laps) run at the full production 40x25x7 grid in their own tests.
+COARSE_SIM: dict[str, object] = {
+    "envelope": {"v_points": 8, "ax_points": 7, "g_normal_points": 2}
+}
+
+
+def solve_fast(vehicle_dir: str, line: object, **kw: object) -> xr.Dataset:
+    """A CI-speed lap: point-mass tier on a coarse envelope (plumbing tests only)."""
+    kw.setdefault("tier", "t0")
+    kw.setdefault("sim", COARSE_SIM)
+    return solve_lap_dataset(vehicle_dir, line, **kw)  # type: ignore[arg-type]
 
 
 @pytest.fixture(scope="module")
@@ -105,13 +121,13 @@ def test_raceline_improves_lap(catalunya: Track) -> None:
     n = rl.n()
     assert np.abs(n).max() > 1.0  # actually moves off the centerline
     assert rl.ds_m == 2.0  # generation step recorded for provenance
-    lap_c = solve_lap_dataset(F1_DIR, catalunya)
-    lap_r = solve_lap_dataset(F1_DIR, rl)  # Raceline accepted directly
+    lap_c = solve_fast(F1_DIR, catalunya)
+    lap_r = solve_fast(F1_DIR, rl)  # Raceline accepted directly
     assert lap_r.attrs["lap_time_s"] < lap_c.attrs["lap_time_s"]
 
 
 def test_lap_dataset_shape_and_sanity(catalunya: Track) -> None:
-    lap = solve_lap_dataset(F1_DIR, catalunya)
+    lap = solve_fast(F1_DIR, catalunya)
     assert 60.0 < lap.attrs["lap_time_s"] < 200.0
     for var in ("v", "ax", "ay", "t", "x", "y", "z"):
         assert var in lap
@@ -148,8 +164,8 @@ def test_p_cold_is_pascals(pacejka: Tyre) -> None:
 
 
 def test_lap_is_deterministic(catalunya: Track) -> None:
-    a = solve_lap_dataset(F1_DIR, catalunya)
-    b = solve_lap_dataset(F1_DIR, catalunya)
+    a = solve_fast(F1_DIR, catalunya)
+    b = solve_fast(F1_DIR, catalunya)
     assert a.attrs["lap_time_s"] == b.attrs["lap_time_s"]
     assert np.array_equal(a.v.to_numpy(), b.v.to_numpy())
 
@@ -165,8 +181,8 @@ def test_bad_ds_raises_not_panics(catalunya: Track) -> None:
 
 
 def test_override_mass_slows_the_lap(catalunya: Track) -> None:
-    base = solve_lap_dataset(F1_DIR, catalunya)
-    heavy = solve_lap_dataset(F1_DIR, catalunya, overrides={"chassis.mass_kg": 968.0})
+    base = solve_fast(F1_DIR, catalunya)
+    heavy = solve_fast(F1_DIR, catalunya, overrides={"chassis.mass_kg": 968.0})
     assert heavy.attrs["lap_time_s"] > base.attrs["lap_time_s"]
     # The overridden car is a different resolved spec — provenance hash must change.
     assert heavy.attrs["resolved_hash"] != base.attrs["resolved_hash"]
@@ -174,21 +190,17 @@ def test_override_mass_slows_the_lap(catalunya: Track) -> None:
 
 def test_override_bad_path_fails_loudly(catalunya: Track) -> None:
     with pytest.raises(ValueError, match="mas_kg"):
-        solve_lap_dataset(F1_DIR, catalunya, overrides={"chassis.mas_kg": 900.0})
+        solve_fast(F1_DIR, catalunya, overrides={"chassis.mas_kg": 900.0})
 
 
 def test_override_bad_type_fails_loudly(catalunya: Track) -> None:
     with pytest.raises(ValueError):
-        solve_lap_dataset(F1_DIR, catalunya, overrides={"chassis.mass_kg": "heavy"})
+        solve_fast(F1_DIR, catalunya, overrides={"chassis.mass_kg": "heavy"})
 
 
 def test_conditions_change_the_lap(catalunya: Track) -> None:
-    cold = solve_lap_dataset(
-        F1_DIR, catalunya, conditions={"air": {"temperature_c": 0.0}}
-    )
-    hot = solve_lap_dataset(
-        F1_DIR, catalunya, conditions={"air": {"temperature_c": 45.0}}
-    )
+    cold = solve_fast(F1_DIR, catalunya, conditions={"air": {"temperature_c": 0.0}})
+    hot = solve_fast(F1_DIR, catalunya, conditions={"air": {"temperature_c": 45.0}})
     # Air density changes drag AND downforce; the laps must differ measurably.
     assert cold.attrs["lap_time_s"] != hot.attrs["lap_time_s"]
     assert abs(cold.attrs["lap_time_s"] - hot.attrs["lap_time_s"]) > 0.05
@@ -197,7 +209,7 @@ def test_conditions_change_the_lap(catalunya: Track) -> None:
 def test_conditions_typo_fails_loudly(catalunya: Track) -> None:
     # A misspelled conditions field must never be silently dropped.
     with pytest.raises(ValueError, match="air.temp_c"):
-        solve_lap_dataset(F1_DIR, catalunya, conditions={"air": {"temp_c": 30.0}})
+        solve_fast(F1_DIR, catalunya, conditions={"air": {"temp_c": 30.0}})
 
 
 def test_vehicle_report_echoes_overrides() -> None:
@@ -224,3 +236,76 @@ def test_malformed_conditions_is_an_error(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         raw_solve(str(vdir), tr)
+
+
+# --- PR8: tier dispatch + the extended result surface -------------------------------------------
+
+
+def test_t0_dataset_stays_s_only(catalunya: Track) -> None:
+    lap = solve_fast(F1_DIR, catalunya)
+    assert lap.attrs["tier"] == "t0"
+    assert lap.attrs["fz_coupling"] == "one_step_lag"
+    assert lap.attrs["flat_track"] == 0
+    assert "wheel" not in lap.sizes  # backward-compatible: point-mass laps stay s-only
+    assert "vertical_load_n" not in lap
+
+
+def test_t1_dataset_has_wheel_dim_and_channels(catalunya: Track) -> None:
+    lap = solve_lap_dataset(F1_DIR, catalunya, ds_m=25.0, tier="t1", sim=COARSE_SIM)
+    assert lap.attrs["tier"] == "t1"
+    # The point-mass channels stay present (additive extension).
+    for var in ("v", "ax", "ay", "t", "x", "y", "z"):
+        assert var in lap
+    # Per-wheel channels over (s, wheel), FL/FR/RL/RR.
+    assert list(lap.coords["wheel"].values) == ["FL", "FR", "RL", "RR"]
+    for var in (
+        "vertical_load_n",
+        "slip_ratio",
+        "slip_angle_rad",
+        "force_long_n",
+        "force_lat_n",
+    ):
+        assert lap[var].dims == ("s", "wheel"), var
+    # Setup metrics per station.
+    assert lap.understeer_gradient.dims == ("s",)
+    assert lap.aero_front_share.dims == ("s",)
+    # Wheel loads: converged stations carry a plausible total (weight + downforce).
+    fz = lap.vertical_load_n.to_numpy()
+    finite = np.isfinite(fz).all(axis=1)
+    assert finite.mean() > 0.5, "most stations must re-trim"
+    totals = fz[finite].sum(axis=1)
+    assert (totals > 0.5 * 798.0 * 9.81).all()
+
+
+def test_flat_track_mode_records_and_flattens(catalunya: Track) -> None:
+    flat = solve_fast(F1_DIR, catalunya, sim={**COARSE_SIM, "flat_track": True})
+    full = solve_fast(F1_DIR, catalunya)
+    assert flat.attrs["flat_track"] == 1
+    assert full.attrs["flat_track"] == 0
+    # Catalunya has real elevation; flattening it must change the lap.
+    assert flat.attrs["lap_time_s"] != full.attrs["lap_time_s"]
+
+
+def test_transient_tiers_raise_typed_errors(catalunya: Track) -> None:
+    for tier, milestone in (("t2", "M4"), ("t3", "M6")):
+        with pytest.raises(ValueError, match=milestone):
+            solve_lap_dataset(F1_DIR, catalunya, tier=tier, sim=COARSE_SIM)
+
+
+def test_unknown_sim_field_fails_loudly(catalunya: Track) -> None:
+    with pytest.raises(ValueError, match="sim.flat_trak"):
+        solve_lap_dataset(F1_DIR, catalunya, sim={"flat_trak": True})
+
+
+def test_envelope_is_returnable(catalunya: Track) -> None:
+    from outlap.core import solve_lap as raw_solve
+
+    lap = raw_solve(F1_DIR, catalunya, tier="t0", sim=COARSE_SIM)
+    env = lap.envelope
+    assert env is not None
+    # The boundary is a physical, positive lateral limit inside the domain.
+    (v_lo, v_hi), _, _ = env.domain()
+    v_mid = 0.5 * (v_lo + v_hi)
+    assert env.ay_boundary(v_mid, 0.0, 9.81) > 5.0
+    assert env.accel_limit(v_mid, 9.81) > 0.0
+    assert env.notes
