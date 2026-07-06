@@ -322,7 +322,7 @@ impl T1Vehicle {
         }
         // `t == 1`: `z` is the converged trim at the full target.
         let mut r = [0.0; N];
-        self.residual(inp, geom, &z, &mut r);
+        self.residual(inp, geom, &z, &mut r, &mut None);
         TrimOutcome::Converged(self.finalize(inp, geom, &z, norm(&r), iters))
     }
 
@@ -333,8 +333,10 @@ impl T1Vehicle {
     /// into the periodic-`β` aliases that trap a plain Newton. Zero-allocation (fixed stack arrays).
     fn solve_lm(&self, inp: &TrimInput, geom: &Geom, mut z: [f64; N]) -> ([f64; N], f64, usize) {
         clamp_state(&mut z);
+        // Aero-platform warm-start slot, threaded through every residual evaluation of this solve.
+        let mut aero_h: Option<(f64, f64)> = None;
         let mut r = [0.0; N];
-        self.residual(inp, geom, &z, &mut r);
+        self.residual(inp, geom, &z, &mut r, &mut aero_h);
         let mut rn = norm(&r);
         let mut mu = 1e-3;
         let mut iterations = 0;
@@ -350,7 +352,7 @@ impl T1Vehicle {
             for j in 0..N {
                 let h = FD_H * z[j].abs().max(1.0);
                 zp[j] = z[j] + h;
-                self.residual(inp, geom, &zp, &mut rp);
+                self.residual(inp, geom, &zp, &mut rp, &mut aero_h);
                 for i in 0..N {
                     jac[i][j] = (rp[i] - r[i]) / h;
                 }
@@ -397,7 +399,7 @@ impl T1Vehicle {
                 }
                 clamp_state(&mut ztry); // keep the search physical (no periodic-β aliases, Fz ≥ 0)
                 let mut rtry = [0.0; N];
-                self.residual(inp, geom, &ztry, &mut rtry);
+                self.residual(inp, geom, &ztry, &mut rtry, &mut aero_h);
                 let rntry = norm(&rtry);
                 if rntry < rn {
                     z = ztry;
@@ -470,7 +472,19 @@ impl T1Vehicle {
     }
 
     /// The residual vector `R(z)` for a commanded operating point (scaled dimensionless).
-    fn residual(&self, inp: &TrimInput, geom: &Geom, z: &[f64; N], out: &mut [f64; N]) {
+    ///
+    /// `aero_h` is the warm-start slot for the aero-platform fixed point: it carries the converged
+    /// ride heights from the previous residual evaluation of the same solve (β moves little between
+    /// evaluations, so the warm fixed point converges in ~1–2 iterations instead of ~20; the tight
+    /// `AERO_TOL_M` makes the result physically identical either way).
+    fn residual(
+        &self,
+        inp: &TrimInput,
+        geom: &Geom,
+        z: &[f64; N],
+        out: &mut [f64; N],
+        aero_h: &mut Option<(f64, f64)>,
+    ) {
         let (delta, beta, yaw_rate, s, w) = (z[0], z[1], z[2], z[3], z[4]);
         let v = inp.v;
         // The four F_z unknowns are non-dimensionalised by `m·g` (all unknowns then O(1), so the
@@ -516,7 +530,8 @@ impl T1Vehicle {
         // The aerodynamic yaw is the body-slip angle β (evaluated in degrees); DRS is closed in the
         // trim (its activation is a controller concern). Keeping the evaluation inside the residual
         // lets the finite-difference Jacobian pick up ∂(downforce)/∂β for the mid-corner asymmetry.
-        let aero = self.aero_lumped(v, inp.ax, beta.to_degrees(), 0.0);
+        let aero = self.aero_lumped_warm(v, inp.ax, beta.to_degrees(), 0.0, *aero_h);
+        *aero_h = Some((aero.h_f_m, aero.h_r_m));
         let drag = aero.qx * v * v;
         sum_fx -= drag;
 

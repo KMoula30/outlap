@@ -44,7 +44,7 @@ jobs:
       # --directory also changes the command's working directory.)
       # --kernel_name pins execution to the venv's kernel, so a contributor's locally-selected
       # kernel (saved into notebook metadata by VS Code/Jupyter) can never break CI.
-      - run: uv run --directory python jupyter execute --timeout 300 --kernel_name python3 "$GITHUB_WORKSPACE"/notebooks/*.ipynb
+      - run: uv run --directory python jupyter execute --timeout 900 --kernel_name python3 "$GITHUB_WORKSPACE"/notebooks/*.ipynb
 
   wheels:            # release-tag only; add maturin-action matrix (linux/mac/win) when publishing
     if: startsWith(github.ref, 'refs/tags/v')

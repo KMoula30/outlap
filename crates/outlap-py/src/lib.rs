@@ -673,6 +673,67 @@ fn merge_json(
     }
 }
 
+/// Decode and install the vehicle's declared binary sidecars onto an assembled [`T1Vehicle`] (the
+/// native-edge step the wasm-clean core cannot do): the ride-height/yaw aero map (`aero.map`) and
+/// each drive unit's `.ptm` efficiency/loss tables. A *missing* sidecar file is skipped with a note
+/// (the constant-aero / peak-envelope fallbacks carry the lap — the status quo for vehicles whose
+/// tables are not committed); a present-but-undecodable one is a real error (nothing silent).
+fn install_sidecars(
+    t1v: &mut T1Vehicle,
+    resolved: &ResolvedVehicle,
+    vl: &FsLoader,
+    notes: &mut Vec<String>,
+) -> PyResult<()> {
+    use outlap_schema::io::SourceLoader;
+    use outlap_schema::sidecar::read_gridded_table;
+
+    // Ride-height/yaw aero map.
+    let map_path = resolved.spec.aero.map.as_str();
+    if !map_path.is_empty() {
+        match vl.load_bytes(map_path) {
+            Ok(bytes) => {
+                let axes: Vec<&str> = resolved.spec.aero.axes.iter().map(String::as_str).collect();
+                let table = read_gridded_table(&bytes, &axes).map_err(err)?;
+                t1v.install_aero_map(&table, &resolved.spec.aero.axes)
+                    .map_err(err)?;
+            }
+            Err(outlap_schema::io::SourceError::NotFound { .. }) => {
+                notes.push(format!(
+                    "aero map `{map_path}` not present — constant-aero fallback carries the lap"
+                ));
+            }
+            Err(e) => return Err(err(e)),
+        }
+    }
+
+    // Per-unit `.ptm` efficiency/loss tables (energy accounting + the Vdc–SoC coupling).
+    for (idx, unit) in resolved.spec.drivetrain.units.iter().enumerate() {
+        let Ok(ptm) = outlap_schema::load::load_ptm(unit.source.as_str(), vl) else {
+            continue; // assembly already validated/reported the source itself
+        };
+        let table_path = ptm.tables.file.as_str();
+        match vl.load_bytes(table_path) {
+            Ok(bytes) => {
+                let table = if ptm.axes.vdc_v.is_some() {
+                    read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names_vdc())
+                } else {
+                    read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names())
+                }
+                .map_err(err)?;
+                t1v.install_powertrain_maps(idx, &table).map_err(err)?;
+            }
+            Err(outlap_schema::io::SourceError::NotFound { .. }) => {
+                notes.push(format!(
+                    "powertrain tables `{table_path}` (unit {idx}) not present — peak-envelope \
+                     traction only, no energy accounting"
+                ));
+            }
+            Err(e) => return Err(err(e)),
+        }
+    }
+    Ok(())
+}
+
 /// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
 /// a notebook or sweep running many laps of the same car+grid pays it once. Keyed by the resolved
 /// vehicle hash, the session conditions, the envelope grid, and the coupling mode — everything that
@@ -780,11 +841,15 @@ fn solve_lap(
     let qss: QssLap = match sim_cfg.tier {
         tier @ (Tier::T2 | Tier::T3) => return Err(err(tier_not_implemented(tier))),
         wanted => {
-            let t1v = T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded)
+            let mut t1v = T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded)
                 .map_err(err)?;
+            let mut notes = Vec::new();
+            // Native-edge sidecar decode: the aero map + `.ptm` tables (skipped with a note when
+            // the files are not present).
+            install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
             let env = cached_envelope(&t1v, &sim_cfg, &hash, &conditions)?;
             let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
-            let mut notes = t0v.notes().to_vec();
+            notes.extend(t0v.notes().iter().cloned());
             notes.extend(t1v.notes().iter().cloned());
             notes.extend(env.notes().iter().cloned());
             // The committed vehicles carry no battery+emotor stack, so the slow-state coupling is
