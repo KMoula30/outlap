@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Reference car #1: the Perantoni & Limebeer 2014 Formula One car (VSD 52(5), Table 4), transcribed
+# clean-room from the open-access manuscript. Per-parameter provenance in README.md. This is the
+# flat-track Limebeer validation car (HANDOFF §13: QSS lap time within 1% of the published 82.43 s
+# optimal lap of the Circuit de Catalunya).
+schema: vehicle/1.0
+name: "Perantoni-Limebeer 2014 F1 (reference car #1)"
+chassis:
+  mass_kg: 660.0                       # Table 4: M
+  cg: [1.8, 0.0, 0.3]                  # Table 4: a (CG to front axle), centred, h
+  inertia: [112.5, 425.0, 450.0]       # Table 4: Iz = 450; Ixx/Iyy NOT in PL2014 (unused by QSS)
+  wheelbase_m: 3.4                     # Table 4: w
+  track_m: [1.46, 1.46]                # Table 4: 2*wf, 2*wr (wf = wr = 0.73 m)
+aero:
+  map: aero/none.parquet               # no ride-height map: PL2014 aero is speed-only (eqs 32-33)
+  axes: []
+  constant:
+    cx_a_m2: 1.35                      # Cd*A = 0.9 * 1.5 (Table 4; drag, eq 33)
+    # Cl*A = 3.0 * 1.5 = 4.5, split by the centre of pressure at aA = 1.9 m from the front axle
+    # (Table 4): front share = (w - aA)/w = 1.5/3.4, rear = aA/w = 1.9/3.4.
+    cz_front_a_m2: 1.98529
+    cz_rear_a_m2: 2.51471
+suspension:
+  # PL2014 has NO suspension model: load transfer is geometric (h = 0.3 m) with the roll-moment
+  # fraction D_roll = 0.5 (eq 26). Zero roll-centre heights make our transfer purely elastic via the
+  # roll share, reproducing eq (26) exactly. Ride rates are placeholders (no ride-height aero map,
+  # so the platform equilibrium never runs); flagged estimated in the README.
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 200000.0
+    roll_stiffness_share: 0.5          # Table 4: D_roll
+    roll_center_height_m: 0.0
+  rear:
+    ride_rate_n_per_m: 200000.0
+    roll_stiffness_share: 0.5
+    roll_center_height_m: 0.0
+tires:
+  front: tyr/f1.tyr.yaml               # Table 3 transcribed to MF6.1 (data/tires/limebeer_2014_f1)
+  rear: tyr/f1.tyr.yaml                # PL2014 uses the same tyre front and rear (Appendix A)
+drivetrain:
+  units:
+    - source: ptm/engine_560kw.ptm.yaml
+      path:
+        - fixed_ratio: 1.0             # envelope defined directly at the wheel shaft (R = 0.33 m)
+        - diff: { type: open }         # kd = 10.47 N·m·s/rad (Table 4) ~ open (kd -> 0 is open)
+      wheels: [RL, RR]                 # rear-wheel drive (§2.5.2)
+brakes:
+  balance_bar: 0.6                     # NOT in PL2014 (per-axle ratio left free); estimated
+  disc:
+    front: { thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1 }
+    rear: { thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1 }
