@@ -62,6 +62,13 @@ const STALL_WINDOW: usize = 6;
 const STALL_FACTOR: f64 = 0.7;
 /// Residual floor for the stall test: only declare a stall well above the convergence tolerance so
 /// a near-root solve with a slow tail can never be cut short.
+///
+/// Residual risk (reviewed, accepted M3): a genuinely feasible probe in a stiff residual valley
+/// that converges slower than [`STALL_FACTOR`] per window is misclassified as infeasible, pinning
+/// an envelope node conservatively low. The envelope's boundary probes retry once from the cold
+/// physics guess (`envelope::probe`), and the node-exactness + Decision #31 gates bound the effect
+/// on the reference cars; a continuation-backed confirmation for shoulder nodes is an M4 candidate
+/// if an off-reference car ever trips it.
 const STALL_MIN_RN: f64 = 1e3 * TOL;
 /// Relative step for the finite-difference Jacobian.
 const FD_H: f64 = 1e-7;

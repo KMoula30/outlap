@@ -636,6 +636,13 @@ fn build_sim(
         Err(e) => return Err(schema_err(e)),
     };
     let mut value = serde_json::to_value(&base).map_err(err)?;
+    // Optional fields with `skip_serializing_if` are absent from the serialized base and would be
+    // rejected as typos by the strict merge — inject them as nulls so the documented overrides
+    // (e.g. `sim={"raceline": {"file": "line.csv"}}`) work.
+    if let Some(r) = value.get_mut("raceline").and_then(|r| r.as_object_mut()) {
+        r.entry("generator").or_insert(serde_json::Value::Null);
+        r.entry("file").or_insert(serde_json::Value::Null);
+    }
     if let Some(patch) = sim_patch {
         merge_json(&mut value, &py_to_json(patch.as_any())?, "sim")?;
     }
@@ -673,31 +680,50 @@ fn merge_json(
     }
 }
 
+/// FNV-1a over a byte slice — the sidecar-content fingerprint folded into the envelope cache key
+/// (the resolved-vehicle hash covers the YAML spec only, not the binary sidecar bytes).
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut h = seed ^ 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Decode and install the vehicle's declared binary sidecars onto an assembled [`T1Vehicle`] (the
 /// native-edge step the wasm-clean core cannot do): the ride-height/yaw aero map (`aero.map`) and
 /// each drive unit's `.ptm` efficiency/loss tables. A *missing* sidecar file is skipped with a note
 /// (the constant-aero / peak-envelope fallbacks carry the lap — the status quo for vehicles whose
 /// tables are not committed); a present-but-undecodable one is a real error (nothing silent).
+///
+/// Returns a fingerprint of every loaded sidecar's bytes (and each skip), folded into the envelope
+/// cache key: two spec-identical cars with different (or differently-present) sidecar tables must
+/// never share a cached envelope.
 fn install_sidecars(
     t1v: &mut T1Vehicle,
     resolved: &ResolvedVehicle,
     vl: &FsLoader,
     notes: &mut Vec<String>,
-) -> PyResult<()> {
+) -> PyResult<u64> {
     use outlap_schema::io::SourceLoader;
     use outlap_schema::sidecar::read_gridded_table;
+
+    let mut fp: u64 = 0;
 
     // Ride-height/yaw aero map.
     let map_path = resolved.spec.aero.map.as_str();
     if !map_path.is_empty() {
         match vl.load_bytes(map_path) {
             Ok(bytes) => {
+                fp = fnv1a(fp, &bytes);
                 let axes: Vec<&str> = resolved.spec.aero.axes.iter().map(String::as_str).collect();
                 let table = read_gridded_table(&bytes, &axes).map_err(err)?;
                 t1v.install_aero_map(&table, &resolved.spec.aero.axes)
                     .map_err(err)?;
             }
             Err(outlap_schema::io::SourceError::NotFound { .. }) => {
+                fp = fnv1a(fp, b"aero:absent");
                 notes.push(format!(
                     "aero map `{map_path}` not present — constant-aero fallback carries the lap"
                 ));
@@ -714,6 +740,7 @@ fn install_sidecars(
         let table_path = ptm.tables.file.as_str();
         match vl.load_bytes(table_path) {
             Ok(bytes) => {
+                fp = fnv1a(fp, &bytes);
                 let table = if ptm.axes.vdc_v.is_some() {
                     read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names_vdc())
                 } else {
@@ -723,6 +750,7 @@ fn install_sidecars(
                 t1v.install_powertrain_maps(idx, &table).map_err(err)?;
             }
             Err(outlap_schema::io::SourceError::NotFound { .. }) => {
+                fp = fnv1a(fp, b"ptm:absent");
                 notes.push(format!(
                     "powertrain tables `{table_path}` (unit {idx}) not present — peak-envelope \
                      traction only, no energy accounting"
@@ -731,7 +759,7 @@ fn install_sidecars(
             Err(e) => return Err(err(e)),
         }
     }
-    Ok(())
+    Ok(fp)
 }
 
 /// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
@@ -748,12 +776,13 @@ fn cached_envelope(
     t1v: &T1Vehicle,
     sim_cfg: &Sim,
     resolved_hash: &str,
+    sidecar_fp: u64,
     conditions: &Conditions,
 ) -> PyResult<GgvEnvelope> {
     let e = &sim_cfg.envelope;
     let cond = serde_json::to_string(conditions).map_err(err)?;
     let key = format!(
-        "{resolved_hash}|{cond}|{}x{}x{}|{:?}",
+        "{resolved_hash}|{sidecar_fp:016x}|{cond}|{}x{}x{}|{:?}",
         e.v_points, e.ax_points, e.g_normal_points, sim_cfg.fz_coupling
     );
     if let Some(env) = ENV_CACHE.lock().expect("env cache mutex").get(&key) {
@@ -846,8 +875,8 @@ fn solve_lap(
             let mut notes = Vec::new();
             // Native-edge sidecar decode: the aero map + `.ptm` tables (skipped with a note when
             // the files are not present).
-            install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
-            let env = cached_envelope(&t1v, &sim_cfg, &hash, &conditions)?;
+            let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
+            let env = cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?;
             let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
             notes.extend(t0v.notes().iter().cloned());
             notes.extend(t1v.notes().iter().cloned());
