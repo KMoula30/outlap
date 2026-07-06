@@ -247,8 +247,10 @@ fn apply_overrides(
     Ok(())
 }
 
-/// Set a value at a dotted path in the tree, creating scalars as needed. Errors if an intermediate
-/// segment targets a non-mapping node (the override has no parent to attach to).
+/// Set a value at a dotted path in the tree, creating scalars as needed. A numeric segment indexes
+/// into an EXISTING sequence element (e.g. `drivetrain.units.0.source` — a what-if DU swap);
+/// out-of-bounds indices are errors (overrides never grow a list). Errors if an intermediate
+/// segment targets a scalar (the override has no parent to attach to).
 fn set_at_path(
     tree: &mut Tree,
     segments: &[&str],
@@ -258,6 +260,20 @@ fn set_at_path(
     let Some((head, rest)) = segments.split_first() else {
         return Ok(());
     };
+    if let Tree::Seq { items, .. } = tree {
+        let idx: usize = head.parse().map_err(|_| {
+            format!("override segment `{head}` targets a sequence — expected a numeric index")
+        })?;
+        let len = items.len();
+        let item = items.get_mut(idx).ok_or_else(|| {
+            format!("override index `{idx}` is out of bounds (sequence has {len} items)")
+        })?;
+        if rest.is_empty() {
+            *item = value_to_tree(value, source);
+            return Ok(());
+        }
+        return set_at_path(item, rest, value, source);
+    }
     let entries = tree
         .as_map_mut()
         .ok_or_else(|| format!("override target `{head}` has no mapping parent"))?;
