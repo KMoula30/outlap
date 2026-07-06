@@ -18,3 +18,16 @@ live in `ptm/` and `tyr/` siblings).
 
 Copied from the schema test fixtures; the two may diverge intentionally (fixtures serve schema
 tests, these serve demos).
+
+## `tesla_model3_rwd/` — Tesla Model 3 RWD, HV (800 V-class) variant study (1 DU → open diff → rear axle)
+
+- `vehicle.yaml` — Model-3-plausible chassis/mass/aero (spec-sheet values vs documented estimates:
+  see the per-parameter provenance in its `README.md`); constant road-car aero (the degenerate
+  non-mapped case).
+- `ptm/du_{small,medium,large}.ptm.yaml` — three SYNTHETIC Vdc-stacked (`ptm/1.1`) drive-unit
+  sizings (the notebook 07 sensitivity axis), written by `python/tools/gen_model3_powertrain.py`.
+- `battery/pack_800v.battery.yaml` — SYNTHETIC 800 V-class Thevenin pack (the Vdc–SoC coupling is
+  live on this car).
+- `emotor/rear_du.emotor.yaml` — hand-authored lumped machine-thermal network (estimates flagged).
+- `tyr/road.tyr.yaml` — the published Pacejka (2006) 205/60R15 road tyre (documented proxy).
+- `local/` (git-ignored) — where the real PDT imports land; never committed (firewall).

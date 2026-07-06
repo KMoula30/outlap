@@ -14,9 +14,14 @@ double as end-to-end tests of the whole stack.
 | [`04_t0_lap.ipynb`](04_t0_lap.ipynb) | Solver anatomy: acceleration populations, `ds` convergence, determinism, and session-conditions sweeps. |
 | [`05_tyre_mf61.ipynb`](05_tyre_mf61.ipynb) | MF6.1 in depth: load/camber families, the slip-plane force map, and per-channel oracle validation. |
 | [`06_powertrain_pdt.ipynb`](06_powertrain_pdt.ipynb) | The `.ptm` firewall, the PDT importer on synthetic HDF5, the distilled 2-node thermal model, and the battery pack. |
+| [`07_qss_t1.ipynb`](07_qss_t1.ipynb) | **The T1 capstone**: double-track trim, per-wheel loads, setup metrics, the g-g-g-v envelope — then the Model 3 RWD (HV variant) with the live Vdc–SoC coupling + machine-thermal derate, swept across three drive-unit sizings. |
 
 Interactive panels (ipywidgets sliders driving the override API) are live in a running Jupyter;
 each has a static twin so the GitHub-rendered page tells the same story.
+
+`07_qss_t1_local.ipynb` is the capstone's **untracked real-data twin** (git-ignored by name): the
+same Model 3 story on real PDT drive-unit imports and the real 704 V pack. It requires the local
+imports described in `data/vehicles/tesla_model3_rwd/README.md` and is never committed (firewall).
 
 ## Running them
 

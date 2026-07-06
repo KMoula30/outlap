@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Hand-authored LUMPED machine-thermal network for the Model 3 HV-variant rear drive unit —
+# the reduced manual menu (§9.5) with the high-level cooling block. All values ESTIMATED
+# (documented heuristics; see ../README.md): capacities from component mass fractions of the
+# ~82 kg medium DU, conductances at liquid-cooled traction-machine magnitudes.
+# Winding-limited; liquid-jacket cooled; PM rotor temperature-limited (magnets).
+schema: emotor/1.1
+nodes:
+  - { name: winding, role: winding, c_j_per_k: 6500.0, t_warn_c: 150.0, t_max_c: 180.0 }
+  - { name: stator_iron, role: stator_iron, c_j_per_k: 11000.0 }
+  - { name: rotor, role: rotor, c_j_per_k: 5500.0, t_warn_c: 140.0, t_max_c: 170.0 }
+  - { name: housing, role: housing, c_j_per_k: 26000.0 }
+  - { name: coolant, role: coolant }
+  - { name: ambient, role: ambient }
+conductances:
+  - { between: [winding, stator_iron], w_per_k: 160.0 }
+  - { between: [stator_iron, housing], w_per_k: 320.0 }
+  - { between: [housing, ambient], w_per_k: 6.0 } # residual natural convection / radiation
+cooling:
+  ambient_node: ambient
+  jacket:
+    housing_node: housing
+    coolant_node: coolant
+    inlet_c: 45.0
+    flow_rate_lps: 0.40
+    channel_count: 12
+    channel_width_mm: 8.0
+    channel_height_mm: 9.0
+    wetted_area_m2: 0.080
+    fluid: { named: ethylene_glycol_50 }
+  air_gap:
+    between: [stator_iron, rotor]
+    rotor_outer_radius_mm: 65.0
+    gap_mm: 0.8
+    stack_length_mm: 134.0
+loss_routing:
+  - { node: winding, fraction: 0.55 } # of the .ptm total loss (loss_w)
+  - { node: stator_iron, fraction: 0.30 }
+  - { node: rotor, fraction: 0.15 }
+cu_feedback: { nodes: [winding], t_ref_c: 60.0, alpha_per_k: 0.0039 }
+meta:
+  source: estimated
