@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Tesla Model 3 RWD — HV (800 V-class) variant study. Topology = the ev_1du_rwd reference
+# pattern: one drive unit -> open diff -> RL+RR, blended regen braking.
+#
+# Spec-sheet values (mass, wheelbase, track, drag area) are public figures; everything else is
+# a documented ESTIMATE — see README.md for per-parameter provenance. The committed powertrain
+# (drive units + pack) is SYNTHETIC (python/tools/gen_model3_powertrain.py); the real PDT-derived
+# maps stay local and untracked (M3 user decision #7).
+schema: vehicle/1.0
+name: "Tesla Model 3 RWD (HV variant)"
+chassis:
+  mass_kg: 1765.0
+  cg: [1.524, 0.0, 0.45]
+  inertia: [560.0, 2800.0, 3200.0]
+  wheelbase_m: 2.875
+  track_m: [1.58, 1.58]
+aero:
+  # Constant road-car aero (the degenerate non-mapped case). No ride-height/yaw map is shipped —
+  # the placeholder path is deliberately absent (the fixture idiom), so the constant block carries.
+  map: aero/none.parquet
+  axes: []
+  constant:
+    cx_a_m2: 0.51
+    cz_front_a_m2: 0.0
+    cz_rear_a_m2: 0.0
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 38000.0
+    roll_stiffness_share: 0.58
+    roll_center_height_m: 0.06
+  rear:
+    ride_rate_n_per_m: 45000.0
+    roll_stiffness_share: 0.42
+    roll_center_height_m: 0.12
+tires:
+  front: tyr/road.tyr.yaml
+  rear: tyr/road.tyr.yaml
+drivetrain:
+  units:
+    # The MEDIUM sizing (≈203 kW) is the committed default; swap with a what-if override,
+    # e.g. overrides={"drivetrain.units.0.source": "ptm/du_large.ptm.yaml"} (notebook 07).
+    - source: ptm/du_medium.ptm.yaml
+      thermal: emotor/rear_du.emotor.yaml
+      path:
+        - diff: { type: open }
+      wheels: [RL, RR]
+battery:
+  model: rc_pairs
+  params: battery/pack_800v.battery.yaml
+brakes:
+  balance_bar: 0.62
+  abs: true
+  disc:
+    front:
+      thermal_capacity_j_per_k: 26000.0
+      cooling_area_m2: 0.07
+    rear:
+      thermal_capacity_j_per_k: 20000.0
+      cooling_area_m2: 0.05
+  regen_blend:
+    max_regen_frac: 0.6

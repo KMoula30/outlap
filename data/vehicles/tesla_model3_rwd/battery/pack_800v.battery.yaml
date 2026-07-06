@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC 800 V-class Thevenin pack for the Model 3 HV variant study. NOT real PDT data;
+# invented smooth cell curves (firewall; M3 user decision #7). Cell OCV grid ≈2.88–3.68 V →
+# pack ≈634–810 V open-circuit: under low-SoC load the terminal voltage sags BELOW the drive units'
+# 730–850 V Vdc grid, exercising the documented below-grid linear extrapolation.
+# Regenerate the tables with: python python/tools/gen_model3_powertrain.py
+schema: battery/1.0
+model: rc_pairs
+topology:
+  ns: 220
+  np: 1
+capacity:
+  q_pack_ah: 92.0
+  e_pack_wh: 64064.0
+soc_window: [0.05, 0.98]
+ecm:
+  rc_pairs: 1
+  axes:
+    soc: [0.05, 0.20, 0.40, 0.60, 0.80, 1.00]
+    temp_c: [0.000, 25.000, 45.000]
+  tables:
+    # Sidecar next to this YAML (the PDT-importer convention).
+    file: pack_800v.tables.parquet
+    level: cell
+limits:
+  peak_discharge_power_w_vs_soc:
+    soc: [0.05, 0.20, 0.40, 0.60, 0.80, 1.00]
+    power_w: [70000.000, 160000.000, 230000.000, 255000.000, 265000.000, 265000.000]
+  peak_regen_power_w_vs_soc:
+    soc: [0.05, 0.20, 0.40, 0.60, 0.80, 1.00]
+    power_w: [190000.000, 190000.000, 170000.000, 140000.000, 85000.000, 30000.000]
+  cell_v_min: 2.7
+  cell_v_max: 4.2
+  max_c_rate: 4.5
+thermal:
+  mass_kg: 460.0
+  cp_j_per_kgk: 900.0
+  thermal_resistance_k_per_w: 0.02
+  coolant_temp_c: 25.0
+meta:
+  source: synthetic 800 V-class pack (gen_model3_powertrain.py) — ESTIMATED
+  cell: Generic_NMC_800V_class
