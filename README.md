@@ -5,6 +5,10 @@ A parametric vehicle simulator — F1 → GT → passenger car — with a race-s
 planned on top. A Rust core (`crates/`), a Python API (`python/outlap/`, PyO3 + maturin), and
 published JSON Schemas (`schemas/`). Code is AGPL-3.0; the schemas are Apache-2.0.
 
+**New here? Read [`docs/GUIDE.md`](docs/GUIDE.md) — the zero-to-hero user guide.** It assumes no
+vehicle-dynamics background and takes you from "what is a lap simulator" to running, understanding,
+and extending outlap, with the physics, the API, and worked recipes.
+
 The full architecture and specification live in [`docs/HANDOFF.md`](docs/HANDOFF.md); the working
 agreement is in [`CLAUDE.md`](CLAUDE.md).
 
