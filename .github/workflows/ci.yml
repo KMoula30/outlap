@@ -43,6 +43,20 @@ jobs:
       - run: uv run --directory python pyright                            # strict (pyproject config)
       - run: uv run --directory python pytest
       - run: uv run --directory python python -m outlap.schemas --check   # schemas in sync
+
+  notebooks:
+    runs-on: ubuntu-latest
+    # Split out from `python` so the fast rust/pytest feedback isn't gated behind the multi-minute
+    # all-notebooks execution — the two run in parallel. Same release-built extension: g-g-g-v
+    # envelope generation is a seconds-scale cold step in release but minutes in debug.
+    env:
+      MATURIN_PEP517_ARGS: --profile release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable   # uv sync builds the outlap-core extension (maturin)
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --directory python --group notebooks --extra tire-fit
       # Execute every notebook headless: the tour is an end-to-end test of the whole stack,
       # and re-executing keeps the committed outputs from rotting. (Absolute paths: uv's
       # --directory also changes the command's working directory.)
