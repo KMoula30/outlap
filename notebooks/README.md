@@ -5,6 +5,9 @@ Illustrated, executable walkthroughs of outlap. Every number and plot is compute
 Rust core through the `outlap.core` Python bindings — nothing is hard-coded, so the notebooks
 double as end-to-end tests of the whole stack.
 
+These notebooks are the runnable companion to [`docs/GUIDE.md`](../docs/GUIDE.md), the written
+zero-to-hero guide; the guide's chapters map onto the notebook sequence below.
+
 | Notebook | What it covers |
 |---|---|
 | [`00_tour_of_outlap.ipynb`](00_tour_of_outlap.ipynb) | The guided tour of everything. **Start here.** |
