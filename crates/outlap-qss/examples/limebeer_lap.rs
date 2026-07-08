@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sim = Sim::default(); // production 40x25x7 envelope grid
     let t1 = T1Vehicle::assemble(&resolved, &conditions, &vl, false)?;
-    let env = GgvEnvelope::generate(&t1, &sim.envelope, sim.fz_coupling)?;
+    let env = GgvEnvelope::generate(&t1, &sim.envelope, sim.resolved_fz_coupling())?;
     let t0 = T0Vehicle::assemble(&resolved, &conditions, &vl, &T0Options::default())?;
 
     let lap = solve_t0(
@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         resolved.report.resolved_hash.clone(),
         t0.notes().to_vec(),
-        sim.fz_coupling,
+        sim.resolved_fz_coupling(),
         true,
     )?;
 

@@ -603,6 +603,33 @@ pub fn check_sim(
             ));
         }
     }
+    // Split-integrator numerics (transient tiers).
+    if sim.slow_decimation < 1 {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/slow_decimation"),
+            "`slow_decimation` must be >= 1 (the slow clock fires every N fast steps)",
+            None,
+        ));
+    }
+    let fp = &sim.fixed_point;
+    if !(fp.damping > 0.0 && fp.damping <= 1.0) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/fixed_point/damping"),
+            "`fixed_point.damping` must lie in (0, 1] (1.0 = undamped)",
+            None,
+        ));
+    }
+    positive(fp.tol, "tol", "/fixed_point/tol", &s, sources)?;
+    if fp.max_iter < 1 {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/fixed_point/max_iter"),
+            "`fixed_point.max_iter` must be >= 1",
+            None,
+        ));
+    }
     Ok(())
 }
 

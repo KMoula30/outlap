@@ -46,7 +46,8 @@ fn sim_loads_and_defaults() {
     let s = load_sim("sim/qss.sim.yaml", &loader()).unwrap();
     assert_eq!(s.tier, Tier::T1);
     assert_eq!(s.dt_s, 0.001);
-    assert_eq!(s.fz_coupling, FzCoupling::OneStepLag);
+    assert_eq!(s.fz_coupling, Some(FzCoupling::OneStepLag));
+    assert_eq!(s.resolved_fz_coupling(), FzCoupling::OneStepLag);
     assert_eq!(s.raceline.generator, Some(RacelineGenerator::MinCurvature));
     assert!(!s.allow_degraded);
 
@@ -54,6 +55,10 @@ fn sim_loads_and_defaults() {
     let d = outlap_schema::Sim::default();
     assert_eq!(d.envelope.v_points, 40);
     assert_eq!(d.integrator, outlap_schema::sim::Integrator::Heun);
+    // fz_coupling defaults to auto (None); T1 resolves it to one_step_lag.
+    assert_eq!(d.fz_coupling, None);
+    assert_eq!(d.resolved_fz_coupling(), FzCoupling::OneStepLag);
+    assert_eq!(d.slow_decimation, 20);
 }
 
 #[test]

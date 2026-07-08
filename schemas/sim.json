@@ -24,15 +24,30 @@
         "v_points": 40
       }
     },
+    "fixed_point": {
+      "description": "Damped fixed-point iteration knobs for `fz_coupling: fixed_point` (transient tiers). Ignored\nunder `one_step_lag`.",
+      "$ref": "#/$defs/FixedPointSettings",
+      "default": {
+        "damping": 0.5,
+        "max_iter": 3,
+        "tol": 0.0001
+      }
+    },
     "flat_track": {
       "description": "Flat-track analysis mode: zero the track grade, banking, and vertical curvature so the\ng-g-g-v envelope collapses to a flat g-g (the 2-D oracle-comparison mode, e.g. the Limebeer\ncross-check). A recorded simulation setting; the physical track file is left untouched.",
       "type": "boolean",
       "default": false
     },
     "fz_coupling": {
-      "description": "Normal-load algebraic-loop coupling mode (Decision #29).",
-      "$ref": "#/$defs/FzCoupling",
-      "default": "one_step_lag"
+      "description": "Normal-load algebraic-loop coupling mode (Decision #29). `None` (the default) resolves to a\ntier-dependent choice at assembly — `one_step_lag` for the QSS tiers (T0/T1), `fixed_point`\nfor the transient tiers (T2/T3) — via [`Sim::resolved_fz_coupling`]. The *resolved* value is\nrecorded in every result artifact.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FzCoupling"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "integrator": {
       "description": "Fixed-step integrator (transient tiers).",
@@ -49,6 +64,13 @@
     "schema": {
       "description": "Schema version, e.g. `sim/1.0`.",
       "$ref": "#/$defs/SchemaVersion"
+    },
+    "slow_decimation": {
+      "description": "Slow-clock decimation: the split integrator advances the slow states (temperatures, wear,\nSOC, fuel) once every `slow_decimation` fast steps (transient tiers). Slow states evolve on\n10–100 s timescales, so resolving them at the 1 ms fast step is wasteful — the default 20\ngives a 20 ms slow substep at `dt_s = 0.001`. Must be ≥ 1.",
+      "type": "integer",
+      "format": "uint32",
+      "default": 20,
+      "minimum": 0
     },
     "tier": {
       "description": "Solver tier.",
@@ -87,6 +109,33 @@
         "v_points",
         "ax_points",
         "g_normal_points"
+      ]
+    },
+    "FixedPointSettings": {
+      "description": "Damped fixed-point iteration settings for the normal-load algebraic loop under\n`fz_coupling: fixed_point` (HANDOFF §11.2). Each transient step re-solves Fz→forces→accel a few\ntimes, blending the new loads with the previous iterate by `damping` (a relaxation factor in\n`(0, 1]`), stopping when the relative load change falls below `tol` or after `max_iter` sweeps.",
+      "type": "object",
+      "properties": {
+        "damping": {
+          "description": "Relaxation factor blending the new load estimate with the previous iterate, `(0, 1]`\n(1.0 = undamped). Lower values trade convergence speed for robustness near the grip limit.",
+          "type": "number",
+          "format": "double"
+        },
+        "max_iter": {
+          "description": "Maximum fixed-point sweeps per step (2–3 is typical; a hard cap keeps the step bounded).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tol": {
+          "description": "Relative-change convergence tolerance on the normal loads; the sweep stops once every wheel's\n`|ΔF_z| / F_z` falls below this.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "damping",
+        "tol",
+        "max_iter"
       ]
     },
     "FzCoupling": {

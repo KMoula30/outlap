@@ -22,12 +22,25 @@ pub struct Sim {
     /// Fixed integration step, seconds (transient tiers).
     #[serde(default = "default_dt_s")]
     pub dt_s: f64,
-    /// Normal-load algebraic-loop coupling mode (Decision #29).
-    #[serde(default)]
-    pub fz_coupling: FzCoupling,
+    /// Normal-load algebraic-loop coupling mode (Decision #29). `None` (the default) resolves to a
+    /// tier-dependent choice at assembly — `one_step_lag` for the QSS tiers (T0/T1), `fixed_point`
+    /// for the transient tiers (T2/T3) — via [`Sim::resolved_fz_coupling`]. The *resolved* value is
+    /// recorded in every result artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fz_coupling: Option<FzCoupling>,
     /// Fixed-step integrator (transient tiers).
     #[serde(default)]
     pub integrator: Integrator,
+    /// Slow-clock decimation: the split integrator advances the slow states (temperatures, wear,
+    /// SOC, fuel) once every `slow_decimation` fast steps (transient tiers). Slow states evolve on
+    /// 10–100 s timescales, so resolving them at the 1 ms fast step is wasteful — the default 20
+    /// gives a 20 ms slow substep at `dt_s = 0.001`. Must be ≥ 1.
+    #[serde(default = "default_slow_decimation")]
+    pub slow_decimation: u32,
+    /// Damped fixed-point iteration knobs for `fz_coupling: fixed_point` (transient tiers). Ignored
+    /// under `one_step_lag`.
+    #[serde(default)]
+    pub fixed_point: FixedPointSettings,
     /// g-g-g-v envelope resolution (QSS tiers).
     #[serde(default)]
     pub envelope: Envelope,
@@ -48,16 +61,31 @@ pub struct Sim {
 impl Default for Sim {
     fn default() -> Self {
         Self {
-            schema: SchemaVersion::new(crate::schema_name::SIM, crate::SCHEMA_MAJOR, 1),
+            schema: SchemaVersion::new(crate::schema_name::SIM, crate::SCHEMA_MAJOR, 2),
             tier: Tier::default(),
             dt_s: default_dt_s(),
-            fz_coupling: FzCoupling::default(),
+            fz_coupling: None,
             integrator: Integrator::default(),
+            slow_decimation: default_slow_decimation(),
+            fixed_point: FixedPointSettings::default(),
             envelope: Envelope::default(),
             raceline: Raceline::default(),
             allow_degraded: false,
             flat_track: false,
         }
+    }
+}
+
+impl Sim {
+    /// The concrete normal-load coupling mode, resolving the tier-dependent default when
+    /// `fz_coupling` is `None`: `fixed_point` for the transient tiers (T2/T3), `one_step_lag` for the
+    /// QSS tiers (T0/T1). An explicit `fz_coupling` is always honoured as-is (Decision #29).
+    #[must_use]
+    pub fn resolved_fz_coupling(&self) -> FzCoupling {
+        self.fz_coupling.unwrap_or(match self.tier {
+            Tier::T2 | Tier::T3 => FzCoupling::FixedPoint,
+            Tier::T0 | Tier::T1 => FzCoupling::OneStepLag,
+        })
     }
 }
 
@@ -86,6 +114,33 @@ pub enum FzCoupling {
     OneStepLag,
     /// Damped fixed-point iteration to convergence within the step.
     FixedPoint,
+}
+
+/// Damped fixed-point iteration settings for the normal-load algebraic loop under
+/// `fz_coupling: fixed_point` (HANDOFF §11.2). Each transient step re-solves Fz→forces→accel a few
+/// times, blending the new loads with the previous iterate by `damping` (a relaxation factor in
+/// `(0, 1]`), stopping when the relative load change falls below `tol` or after `max_iter` sweeps.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct FixedPointSettings {
+    /// Relaxation factor blending the new load estimate with the previous iterate, `(0, 1]`
+    /// (1.0 = undamped). Lower values trade convergence speed for robustness near the grip limit.
+    pub damping: f64,
+    /// Relative-change convergence tolerance on the normal loads; the sweep stops once every wheel's
+    /// `|ΔF_z| / F_z` falls below this.
+    pub tol: f64,
+    /// Maximum fixed-point sweeps per step (2–3 is typical; a hard cap keeps the step bounded).
+    pub max_iter: u32,
+}
+
+impl Default for FixedPointSettings {
+    fn default() -> Self {
+        Self {
+            damping: 0.5,
+            tol: 1e-4,
+            max_iter: 3,
+        }
+    }
 }
 
 /// Fixed-step integrator (Decision #30 mandates fixed-step in production paths).
@@ -156,4 +211,8 @@ pub enum RacelineGenerator {
 
 fn default_dt_s() -> f64 {
     0.001
+}
+
+fn default_slow_decimation() -> u32 {
+    20
 }

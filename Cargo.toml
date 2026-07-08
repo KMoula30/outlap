@@ -35,6 +35,10 @@ bytes = "1.10.1"
 # Test-only.
 proptest = "1.6.0"
 dhat = "0.3.3"
+# CI reference integrator for the split-stepper O(dt²) convergence test (HANDOFF §11.2). Dev-only,
+# consumed by ONE crate — the `outlap-conformance` test crate — non-wasm; default features are
+# faer + nalgebra (no sundials/LLVM). Licence MIT/Apache-2.0.
+diffsol = "0.16.0"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

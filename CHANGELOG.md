@@ -6,6 +6,44 @@ All notable changes to outlap are documented here. This project follows
 
 ## [Unreleased]
 
+Milestone **M4** groundwork — the block/bus scaffolding and the fixed-step split integrator the
+transient **T2** tier is built on. No solver behaviour changes yet: T2 still raises
+`tier_not_implemented`; the QSS (T0/T1) paths are untouched.
+
+### Added
+
+- **core**: **Block/Bus/SoA scaffolding** (HANDOFF §6.2, Decision #39). A `Block` trait
+  (`equilibrium` / `derivatives` / `slow_derivatives`, pure and generic over `f32`/`f64`) with
+  statically declared ports; a flat struct-of-arrays signal `Bus` with a fixed compile-time core
+  channel set (scalars + per-wheel groups) plus an interned dynamic named-channel region (interning
+  at assembly only, never in the loop); a frozen fast-state registry with **14-DOF-ready** chassis
+  slots (T2 integrates the first ten; heave/pitch/roll + four-unsprung reserved for T3) and a
+  per-wheel relaxation region; `StateView`/`DerivView`/`SlowStateView`/`SlowDerivView` over the SoA
+  buffers with an explicit batch dimension; a topological-sort assembler that fixes the
+  `sense → control → actuate → integrate` phase order and linearises intra-phase data dependencies
+  (cyclic loops are a hard error), deterministic by registration-index tie-break; enum dispatch
+  (`CoreBlock`, no `dyn` in the loop) with a stubbed suspension block for the T3 groundwork.
+- **core**: **fixed-step split integrator** (HANDOFF §11.2, Decision #30). A Butcher-tableau-generic
+  explicit RK stepper (`SimArena`; Heun/RK2 default, RK4 selectable) with zero-allocation stepping;
+  the shared **exact-exponential** relaxation primitive (`relax::exact_exponential` — the one
+  implementation `outlap_tire::relax_step` now delegates to); a **semi-implicit Euler** slow-state
+  substep (`relax::semi_implicit_decay`) on a decimated `SlowClock`; and a step-boundary
+  `EventQueue` with a single linear `back_interpolate` crossing (no root-finding). An `O(dt²)`
+  convergence test pins the stepper against a `diffsol` BDF reference; determinism is bit-exact.
+  Theory pages `docs/theory/block-bus.md` and `docs/theory/integrator.md`.
+- **qss**: exported the T1 quasi-static **load-transfer algebra** (`load_transfer`, `split_axle`,
+  `LoadTransferGeometry`) so the forthcoming T2 chassis block derives per-wheel normal loads from
+  the identical expressions (HANDOFF §6.1). Behaviour-preserving refactor: the trim solver now calls
+  the free function.
+
+### Changed
+
+- **schema** (`sim/1.1 → 1.2`, MINOR): `fz_coupling` becomes optional (`null` = tier-dependent
+  auto — `one_step_lag` for T0/T1, `fixed_point` for T2/T3, resolved and recorded at assembly);
+  new `slow_decimation` (slow-clock decimation factor, default 20) and `fixed_point`
+  (`damping`/`tol`/`max_iter`) knobs for the split integrator. Additive JSON-Schema change with
+  miette-spanned semantic validation; the pydantic-mirror validation is unchanged (still deferred).
+
 ## [0.2.0] - 2026-07-08
 
 Milestone **M3** — the full quasi-steady-state **T1** tier. v0.2 turns the T0 point-mass solver of

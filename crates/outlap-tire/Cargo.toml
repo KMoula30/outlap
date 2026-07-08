@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 num-traits = { workspace = true, features = ["libm"] }
 thiserror = { workspace = true }
+# The exact-exponential relaxation update is one shared primitive in outlap-core (integrator home,
+# Decision #2); relax_step floors σ and delegates to it. outlap-core is wasm-clean (num-traits only).
+outlap-core = { path = "../outlap-core" }
 # default-features = false keeps outlap-tire wasm-clean; tests bring the std FsLoader.
 outlap-schema = { path = "../outlap-schema", default-features = false }
 
