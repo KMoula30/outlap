@@ -6,10 +6,66 @@ All notable changes to outlap are documented here. This project follows
 
 ## [Unreleased]
 
-Milestone **M3** (full QSS/T1 tier → v0.2) — in progress, not yet tagged. (M2 tyre model landed.)
+## [0.2.0] - 2026-07-08
+
+Milestone **M3** — the full quasi-steady-state **T1** tier. v0.2 turns the T0 point-mass solver of
+v0.1 into a double-track car: a per-station trim solve produces per-wheel loads, slips, and forces
+and a **g-g-g-v envelope** that the fast T0 path consumes; powertrains flow through the drivetrain
+topology graph; an N-node machine-thermal network and a battery model (with Vdc–SoC coupling)
+advance as slow states and cap the traction limit. Ships the Perantoni & Limebeer cross-check, the
+TUMFTM track library, a Tesla Model 3 HV-variant reference car, and a full user guide. (Also
+folds in the M2 tyre model: MF6.1, the brush model, the `.tir` codec, and the fitting pipeline.)
 
 ### Added
 
+- **core**: **N-D gridded maps + Parquet sidecar reader** — `GriddedMapN`, a rectilinear N-D
+  tensor-product map built on the one shared monotone cubic Hermite (Decision #30): C¹, analytic
+  partials for Newton, NaN-cell masking (clamp-to-valid-hull), and a per-axis out-of-domain mode
+  (`clamp` default, or `linear` extrapolation from the boundary derivative). Binary sidecars load
+  through `SourceLoader::load_bytes` (wasm-clean: bytes in, no filesystem) and are decoded from
+  Parquet at assembly time only, never in the loop.
+- **qss**: **T1 double-track trim solver** — a zero-allocation, panic-free damped-Newton solve of
+  the quasi-static force/moment balance at each `(v, aₓ, a_y)`: unknowns are steer, body slip,
+  yaw rate, throttle/brake split, and the four vertical loads; residuals close the X/Y/N balance,
+  quasi-static load transfer (geometric via roll-centre heights + anti-dive/anti-squat, elastic via
+  roll-stiffness distribution), and per-wheel `TireModel::forces`. `fz_coupling: one_step_lag`
+  (default) | `fixed_point` (Decision #29) is recorded in every result. Emits setup metrics
+  (understeer gradient, aero balance vs speed); infeasible points become envelope boundaries, never
+  a panic. Theory page `docs/theory/t1-trim.md`.
+- **qss**: **ride-height/yaw aero map + platform equilibrium** — the trim consumes an `aero.map`
+  (`{C_z,f, C_z,r, C_x} = f(hꜰ, hᵣ, yaw[, DRS])`) with a damped fixed-point ride-height solve; yaw
+  sensitivity makes the g-g asymmetric mid-corner. A passenger car degenerates to `aero.constant`.
+  Ships a synthetic `data/vehicles/f1_2026/aero/f1_2026.parquet` anchored to the PL2014 aero at
+  equilibrium ride heights (generator `python/tools/gen_f1_aero.py`, every assumption documented).
+- **qss**: **topology powertrain in the traction limit** — traction/braking limits flow through the
+  drivetrain graph: per-unit `.ptm` torque/efficiency maps, gearbox ratios + efficiency, static
+  front/rear and left/right splits, and differentials (open/locked/LSD/solid). ICE `.ptm` maps
+  (torque + optional fuel-flow) are consumed for energy accounting (fuel mass constant in M3). A
+  PDT round-trip gate reproduces spot efficiencies to 1e-6 through the real `GriddedMapN` path.
+  Theory page `docs/theory/qss-powertrain.md`.
+- **thermal**: **N-node machine thermal network + derating** (`outlap-thermal`) — a data-declared
+  lumped-parameter thermal network (LPTN) integrated per QSS segment with a zero-allocation,
+  A-stable Crank–Nicolson step; pinned ambient, optional coolant node, copper-resistance feedback,
+  and a linear 1→0 torque derate across `T_warn→T_max` taken as the min over rated nodes. The PDT
+  heat-transfer correlations (air-gap film, end-cavity/shaft convection, Churchill–Chu, Gnielinski)
+  are re-authored clean-room from the published forms — a deliberate, narrow amendment of the
+  powertrain firewall for the author-owned thermal model only (Decision #25). Two authoring tiers
+  (hand-authored *lumped* with mass-heuristic fills, or *detailed* aggregated from a PDT import),
+  one integrator. Theory page `docs/theory/machine-thermal.md`.
+- **schema/qss**: **battery model + Vdc–SoC coupling** — a Thévenin battery (`battery/1.0`: OCV/R0/
+  R1/tau1 vs SoC & temperature) evaluated quasi-statically per segment, with SoC advancing as a
+  second slow state alongside the machine temperatures. When a pack is present and the drive-unit
+  `.ptm` carries a Vdc axis, the maps (torque, efficiency, and the thermal-loss lookup) are
+  evaluated at the pack's SoC-dependent terminal voltage; voltages outside the Vdc grid are
+  linearly extrapolated along the Vdc axis with physical floors (τ ≥ 0, 0 < η ≤ 1) and the
+  extrapolated band is recorded. The thermal derate and the battery peak-power limit compose as
+  `min` caps on the traction ceiling.
+- **qss**: **g-g-g-v envelope + Decision #31 corrections** — a T1 trim over the `sim.envelope` grid
+  (40×25×7 default, Lovato & Massaro polar form) builds a base table `gg(v, aₓ, g_normal)` stored
+  as a `GriddedMapN`; T0 evaluates it, corrected by separable multiplicative sensitivities
+  (∂/∂μ_tire, ∂/∂mass, ∂/∂ClA) that are identity at the reference state and CI-gated against full
+  T1 re-solves. The envelope is a first-class returnable object. Theory page
+  `docs/theory/ggv-envelope.md`.
 - **qss/py**: **`sim.tier` dispatch + result surface** — `sim.tier` now selects the lap solver
   (`t0` = point-mass velocity profile on the corrected g-g-g-v envelope; `t1` = the same profile
   plus a per-station re-trim emitting per-wheel loads/slips/forces + setup metrics; `t2`/`t3` return
@@ -21,8 +77,13 @@ Milestone **M3** (full QSS/T1 tier → v0.2) — in progress, not yet tagged. (M
   `solve_lap_dataset` gain `tier=` and `sim=` arguments.
 - **validation**: **flat-track mode + Limebeer cross-check** — a recorded `sim.flat_track` analysis
   mode zeroes track grade/banking/vertical curvature so the envelope collapses to a flat g-g, and
-  the QSS lap is gated within 1 % of the Perantoni & Limebeer 2014 F1 @ Catalunya oracle (reference
-  car #1 parameterised to the paper; comparison figure + golden parquet laps; QSS-lap perf gate).
+  the transcribed Perantoni & Limebeer 2014 F1 (reference car #1) is cross-checked at Catalunya.
+  Per Decision #48 the CI gates what the committed track geometry honestly supports — **top speed
+  within 1 %** (87.8 vs ≈88 m/s) and the **slowest-corner apex within 5 %** — while the lap-time
+  delta (92.36 s vs the paper's 82.43 s) is *recorded with a term-by-term decomposition, not
+  gated*, because a QSS solver on a fixed minimum-curvature line structurally cannot match a
+  transient optimal-control lap that co-optimises its own line; the ≤ 1 % lap-time gate moves to
+  M4. Comparison figure + golden parquet laps + a QSS-lap perf gate (≤ 50 ms).
 - **schema** (`sim/1.0 → 1.1`, MINOR): optional `flat_track` flag on `sim` documents (additive JSON
   Schema change; default `false`).
 - **tire**: physical **brush model** (Pacejka ch. 3, parabolic pressure) — a first-principles
@@ -73,6 +134,31 @@ Milestone **M3** (full QSS/T1 tier → v0.2) — in progress, not yet tagged. (M
 - **python**: ruff (+import-sort/pyupgrade/bugbear) and **pyright strict** configured in
   `pyproject.toml` with curated allows at the untyped h5py/scipy boundary; CI python job now
   gates `ruff check`, `ruff format --check`, and `pyright`, and syncs `--extra tire-fit`.
+- **schema**: **`emotor/1.1`** (any-N thermal nodes + roles, constant/convection edges, a
+  raw-scalar cooling block the assembly expands into convection edges, parametric loss routing),
+  **`battery/1.0`** (new — pack config + OCV/R0/R1/tau1 tables), and the **`.ptm` optional `vdc_v`
+  axis** (`ptm/1.x` MINOR) plus per-component `loss_breakdown/*` columns. All additive; JSON
+  Schemas regenerated from the Rust `schemars` types and the Python mirror updated.
+- **tracks**: **TUMFTM importer + 26-circuit library** — `python -m outlap.importers.tumftm_track`
+  converts the TU München racetrack-database centre lines to outlap's 8-column format (RIGHT/LEFT
+  width columns mapped by name; resampled to a fixed ≈5 m step; flat `z=0`, `banking=0`,
+  `grip_scale=1`, `accuracy_class: C`). Vendors 25 circuits (Catalunya, Monza, Spa, Silverstone,
+  Suzuka, the Nürburgring **GP** layout, …) alongside the 3D `catalunya_osm` reference. **LGPL-3.0
+  data addition**: upstream licence shipped verbatim with the required per-track attribution.
+- **vehicles**: **Tesla Model 3 RWD (HV 800 V-class variant study)** — a Model-3-plausible chassis/
+  mass/aero road car (≈1765 kg, constant CdA/ClA) on the `ev_1du_rwd` topology, with a **synthetic**
+  800 V-class drive-unit stack (three sizings: `du_small`/`du_medium`/`du_large`), an 800 V pack,
+  and a hand-authored `.emotor` LPTN — chosen so the Vdc–SoC coupling is live on a road car. Every
+  estimated parameter surfaces in the loaded-model report (warning-clean); the real PDT-derived
+  imports stay local/untracked (firewall). README documents per-parameter provenance.
+- **notebooks**: **`07_qss_t1.ipynb`** — the T1 capstone (trim solve, per-wheel loads on the 3D
+  ribbon, setup metrics, the returnable g-g-g-v envelope, machine temperatures) on the F1 car, then
+  the Model 3 across the three synthetic drive-unit sizings. CI-executed on synthetic data; the
+  real-data twin stays untracked.
+- **docs**: **`docs/GUIDE.md`** — a 17-chapter zero-to-hero user guide (architecture, the input
+  quartet, file formats, the physics of every tier, the full Python API, importers, the data
+  library, validation, worked recipes, limitations, glossary, FAQ). Linked from `README.md` and
+  `notebooks/README.md`.
 
 ## [0.1.0] - 2026-07-03
 
@@ -113,4 +199,5 @@ producing the first lap time on Circuit de Barcelona-Catalunya. Plus the PDT HDF
 
 - Cargo workspace bootstrap; AGPL-3.0 code, Apache-2.0 schemas; `wasm32-unknown-unknown` built in CI.
 
+[0.2.0]: https://github.com/KMoula30/outlap/releases/tag/v0.2.0
 [0.1.0]: https://github.com/KMoula30/outlap/releases/tag/v0.1.0

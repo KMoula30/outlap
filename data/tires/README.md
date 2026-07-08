@@ -15,12 +15,12 @@ and minimal (`crates/outlap-schema/tests/fixtures/tyr/`), per the working agreem
 |---|---|---|---|
 | [`pacejka_2006_205_60r15/`](pacejka_2006_205_60r15/) | 205/60R15 91V passenger car | Pacejka, *Tyre and Vehicle Dynamics*, 2nd ed. (2006), Table A3.1 | The book's worked-example car tyre; doubles as the MF6.1 validation tyre. 2nd-edition set: no inflation-pressure (`PP*`) terms; `Mx ≡ 0`; `My` via `qsy1`. |
 | [`roborace_devbot_mf52/`](roborace_devbot_mf52/) | Roborace DevBot "sport focused road tire" | TUMFTM Open-Car-Dynamics (Apache-2.0), pinned commit `0a92c686` | MF5.2 set mapped to MF6.1 with a per-coefficient table in its README (camber `PHY3` folded into `PKY6`; no pressure model ⇒ `dpi ≡ 0`; `Mz ≡ Mx ≡ 0`). |
+| [`limebeer_2014_f1/`](limebeer_2014_f1/) | Perantoni & Limebeer 2014 reference F1 | Perantoni & Limebeer, *Optimal control for a Formula One car with variable parameters*, VSD 52(5), 2014 (Appendix A + Table 3) | MF6.1 re-expression of the paper's load-linear peak-μ similarity model, with per-coefficient provenance in its README (μ(Fz) maps exactly onto `PDX*`/`PDY*`; `PK*` fitted numerically to the paper's peak-slip locations; `Mz ≡ Mx ≡ 0`). Reference car #1 for the validation cross-check (`docs/validation/`). |
 
-A Formula One reference tyre is deferred: the planned Perantoni & Limebeer (2014) source uses a
-reduced load-interpolated similarity model (no MF coefficient families), and its parameter
-appendix is not in the open-access manuscript — deriving an MF6.1 set from it would be a
-reconstruction, not a transcription. It joins if/when a legitimately-published MF6.1-compatible
-F1-class set is available.
+Because the paper's tyre model is a reduced load-interpolated similarity form (not an MF
+coefficient set), `limebeer_2014_f1/` is a documented **re-expression** in MF6.1 form rather than a
+verbatim transcription — every coefficient's derivation is tabulated in its README, and it is
+clean-room (no third-party source code consulted).
 
 ## Blocks that aren't published
 
