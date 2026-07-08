@@ -16,10 +16,29 @@
     clippy::similar_names
 )]
 
+pub mod assembler;
+pub mod block;
+pub mod bus;
 pub mod gridmap;
+pub mod integrator;
 pub mod interp;
+pub mod relax;
 pub mod spline;
+pub mod state;
 
+pub use assembler::{assemble, AssemblyError, BlockSpec, Schedule};
+pub use block::{Block, CoreBlock, Phase, Ports, SuspensionStub};
+pub use bus::{
+    core_channel_count, Bus, ChannelId, ChannelInterner, CoreSignal, WheelSignal, WHEELS,
+};
 pub use gridmap::{EvalFlags, GridMapError, GriddedMapN, GriddedTable, OutOfDomain, MAX_DIMS};
+pub use integrator::{
+    back_interpolate, ButcherTableau, EventQueue, RkMethod, ScheduledEvent, SimArena,
+};
 pub use interp::{InterpError, MonotoneCubic};
+pub use relax::{exact_exponential, semi_implicit_decay, SlowClock};
 pub use spline::{CubicSpline, SplineError};
+pub use state::{
+    fast_slot_count, ChassisState, DerivView, RelaxState, SlowDerivView, SlowStateView,
+    StateLayout, StateView,
+};

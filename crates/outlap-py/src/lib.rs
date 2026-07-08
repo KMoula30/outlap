@@ -921,15 +921,16 @@ fn cached_envelope(
     conditions: &Conditions,
 ) -> PyResult<GgvEnvelope> {
     let e = &sim_cfg.envelope;
+    let coupling = sim_cfg.resolved_fz_coupling();
     let cond = serde_json::to_string(conditions).map_err(err)?;
     let key = format!(
         "{resolved_hash}|{sidecar_fp:016x}|{cond}|{}x{}x{}|{:?}",
-        e.v_points, e.ax_points, e.g_normal_points, sim_cfg.fz_coupling
+        e.v_points, e.ax_points, e.g_normal_points, coupling
     );
     if let Some(env) = ENV_CACHE.lock().expect("env cache mutex").get(&key) {
         return Ok(env.clone());
     }
-    let env = GgvEnvelope::generate(t1v, e, sim_cfg.fz_coupling).map_err(err)?;
+    let env = GgvEnvelope::generate(t1v, e, coupling).map_err(err)?;
     ENV_CACHE
         .lock()
         .expect("env cache mutex")
@@ -1040,7 +1041,7 @@ fn solve_lap(
                     line,
                     hash,
                     notes,
-                    sim_cfg.fz_coupling,
+                    sim_cfg.resolved_fz_coupling(),
                     sim_cfg.flat_track,
                 )
                 .map_err(err)?
@@ -1054,7 +1055,7 @@ fn solve_lap(
                     line,
                     hash,
                     notes,
-                    sim_cfg.fz_coupling,
+                    sim_cfg.resolved_fz_coupling(),
                     sim_cfg.flat_track,
                 )
                 .map_err(err)?

@@ -582,35 +582,38 @@ impl T1Vehicle {
         }
     }
 
+    /// Mass and suspension geometry this vehicle contributes to the shared [`load_transfer`] algebra.
+    fn load_transfer_geometry(&self) -> LoadTransferGeometry {
+        LoadTransferGeometry {
+            mass_kg: self.mass_kg,
+            wheelbase_m: self.wheelbase_m,
+            a_f: self.a_f,
+            b_r: self.b_r,
+            t_f: self.t_f,
+            t_r: self.t_r,
+            h_cg: self.h_cg,
+            h_ra: self.h_ra,
+            rc_f: self.rc_f,
+            rc_r: self.rc_r,
+            roll_share_f: self.roll_share_f,
+            roll_share_r: self.roll_share_r,
+        }
+    }
+
     /// Quasi-static normal-load prediction `[FL, FR, RL, RR]` from the load-transfer model, given the
     /// effective per-axle downforce terms `qz_f`/`qz_r` (`½·ρ·C_z·A`) at this operating point.
+    /// Delegates to the crate-exported [`load_transfer`] free function so the transient (T2) chassis
+    /// block evaluates the identical expressions (HANDOFF §6.1).
     fn load_transfer(&self, inp: &TrimInput, ax: f64, ay: f64, qz_f: f64, qz_r: f64) -> [f64; 4] {
-        let m = self.mass_kg;
-        let l = self.wheelbase_m;
-        let g = inp.g_normal;
-        let v2 = inp.v * inp.v;
-        // Static + downforce, per axle.
-        let front_total = m * g * (self.b_r / l) + qz_f * v2;
-        let rear_total = m * g * (self.a_f / l) + qz_r * v2;
-        // Longitudinal (pitch) transfer: rear gains under forward acceleration.
-        let dfz_x = m * ax * self.h_cg / l;
-        // Lateral transfer per axle: geometric (roll-centre) + elastic (roll-stiffness share).
-        let big_h = self.h_cg - self.h_ra; // sprung CG height above the roll axis
-        let m_roll = m * ay * big_h;
-        let dfz_y_f = (m * ay * (self.b_r / l) * self.rc_f) / self.t_f
-            + self.roll_share_f * m_roll / self.t_f;
-        let dfz_y_r = (m * ay * (self.a_f / l) * self.rc_r) / self.t_r
-            + self.roll_share_r * m_roll / self.t_r;
-        // Axle vertical load after pitch transfer (rear gains under +a_x).
-        let front_axle = front_total - dfz_x;
-        let rear_axle = rear_total + dfz_x;
-        // Split each axle left/right by its lateral transfer (a_y > 0 loads the outside/right
-        // wheel). At wheel-lift the lifted wheel floors at 0 and the grounded wheel carries the
-        // whole axle — never more than the axle can bear (keeps the g-g boundary from becoming
-        // optimistic; ΣF_z stays weight + downforce).
-        let (fl, fr) = split_axle(front_axle, dfz_y_f);
-        let (rl, rr) = split_axle(rear_axle, dfz_y_r);
-        [fl, fr, rl, rr]
+        load_transfer(
+            &self.load_transfer_geometry(),
+            inp.v,
+            inp.g_normal,
+            ax,
+            ay,
+            qz_f,
+            qz_r,
+        )
     }
 
     /// Per-wheel longitudinal slip `κ_i` from the controls `(s, w)`. Under drive (`s ≥ 0`) the driven
@@ -758,10 +761,83 @@ fn clamp_state(z: &mut [f64; N]) {
     }
 }
 
+/// Mass and suspension geometry for the quasi-static [`load_transfer`] model (§7.5). Shared by the
+/// T1 trim solve and the T2 chassis block so both tiers derive per-wheel normal loads from the
+/// identical expressions (HANDOFF §6.1: one vehicle description, four derived views).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoadTransferGeometry {
+    /// Total mass, kg.
+    pub mass_kg: f64,
+    /// Wheelbase `L = a_f + b_r`, m.
+    pub wheelbase_m: f64,
+    /// CG-to-front-axle distance `a`, m.
+    pub a_f: f64,
+    /// CG-to-rear-axle distance `b`, m.
+    pub b_r: f64,
+    /// Front track width, m.
+    pub t_f: f64,
+    /// Rear track width, m.
+    pub t_r: f64,
+    /// CG height above the ground, m.
+    pub h_cg: f64,
+    /// Roll-axis height directly under the CG, m.
+    pub h_ra: f64,
+    /// Front roll-centre height, m.
+    pub rc_f: f64,
+    /// Rear roll-centre height, m.
+    pub rc_r: f64,
+    /// Front axle share of total roll stiffness, `0..1`.
+    pub roll_share_f: f64,
+    /// Rear axle share of total roll stiffness, `0..1`.
+    pub roll_share_r: f64,
+}
+
+/// Quasi-static per-wheel normal loads `[FL, FR, RL, RR]` (N) from static weight + downforce and the
+/// pitch/roll load-transfer model (§7.5), at speed `v` (m/s), apparent gravity `g_normal` (m/s²),
+/// longitudinal/lateral accelerations `ax`/`ay` (m/s²), and per-axle downforce terms `qz_f`/`qz_r`
+/// (`½·ρ·C_z·A`). This is the shared algebra the T1 trim and the T2 chassis block both call.
+#[must_use]
+pub fn load_transfer(
+    geom: &LoadTransferGeometry,
+    v: f64,
+    g_normal: f64,
+    ax: f64,
+    ay: f64,
+    qz_f: f64,
+    qz_r: f64,
+) -> [f64; 4] {
+    let m = geom.mass_kg;
+    let l = geom.wheelbase_m;
+    let v2 = v * v;
+    // Static + downforce, per axle.
+    let front_total = m * g_normal * (geom.b_r / l) + qz_f * v2;
+    let rear_total = m * g_normal * (geom.a_f / l) + qz_r * v2;
+    // Longitudinal (pitch) transfer: rear gains under forward acceleration.
+    let dfz_x = m * ax * geom.h_cg / l;
+    // Lateral transfer per axle: geometric (roll-centre) + elastic (roll-stiffness share).
+    let big_h = geom.h_cg - geom.h_ra; // sprung CG height above the roll axis
+    let m_roll = m * ay * big_h;
+    let dfz_y_f =
+        (m * ay * (geom.b_r / l) * geom.rc_f) / geom.t_f + geom.roll_share_f * m_roll / geom.t_f;
+    let dfz_y_r =
+        (m * ay * (geom.a_f / l) * geom.rc_r) / geom.t_r + geom.roll_share_r * m_roll / geom.t_r;
+    // Axle vertical load after pitch transfer (rear gains under +a_x).
+    let front_axle = front_total - dfz_x;
+    let rear_axle = rear_total + dfz_x;
+    // Split each axle left/right by its lateral transfer (a_y > 0 loads the outside/right wheel). At
+    // wheel-lift the lifted wheel floors at 0 and the grounded wheel carries the whole axle — never
+    // more than the axle can bear (keeps the g-g boundary from becoming optimistic; ΣF_z stays
+    // weight + downforce).
+    let (fl, fr) = split_axle(front_axle, dfz_y_f);
+    let (rl, rr) = split_axle(rear_axle, dfz_y_r);
+    [fl, fr, rl, rr]
+}
+
 /// Split an axle's vertical load `total` left/right by the lateral transfer `transfer` (`+` ⇒ the
 /// right wheel gains). Floors each wheel at 0 and never exceeds the axle load: at wheel-lift all of
 /// the (non-negative) axle load goes to the grounded wheel. Returns `(left, right)`.
-fn split_axle(total: f64, transfer: f64) -> (f64, f64) {
+#[must_use]
+pub fn split_axle(total: f64, transfer: f64) -> (f64, f64) {
     let total = total.max(0.0);
     let left = total * 0.5 - transfer;
     let right = total * 0.5 + transfer;

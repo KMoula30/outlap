@@ -31,13 +31,14 @@ pub const SIGMA_FLOOR_M: f64 = 1e-3;
 /// `|V_x|` (the caller passes `|V_x|.max(VXLOW)` so standstill still relaxes), `dt` the step (s),
 /// and `sigma` the relaxation length (m, floored at [`SIGMA_FLOOR_M`]). Returns the new lagged
 /// slip. Contracting toward `x_ss` for every `dt ≥ 0`; exact, so two half-steps equal one full step.
+///
+/// This floors `σ` and delegates to the one shared exact-exponential primitive
+/// [`outlap_core::relax::exact_exponential`] (the split integrator's relaxation channel), so the tire
+/// lag and the transient stepper cannot drift apart.
 pub fn relax_step<T: Float>(x: T, x_ss: T, v_abs: T, dt: T, sigma: T) -> T {
-    let zero = T::zero();
     let floor = T::from(SIGMA_FLOOR_M).unwrap_or_else(T::zero);
     let sigma = sigma.max(floor);
-    // exp(−|V|·dt/σ) ∈ (0, 1] for |V|, dt ≥ 0 — a pure contraction toward x_ss.
-    let decay = (-(v_abs.max(zero) * dt.max(zero)) / sigma).exp();
-    x_ss + (x - x_ss) * decay
+    outlap_core::relax::exact_exponential(x, x_ss, v_abs, dt, sigma)
 }
 
 /// Which route supplied a relaxation length (recorded for the loaded-model report).

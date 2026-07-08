@@ -1,0 +1,21 @@
+[package]
+name = "outlap-conformance"
+version = "0.2.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Test-only crate: cross-checks outlap solvers against reference integrators. It is the SINGLE home
+# for the non-wasm `diffsol` dev-dependency (HANDOFF §11.2), kept out of the wasm-clean solver crates
+# and away from their process-global dhat allocation gates.
+
+[dependencies]
+
+[dev-dependencies]
+outlap-core = { path = "../outlap-core" }
+# The split-stepper convergence reference (BDF/ESDIRK). Dev-only + non-wasm; default features are
+# faer + nalgebra (no sundials/LLVM). Licence MIT/Apache-2.0.
+diffsol = { workspace = true }
+
+[lints]
+workspace = true

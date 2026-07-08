@@ -49,8 +49,9 @@ pub use qss::{
 pub use result::{LapResult, LineDescriptor, T0Workspace};
 pub use solver::{solve_into, solve_into_ggv, solve_into_ggv_scaled, solve_lap, solve_lap_ggv};
 pub use t1::{
-    AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint, GgvEnvelope, MachineThermal, Pack,
-    PackState, PrimaryDiff, StepOut, T1Powertrain, T1Vehicle, TrimInput, TrimOutcome, TrimState,
+    load_transfer, split_axle, AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint,
+    GgvEnvelope, LoadTransferGeometry, MachineThermal, Pack, PackState, PrimaryDiff, StepOut,
+    T1Powertrain, T1Vehicle, TrimInput, TrimOutcome, TrimState,
 };
 pub use vehicle::{T0Options, T0Vehicle};
 
