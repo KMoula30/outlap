@@ -6,11 +6,35 @@ All notable changes to outlap are documented here. This project follows
 
 ## [Unreleased]
 
-Milestone **M4** groundwork — the block/bus scaffolding and the fixed-step split integrator the
-transient **T2** tier is built on. No solver behaviour changes yet: T2 still raises
-`tier_not_implemented`; the QSS (T0/T1) paths are untouched.
+Milestone **M4** groundwork — the block/bus scaffolding, the fixed-step split integrator, and the
+transient **T2** physics blocks + lap-orchestration skeleton. No change to the Python solver surface
+yet: `solve_lap` still raises `tier_not_implemented` for T2 (the Python dispatch is a later PR); the
+QSS (T0/T1) paths are untouched.
 
 ### Added
+
+- **vehicle**: the **T2 physics blocks** (HANDOFF §6.1; Perantoni & Limebeer 2014; Rowold 2023;
+  Pacejka 2012). A curvilinear 3-D-road-frame **chassis RHS** for `[s, n, ψ_rel, v_x, v_y, r, ω₁..₄]`
+  (planar rigid body + four wheel spins + Frenet progress; grade/banking rotate gravity; `1−nκ`
+  singularity + edge handling; trajectory reconstructed from the integrated `(s, n)`), plus the
+  `Aero`, `LoadTransfer` (reusing the exported T1 algebra — same per-wheel `F_z` as T1), and `Tire`
+  (contact-patch slip → force with relaxation-lagged slip) blocks, and **placeholder** `Driver` /
+  `Powertrain` control blocks (superseded by the MacAdam driver in a later PR). The chassis EOM is
+  verified against a **SymPy Kane's-method derivation to 1e-12** (`docs/derivations/`, Decision #32):
+  CI re-executes the notebook, regenerates the committed RHS fixture, and fails on any drift. Theory
+  page `docs/theory/transient_chassis.md`; property tests for ISO 8855 signs, flat-track
+  degeneration, wheel spin-up, and the frame singularity.
+- **transient**: the **lap-orchestration skeleton** (HANDOFF §11.2). `TransientSolver` assembles the
+  block set, runs the split integrator (exact-exponential relaxation sub-step → RK sweep, resolved
+  `fz_coupling` one-step-lag / fixed-point), and emits a time-indexed `TransientLap`; a zero-alloc
+  **line table** (`n_ref(s)`, `κ_ref(s)`, `v_ref(s)`, road geometry, world-reconstruction geometry)
+  built on the one shared monotone cubic Hermite; the entry point **receives** the QSS artifacts
+  (never computes/caches them → wasm-clean). Property tests: assembler-order determinism, bit-exact
+  reproducibility, relaxation convergence, coastdown drag decel, step-steer yaw sign/magnitude,
+  friction-circle containment, and a closed-loop skidpad lap (`--example transient_lap`).
+- **tire**: `TireModel::unloaded_radius` accessor (the T2 wheel-spin DOF needs the free radius);
+  re-verified the provisional relaxation-length (`σ_κ`, `σ_α`) formulas against Pacejka 2012 §7.2/8.5
+  — see `docs/theory/transient_chassis.md`.
 
 - **core**: **Block/Bus/SoA scaffolding** (HANDOFF §6.2, Decision #39). A `Block` trait
   (`equilibrium` / `derivatives` / `slow_derivatives`, pure and generic over `f32`/`f64`) with

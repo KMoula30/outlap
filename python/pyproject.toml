@@ -58,6 +58,15 @@ notebooks = [
     "nbclient>=0.10.0",
     "nbformat>=5.10.0",
 ]
+# Symbolic EOM derivation (Decision #32): the SymPy Kane notebook under docs/derivations/ that
+# regenerates the committed RHS fixture the Rust 1e-12 test checks. Kept out of the default install;
+# the CI python job syncs it to re-execute the notebook and git-diff the fixture.
+derivations = [
+    "sympy>=1.13",
+    "ipykernel>=6.29.0",
+    "nbclient>=0.10.0",
+    "nbformat>=5.10.0",
+]
 
 [tool.ruff]
 # Existing code is formatted at ruff's default 88; keep it (only comments/strings run longer).

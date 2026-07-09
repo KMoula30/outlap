@@ -5,6 +5,18 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+num-traits.workspace = true
+outlap-core = { path = "../outlap-core" }
+outlap-tire = { path = "../outlap-tire" }
+outlap-schema = { path = "../outlap-schema" }
+outlap-vehicle = { path = "../outlap-vehicle" }
+
+[dev-dependencies]
+# The demo/tests build a line table from a real Track + racing line; the geometry crates are
+# assembly-time only (the solver itself never touches them — it receives sampled tables).
+outlap-track = { path = "../outlap-track" }
+outlap-qss = { path = "../outlap-qss" }
+outlap-raceline = { path = "../outlap-raceline" }
 
 [lints]
 workspace = true

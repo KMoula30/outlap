@@ -10,10 +10,11 @@
 //!
 //! # Relaxation lengths
 //!
-//! Longitudinal and lateral lengths come from the MF5.2 `PT*` transient coefficients when present,
+//! Longitudinal and lateral lengths come from the MF6.1 `PT*` transient coefficients when present,
 //! else from the carcass-stiffness identity `σ = K_slip / C_carcass`, else a loud last-resort
-//! `0.5·R0`. The route is chosen once at construction and reported. Equation forms marked `(~)` are
-//! transcribed from the MF5.2/6.1 relaxation block and should be re-checked against the book PDF.
+//! `0.5·R0`. The route is chosen once at construction and reported. The `PT*` equation forms are the
+//! MF6.1 relaxation block, re-verified against Pacejka 2012 §8.6 (see
+//! `docs/theory/transient_chassis.md` §4).
 
 use num_traits::Float;
 
@@ -44,7 +45,7 @@ pub fn relax_step<T: Float>(x: T, x_ss: T, v_abs: T, dt: T, sigma: T) -> T {
 /// Which route supplied a relaxation length (recorded for the loaded-model report).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Route {
-    /// MF5.2 `PT*` transient coefficients.
+    /// MF6.1 `PT*` transient coefficients.
     Pt,
     /// Carcass-stiffness identity `σ = K_slip / C_carcass`.
     Carcass,
@@ -103,7 +104,7 @@ impl<T: Float> Relaxation<T> {
 
     /// Longitudinal relaxation length `σ_κ`, m, at load `fz`.
     ///
-    /// PT route (~): `σκ = F_z·(PTX1 + PTX2·dfz)·exp(−PTX3·dfz)·(R0/FNOMIN)·LSGKP`. Carcass route:
+    /// PT route (Pacejka 2012 §8.6): `σκ = F_z·(PTX1 + PTX2·dfz)·exp(−PTX3·dfz)·(R0/FNOMIN)·LSGKP`. Carcass route:
     /// `σκ = K_xκ / C_long`. Last resort: `0.5·R0`. Floored at [`SIGMA_FLOOR_M`].
     pub fn sigma_kappa(&self, fz: T) -> T {
         let p = &self.p;
@@ -123,7 +124,7 @@ impl<T: Float> Relaxation<T> {
 
     /// Lateral relaxation length `σ_α`, m, at load `fz` and camber `gamma` (rad).
     ///
-    /// PT route (~): `σα = PTY1·sin(2·atan(F_z/(PTY2·FNOMIN·LFZO)))·(1 − PKY3·|γ*|)·R0·LFZO·LSGAL`.
+    /// PT route (Pacejka 2012 §8.6): `σα = PTY1·sin(2·atan(F_z/(PTY2·FNOMIN·LFZO)))·(1 − PKY3·|γ*|)·R0·LFZO·LSGAL`.
     /// Carcass route: `σα = |K_yα| / C_lat`. Last resort: `0.5·R0`. Floored at [`SIGMA_FLOOR_M`].
     pub fn sigma_alpha(&self, fz: T, gamma: T) -> T {
         let p = &self.p;

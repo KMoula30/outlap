@@ -1497,10 +1497,27 @@ dependencies = [
 [[package]]
 name = "outlap-transient"
 version = "0.2.0"
+dependencies = [
+ "num-traits",
+ "outlap-core",
+ "outlap-qss",
+ "outlap-raceline",
+ "outlap-schema",
+ "outlap-tire",
+ "outlap-track",
+ "outlap-vehicle",
+]
 
 [[package]]
 name = "outlap-vehicle"
 version = "0.2.0"
+dependencies = [
+ "num-traits",
+ "outlap-core",
+ "outlap-qss",
+ "outlap-tire",
+ "serde_json",
+]
 
 [[package]]
 name = "outlap-wasm"
