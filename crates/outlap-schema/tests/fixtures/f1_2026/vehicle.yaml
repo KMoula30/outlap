@@ -83,3 +83,11 @@ brakes:
       cooling_area_m2: 0.11
   regen_blend:
     max_regen_frac: 0.5
+driver:
+  # Ideal-driver gains for the transient tier (§7.7). Partially specified: the preview time, steer
+  # lock and speed PI gains are given; the remaining gains fall back to the literature defaults and
+  # are surfaced as estimated in the loaded-model report.
+  preview_time_s: 0.7
+  max_steer_rad: 0.35
+  speed_kp: 0.25
+  speed_ki: 0.06

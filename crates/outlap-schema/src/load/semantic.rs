@@ -124,6 +124,11 @@ pub fn check_vehicle(
     // Differential conditional-requirement + ramp sanity.
     check_drivetrain(spec, &s, sources)?;
 
+    // Ideal-driver gains (optional; range-check whatever is given).
+    if let Some(driver) = &spec.driver {
+        check_driver(driver, &s, sources)?;
+    }
+
     // ERS.
     if let Some(ers) = &spec.ers {
         check_soc_window(ers.es.soc_window, "/ers/es/soc_window", &s, sources)?;
@@ -143,6 +148,74 @@ pub fn check_vehicle(
         }
     }
 
+    Ok(())
+}
+
+/// Range-check the ideal-driver gains: preview time and pedal-normalising accel must be positive,
+/// the steer saturation must be a physical positive angle below a right angle, and every supplied
+/// gain must be finite and non-negative (a negative feedback gain would drive the loop unstable).
+fn check_driver(driver: &crate::vehicle::Driver, s: &Spans, sources: &Sources) -> Result<()> {
+    if let Some(t) = driver.preview_time_s {
+        positive(
+            t,
+            "driver.preview_time_s",
+            "/driver/preview_time_s",
+            s,
+            sources,
+        )?;
+    }
+    if let Some(a) = driver.ff_accel_scale_mps2 {
+        positive(
+            a,
+            "driver.ff_accel_scale_mps2",
+            "/driver/ff_accel_scale_mps2",
+            s,
+            sources,
+        )?;
+    }
+    if let Some(d) = driver.max_steer_rad {
+        if !(d > 0.0 && d < std::f64::consts::FRAC_PI_2) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/driver/max_steer_rad"),
+                "`driver.max_steer_rad` must lie in (0, π/2)".to_string(),
+                Some("steer is a road-wheel angle in radians (e.g. 0.5 ≈ 28.6°)".into()),
+            ));
+        }
+    }
+    for (val, label, ptr) in [
+        (
+            driver.preview_gain,
+            "driver.preview_gain",
+            "/driver/preview_gain",
+        ),
+        (
+            driver.heading_gain,
+            "driver.heading_gain",
+            "/driver/heading_gain",
+        ),
+        (
+            driver.yaw_damping,
+            "driver.yaw_damping",
+            "/driver/yaw_damping",
+        ),
+        (driver.speed_kp, "driver.speed_kp", "/driver/speed_kp"),
+        (driver.speed_ki, "driver.speed_ki", "/driver/speed_ki"),
+        (
+            driver.stability_slip_limit_rad,
+            "driver.stability_slip_limit_rad",
+            "/driver/stability_slip_limit_rad",
+        ),
+        (
+            driver.stability_slip_gain,
+            "driver.stability_slip_gain",
+            "/driver/stability_slip_gain",
+        ),
+    ] {
+        if let Some(g) = val {
+            non_negative(g, label, ptr, s, sources)?;
+        }
+    }
     Ok(())
 }
 
@@ -264,6 +337,19 @@ fn positive(v: f64, label: &str, ptr: &str, s: &Spans, sources: &Sources) -> Res
             sources,
             s.at(ptr),
             format!("`{label}` must be > 0"),
+            None,
+        ))
+    }
+}
+
+fn non_negative(v: f64, label: &str, ptr: &str, s: &Spans, sources: &Sources) -> Result<()> {
+    if v >= 0.0 && v.is_finite() {
+        Ok(())
+    } else {
+        Err(SchemaError::semantic(
+            sources,
+            s.at(ptr),
+            format!("`{label}` must be ≥ 0 and finite"),
             None,
         ))
     }

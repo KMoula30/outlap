@@ -104,6 +104,7 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// 2 for the `vehicle/1.2` suspension `static_ride_height_m` (ride-height aero map, §7.4), then to
 /// 3 for the `ptm/1.1` optional Vdc axis (Vdc–SoC coupling, §8.4) alongside the new `battery/1.0`
 /// document, then to 4 for the `sim/1.1` `flat_track` analysis flag (tier dispatch + Limebeer
-/// cross-check); an unknown key in a file that declares a newer MINOR than this is flagged as
-/// possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 4;
+/// cross-check), then to 5 for the `vehicle/1.5` optional `driver` section (MacAdam preview + PI
+/// speed-tracking gains, §7.7); an unknown key in a file that declares a newer MINOR than this is
+/// flagged as possibly-newer-schema.
+pub const SCHEMA_MINOR: u16 = 5;

@@ -27,6 +27,17 @@
       "description": "Chassis mass / geometry / inertia.",
       "$ref": "#/$defs/Chassis"
     },
+    "driver": {
+      "description": "Ideal-driver preview/tracking gains for the transient tiers (defaulted; MacAdam preview + PI\nspeed tracking, §7.7). Absent ⇒ literature defaults, surfaced as estimated.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Driver"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "drivetrain": {
       "description": "Drivetrain topology graph (sources → couplers → wheels) plus the control layer.",
       "$ref": "#/$defs/Drivetrain"
@@ -593,6 +604,92 @@
         "path",
         "wheels"
       ]
+    },
+    "Driver": {
+      "description": "Ideal-driver control gains: MacAdam-style preview steering + PI speed tracking (§7.7).\n\nOptional throughout; unset gains take the `DEFAULT_*` literature values (tuned on\n`limebeer_2014_f1`) and are reported as estimated. Numbers are SI (rad, m, s); pedal gains are\ndimensionless-pedal `[0, 1]` per error unit.",
+      "type": "object",
+      "properties": {
+        "ff_accel_scale_mps2": {
+          "description": "Feed-forward normalising acceleration — the friction-circle radius (the gg-headroom usable\naccel that maps a demanded longitudinal acceleration to a `[−1, 1]` pedal command), m/s².",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "heading_gain": {
+          "description": "Heading-error steer gain `k_ψ`, rad/rad.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_steer_rad": {
+          "description": "Maximum road-wheel steer, rad.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "preview_gain": {
+          "description": "Preview lateral-offset-error steer gain, rad/m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "preview_time_s": {
+          "description": "MacAdam preview time, s (look-ahead distance `L_p = preview_time · v`).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "speed_ki": {
+          "description": "Speed-loop integral gain `k_i`, pedal per (m/s·s).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "speed_kp": {
+          "description": "Speed-loop proportional gain `k_p`, pedal per (m/s).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "stability_slip_gain": {
+          "description": "Throttle-cut rate per rad of sideslip past the limit, 1/rad (a lift-when-loose stability aid).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "stability_slip_limit_rad": {
+          "description": "Sideslip magnitude at which the stability throttle-cut begins, rad.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "yaw_damping": {
+          "description": "Yaw-rate damping steer gain `k_r`, rad/(rad/s).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
     },
     "Drivetrain": {
       "description": "The drivetrain: one or more drive units plus the control layer.",

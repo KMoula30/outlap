@@ -30,12 +30,13 @@ use outlap_core::bus::{Bus, ChannelInterner, CoreSignal, WheelSignal, WHEELS};
 use outlap_core::integrator::{RkMethod, SimArena};
 use outlap_core::relax::SlowClock;
 use outlap_core::state::{
-    fast_slot_count, ChassisState, DerivView, RelaxState, StateLayout, StateView,
+    fast_slot_count, ChassisState, ControllerState, DerivView, RelaxState, StateLayout, StateView,
 };
 use outlap_schema::sim::FzCoupling;
 
 use outlap_vehicle::{
-    relax_wheel, Aero, Chassis, Driver, LoadTransfer, Powertrain, RoadChannels, Tire,
+    preview_distance, relax_wheel, Aero, Chassis, Driver, LoadTransfer, Powertrain, RoadChannels,
+    Tire,
 };
 
 use crate::line_table::LineTable;
@@ -56,6 +57,10 @@ pub struct SimConfig<T> {
     pub slow_decimation: u32,
     /// Lateral-offset edge clamp `|n| ≤ n_max`, m (guards the curvilinear frame; PR3 spec).
     pub n_max: T,
+    /// Arc-length station the lap is seeded at, m (default 0). A cold transient — zero relaxation,
+    /// zero yaw, running straight — seeded *at* a corner is unphysical (a real lap arrives moving),
+    /// so callers start the lap at a straight; the closed line wraps `s` back through the start.
+    pub start_s: T,
 }
 
 impl<T: Float> Default for SimConfig<T> {
@@ -67,6 +72,7 @@ impl<T: Float> Default for SimConfig<T> {
             fixed_point_iters: 3,
             slow_decimation: 20,
             n_max: T::from(20.0).expect("20 representable"),
+            start_s: T::zero(),
         }
     }
 }
@@ -128,7 +134,9 @@ pub struct TransientSolver<T> {
     // SoA scratch (batch = 1).
     fast: Vec<T>,
     dfast: Vec<T>,
-    xchassis: Vec<T>,
+    // Gather buffer + the fast-state slots the RK sweep integrates (chassis DOF + controller states).
+    x_int: Vec<T>,
+    integrated: Vec<usize>,
     bus: Bus<T>,
     schedule: Schedule,
     slow_clock: SlowClock,
@@ -147,8 +155,13 @@ impl<T: Float> TransientSolver<T> {
         interner: &ChannelInterner,
         cfg: SimConfig<T>,
     ) -> Self {
-        let n = ChassisState::T2_DOF;
-        let arena = SimArena::for_method(cfg.method, n);
+        // The RK sweep integrates the T2 chassis DOF plus the continuous controller states (the
+        // driver speed integral); the tyre-relaxation states are advanced separately on the
+        // exact-exponential channel and are not in this set.
+        let mut integrated = vec![0usize; ChassisState::T2_DOF + ControllerState::COUNT as usize];
+        let n_int = StateLayout::t2_integrated_slots(&mut integrated);
+        integrated.truncate(n_int);
+        let arena = SimArena::for_method(cfg.method, n_int);
         let bus = Bus::with_interner(interner, 1);
         let schedule = assemble(&blocks.specs()).expect("acyclic T2 block set");
         let slow_clock = SlowClock::new(cfg.slow_decimation.max(1));
@@ -159,7 +172,8 @@ impl<T: Float> TransientSolver<T> {
             cfg,
             fast: vec![T::zero(); fast_slot_count()],
             dfast: vec![T::zero(); fast_slot_count()],
-            xchassis: vec![T::zero(); n],
+            x_int: vec![T::zero(); n_int],
+            integrated,
             bus,
             schedule,
             slow_clock,
@@ -193,17 +207,19 @@ impl<T: Float> TransientSolver<T> {
         self.blocks.road
     }
 
-    /// Seed `[s, n, ψ_rel, v_x, v_y, r, ω₁..₄]` from the target line at `s = 0`.
+    /// Seed `[s, n, ψ_rel, v_x, v_y, r, ω₁..₄]` from the target line at `s = start_s`. The yaw rate is
+    /// seeded to the corner-consistent `r = v·κ_ref` (zero on a straight) so the cold start does not
+    /// shock the car with an instantaneous corner from a straight-ahead initial condition.
     fn seed_initial_state(&mut self) {
         let zero = T::zero();
-        let s0 = zero;
+        let s0 = self.cfg.start_s;
         let v0 = self.line.v_ref(s0).max(zero);
         self.fast[ChassisState::S as usize] = s0;
         self.fast[ChassisState::N as usize] = self.line.n_ref(s0);
         self.fast[ChassisState::PsiRel as usize] = zero;
         self.fast[ChassisState::Vx as usize] = v0;
         self.fast[ChassisState::Vy as usize] = zero;
-        self.fast[ChassisState::YawRate as usize] = zero;
+        self.fast[ChassisState::YawRate as usize] = v0 * self.line.kappa_ref(s0);
         for i in 0..WHEELS {
             let r = self.blocks.chassis.params.wheels.radius[i];
             self.fast[omega_state(i) as usize] = if r > zero { v0 / r } else { zero };
@@ -283,19 +299,21 @@ impl<T: Float> TransientSolver<T> {
     /// Advance the simulation by one fixed step (relaxation + RK sweep).
     pub fn step(&mut self) {
         let dt = self.cfg.dt;
-        let n = ChassisState::T2_DOF;
 
         // (1) coupling + relaxation (leaves the lagged slip frozen for the RK sweep).
         self.couple_and_relax();
 
-        // (2) RK sweep over the 10 chassis DOF, re-evaluating the block chain each stage.
-        for i in 0..n {
-            self.xchassis[i] = self.fast[i];
+        // (2) RK sweep over the integrated fast states (chassis DOF + the driver speed integral),
+        //     re-evaluating the block chain (driver writes the integral derivative, chassis the
+        //     chassis-DOF derivatives) at each stage.
+        for (k, &slot) in self.integrated.iter().enumerate() {
+            self.x_int[k] = self.fast[slot];
         }
         // Disjoint field borrows for the closure (arena/state vs. the block+bus scratch).
         let Self {
             arena,
-            xchassis,
+            x_int,
+            integrated,
             fast,
             dfast,
             bus,
@@ -305,21 +323,25 @@ impl<T: Float> TransientSolver<T> {
             ..
         } = self;
         let t_now = *t;
-        arena.step(xchassis, t_now, dt, |_ti, xs, dxs| {
-            for (slot, &xv) in xs.iter().enumerate() {
-                fast[slot] = xv;
+        arena.step(x_int, t_now, dt, |_ti, xs, dxs| {
+            for (k, &slot) in integrated.iter().enumerate() {
+                fast[slot] = xs[k];
             }
             eval_rhs_raw(blocks, line, fast, dfast, bus);
-            for (i, d) in dxs.iter_mut().enumerate() {
-                *d = dfast[i];
+            for (k, d) in dxs.iter_mut().enumerate() {
+                *d = dfast[integrated[k]];
             }
         });
-        for i in 0..n {
-            self.fast[i] = self.xchassis[i];
+        for (k, &slot) in self.integrated.iter().enumerate() {
+            self.fast[slot] = self.x_int[k];
         }
         // Edge-clamp the lateral offset so the curvilinear frame stays well-posed (PR3 spec).
         let n_slot = ChassisState::N as usize;
         self.fast[n_slot] = self.fast[n_slot].max(-self.cfg.n_max).min(self.cfg.n_max);
+        // Backstop clamp on the speed integral (conditional integration is the primary anti-windup).
+        let xi_slot = StateLayout::controller_slot(ControllerState::SpeedIntegral);
+        let xi_lim = self.blocks.driver.integral_limit;
+        self.fast[xi_slot] = self.fast[xi_slot].max(-xi_lim).min(xi_lim);
 
         // (3) refresh one-step-lag accelerations at the new state. Re-point the load-transfer block
         // at the post-step speed first (using the lagged accel), so the recorded per-wheel F_z and
@@ -407,9 +429,17 @@ impl<T: Float> TransientSolver<T> {
     }
 }
 
-/// Publish the road-geometry channels for arc length `s` (the `sense` phase; the solver owns the
-/// line table).
-fn publish_road<T: Float>(line: &LineTable<T>, road: &RoadChannels, bus: &mut Bus<T>, s: T) {
+/// Publish the road-geometry + target-line channels for the `sense` phase (the solver owns the line
+/// table): the current-station geometry at `s`, and the **preview** target-line channels sampled at
+/// the driver look-ahead `s + L_p(v_x)` that the MacAdam preview steer and speed feed-forward read.
+fn publish_road<T: Float>(
+    line: &LineTable<T>,
+    road: &RoadChannels,
+    bus: &mut Bus<T>,
+    s: T,
+    vx: T,
+    preview_time: T,
+) {
     bus.set_channel(road.kappa, 0, line.kappa_h(s));
     bus.set_channel(road.grade, 0, line.grade(s));
     bus.set_channel(road.banking, 0, line.banking(s));
@@ -417,11 +447,16 @@ fn publish_road<T: Float>(line: &LineTable<T>, road: &RoadChannels, bus: &mut Bu
     bus.set_channel(road.n_ref, 0, line.n_ref(s));
     bus.set_channel(road.kappa_ref, 0, line.kappa_ref(s));
     bus.set_channel(road.v_ref, 0, line.v_ref(s));
+    // Preview station (line queries wrap/clamp `s + L_p` for closed/open loops).
+    let sp = s + preview_distance(vx, preview_time);
+    bus.set_channel(road.n_ref_preview, 0, line.n_ref(sp));
+    bus.set_channel(road.kappa_ref_preview, 0, line.kappa_ref(sp));
+    bus.set_channel(road.v_ref_preview, 0, line.v_ref(sp));
 }
 
-/// One full RHS evaluation: clear bus, publish road at `fast`'s `s`, run the block chain in schedule
-/// order, leaving the chassis derivative in `dfast`. Free-standing so callers can hand disjoint field
-/// borrows (the RK closure) or `self` fields (the sequential path).
+/// One full RHS evaluation: clear bus, publish road + preview at `fast`'s `(s, v_x)`, run the block
+/// chain in schedule order, leaving the chassis + controller derivatives in `dfast`. Free-standing so
+/// callers can hand disjoint field borrows (the RK closure) or `self` fields (the sequential path).
 fn eval_rhs_raw<T: Float>(
     blocks: &T2Blocks<T>,
     line: &LineTable<T>,
@@ -430,8 +465,9 @@ fn eval_rhs_raw<T: Float>(
     bus: &mut Bus<T>,
 ) {
     let s = fast[ChassisState::S as usize];
+    let vx = fast[ChassisState::Vx as usize];
     bus.clear();
-    publish_road(line, &blocks.road, bus, s);
+    publish_road(line, &blocks.road, bus, s, vx, blocks.driver.preview_time);
     let sv = StateView::new(fast, 1, 0);
     let mut dv = DerivView::new(dfast, 1, 0);
     blocks.driver.derivatives(&sv, bus, &mut dv, 0);

@@ -4,10 +4,12 @@
 //!
 //! Every block implements the shared [`outlap_core::block::Block`] trait (pure, generic over
 //! `f32`/`f64`, allocation-free) and exchanges data over the flat signal [`outlap_core::bus::Bus`].
-//! The chassis is the sole `integrate`-phase block (it writes the fast-state derivative); the tyre,
-//! aero, load-transfer, driver and powertrain blocks run in `sense`/`control`/`actuate` and publish
-//! onto the bus. The concrete hot-loop dispatch and the split-integrator orchestration live in
-//! `outlap-transient`; this crate is wasm-clean (no filesystem/threads/clock).
+//! The chassis is the `integrate`-phase block that writes the chassis-DOF derivatives; the driver
+//! (a `control`-phase block) additionally writes its augmented-ODE speed-integral derivative, so the
+//! RK sweep advances both. The tyre, aero, load-transfer, driver and powertrain blocks run in
+//! `sense`/`control`/`actuate` and publish onto the bus. The concrete hot-loop dispatch and the
+//! split-integrator orchestration live in `outlap-transient`; this crate is wasm-clean (no
+//! filesystem/threads/clock).
 //!
 //! The 7-DOF chassis EOM is symbolically verified against a `SymPy` `KanesMethod` derivation to
 //! 1e-12 (`docs/derivations/t2_chassis_kane.ipynb`; Decision #32) — see the theory page
@@ -30,6 +32,6 @@ pub mod forces;
 pub mod params;
 
 pub use chassis::Chassis;
-pub use control::{Driver, Powertrain};
+pub use control::{drive_weights, preview_distance, Driver, Powertrain, PREVIEW_FLOOR_M};
 pub use forces::{relax_wheel, Aero, LoadTransfer, RelaxProvider, RelaxTargets, Tire};
 pub use params::{ChassisParams, RoadChannels, WheelGeometry, G};

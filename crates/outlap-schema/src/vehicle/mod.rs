@@ -6,6 +6,7 @@ mod aero;
 mod battery;
 mod brakes;
 mod chassis;
+mod driver;
 mod drivetrain;
 mod ers;
 mod suspension;
@@ -15,6 +16,7 @@ pub use aero::{Aero, AeroConstant};
 pub use battery::{Battery, BatteryModel};
 pub use brakes::{AxlePair, BrakeDisc, Brakes, RegenBlend};
 pub use chassis::Chassis;
+pub use driver::Driver;
 pub use drivetrain::{
     Coupler, Diff, DiffKind, DriveControl, DriveUnit, Drivetrain, Efficiency, Gearbox, Split,
     TorqueVectoring, Wheel,
@@ -63,6 +65,10 @@ pub struct Vehicle {
     pub battery: Option<Battery>,
     /// Brakes (balance, discs, ABS, regen blending).
     pub brakes: Brakes,
+    /// Ideal-driver preview/tracking gains for the transient tiers (defaulted; MacAdam preview + PI
+    /// speed tracking, §7.7). Absent ⇒ literature defaults, surfaced as estimated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<Driver>,
     /// `x-*` extension keys (carried through, not interpreted).
     #[serde(default, skip_serializing_if = "Extensions::is_empty")]
     pub extensions: Extensions,

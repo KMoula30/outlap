@@ -11,163 +11,18 @@
 //! T2 dynamics property tests on the real `limebeer_2014_f1` car (assembled once per test): the
 //! assembler order is deterministic, the split integrator is bit-reproducible, the relaxation states
 //! converge, and open-loop maneuvers match analytic expectations (flat-track planar degeneration,
-//! coastdown drag decel, step-steer yaw sign/magnitude, friction-circle containment).
+//! coastdown drag decel, step-steer yaw sign/magnitude, friction-circle containment). The ideal
+//! driver (real MacAdam-preview + PI as of PR5) is switched between "tuned", "feed-forward-only
+//! steer", and "coasting" per scenario via the `blocks.driver` field tweaks.
 
+mod common;
+
+use common::{build_blocks, limebeer, line};
 use outlap_core::block::Phase;
-use outlap_core::bus::{ChannelInterner, WHEELS};
+use outlap_core::bus::WHEELS;
 use outlap_core::state::{ChassisState, RelaxState, StateLayout};
-use outlap_qss::t1::LoadTransferGeometry;
-use outlap_qss::T1Vehicle;
-use outlap_schema::io::FsLoader;
 use outlap_schema::sim::FzCoupling;
-use outlap_schema::{load_conditions, load_vehicle, LoadOptions};
-use outlap_transient::{LineSamples, LineTable, SimConfig, T2Blocks, TransientSolver};
-use outlap_vehicle::{
-    Aero, Chassis, ChassisParams, Driver, LoadTransfer, Powertrain, RelaxProvider, RoadChannels,
-    Tire,
-};
-use std::path::PathBuf;
-
-fn data(rel: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../data")).join(rel)
-}
-
-fn limebeer() -> T1Vehicle {
-    let vl = FsLoader::new(data("vehicles/limebeer_2014_f1"));
-    let resolved = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).unwrap();
-    let conditions = load_conditions("conditions.yaml", &vl).unwrap();
-    T1Vehicle::assemble(&resolved, &conditions, &vl, false).unwrap()
-}
-
-fn build_blocks(
-    t1: &T1Vehicle,
-    it: &mut ChannelInterner,
-    gains: (f64, f64, f64, f64),
-) -> T2Blocks<f64> {
-    let road = RoadChannels::intern(it);
-    let (a, b, tf, tr) = (t1.a_f, t1.b_r, t1.t_f, t1.t_r);
-    let x = [a, a, -b, -b];
-    let y = [tf * 0.5, -tf * 0.5, tr * 0.5, -tr * 0.5];
-    let r_f = t1.tire_front.unloaded_radius(0.33);
-    let r_r = t1.tire_rear.unloaded_radius(0.33);
-    let params = ChassisParams::from_f64(
-        t1.mass_kg,
-        t1.izz,
-        x,
-        y,
-        [true, true, false, false],
-        [r_f, r_f, r_r, r_r],
-        [1.1; WHEELS],
-    );
-    let geom = LoadTransferGeometry {
-        mass_kg: t1.mass_kg,
-        wheelbase_m: t1.wheelbase_m,
-        a_f: t1.a_f,
-        b_r: t1.b_r,
-        t_f: t1.t_f,
-        t_r: t1.t_r,
-        h_cg: t1.h_cg,
-        h_ra: t1.h_ra,
-        rc_f: t1.rc_f,
-        rc_r: t1.rc_r,
-        roll_share_f: t1.roll_share_f,
-        roll_share_r: t1.roll_share_r,
-    };
-    let wheels = params.wheels;
-    let (k_offset, k_heading, k_yaw_rate, k_speed) = gains;
-    T2Blocks {
-        chassis: Chassis::new(params, road),
-        tire: Tire {
-            front: t1.tire_front.clone(),
-            rear: t1.tire_rear.clone(),
-            p_front: t1.p_front,
-            p_rear: t1.p_rear,
-            mu_scale: 1.0,
-            relax_front: RelaxProvider::from_model(&t1.tire_front, 0.5 * r_f),
-            relax_rear: RelaxProvider::from_model(&t1.tire_rear, 0.5 * r_r),
-            wheels,
-        },
-        aero: Aero {
-            qx: t1.qx,
-            qz_f: t1.qz_f,
-            qz_r: t1.qz_r,
-        },
-        load: LoadTransfer {
-            geom,
-            g_normal: outlap_vehicle::G,
-            speed: 0.0,
-            ax: 0.0,
-            ay: 0.0,
-            qz_f: t1.qz_f,
-            qz_r: t1.qz_r,
-        },
-        driver: Driver {
-            wheelbase: t1.wheelbase_m,
-            k_offset,
-            k_heading,
-            k_yaw_rate,
-            k_speed,
-            max_steer: 0.5,
-            road,
-        },
-        powertrain: Powertrain {
-            max_drive_torque: t1.max_tractive_force(50.0) * r_r,
-            max_brake_torque: 6000.0,
-            brake_front_bias: t1.brake_front_bias,
-            driven: t1.driven,
-        },
-        road,
-    }
-}
-
-/// Synthetic straight (or circular) line; `road_kappa`/`steer_kappa` as in the demo example.
-fn line(
-    len: f64,
-    stations: usize,
-    closed: bool,
-    road_k: f64,
-    steer_k: f64,
-    v_ref: f64,
-    circle: Option<f64>,
-) -> LineTable<f64> {
-    let s: Vec<f64> = (0..stations)
-        .map(|i| i as f64 * len / (stations as f64 - 1.0))
-        .collect();
-    let mk = |v: f64| vec![v; stations];
-    let (mut xr, mut yr, mut lx, mut ly) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for &si in &s {
-        if let Some(r) = circle {
-            let th = si / r;
-            xr.push(r * th.sin());
-            yr.push(r * (1.0 - th.cos()));
-            lx.push(-th.sin());
-            ly.push(th.cos());
-        } else {
-            xr.push(si);
-            yr.push(0.0);
-            lx.push(0.0);
-            ly.push(1.0);
-        }
-    }
-    LineTable::new(&LineSamples {
-        s,
-        kappa_h: mk(road_k),
-        grade: mk(0.0),
-        banking: mk(0.0),
-        kappa_v: mk(0.0),
-        n_ref: mk(0.0),
-        kappa_ref: mk(steer_k),
-        v_ref: mk(v_ref),
-        x_ref: xr,
-        y_ref: yr,
-        z_ref: mk(0.0),
-        lat_x: lx,
-        lat_y: ly,
-        lat_z: mk(0.0),
-        closed,
-    })
-    .unwrap()
-}
+use outlap_transient::{SimConfig, TransientSolver};
 
 fn cfg() -> SimConfig<f64> {
     SimConfig {
@@ -176,11 +31,25 @@ fn cfg() -> SimConfig<f64> {
     }
 }
 
+/// Zero the steer path-feedback gains so only the curvature feed-forward steers (open-loop steer).
+fn feed_forward_steer_only(solver_blocks: &mut outlap_transient::T2Blocks<f64>) {
+    solver_blocks.driver.preview_gain = 0.0;
+    solver_blocks.driver.heading_gain = 0.0;
+    solver_blocks.driver.yaw_damping = 0.0;
+}
+
+/// Silence the longitudinal loop entirely (no throttle, no brake) — a pure coastdown driver.
+fn coasting(solver_blocks: &mut outlap_transient::T2Blocks<f64>) {
+    solver_blocks.driver.speed_kp = 0.0;
+    solver_blocks.driver.speed_ki = 0.0;
+    solver_blocks.driver.ff_accel_scale = f64::INFINITY; // a_ff / ∞ = 0
+}
+
 #[test]
 fn assembler_order_is_deterministic_and_phase_sorted() {
     let t1 = limebeer();
-    let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it, (0.0, 0.0, 0.0, 0.0));
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks(&t1, &mut it);
     let solver = TransientSolver::new(
         blocks,
         line(100.0, 50, false, 0.0, 0.0, 20.0, None),
@@ -194,7 +63,7 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
     assert_eq!(order, vec![0, 1, 2, 3, 4, 5]);
     // Determinism: same specs → same schedule.
     let solver2 = TransientSolver::new(
-        build_blocks(&t1, &mut ChannelInterner::new(), (0.0, 0.0, 0.0, 0.0)),
+        build_blocks(&t1, &mut outlap_core::bus::ChannelInterner::new()),
         line(100.0, 50, false, 0.0, 0.0, 20.0, None),
         &it,
         cfg(),
@@ -211,8 +80,8 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
 #[test]
 fn flat_straight_stays_planar() {
     let t1 = limebeer();
-    let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it, (0.0, 0.0, 0.0, 0.3));
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks(&t1, &mut it);
     let mut solver = TransientSolver::new(
         blocks,
         line(4000.0, 200, false, 0.0, 0.0, 40.0, None),
@@ -223,7 +92,8 @@ fn flat_straight_stays_planar() {
         solver.step();
     }
     let fs = solver.fast_state();
-    // No steer, no banking ⇒ lateral/yaw/offset stay at zero.
+    // No steer, no banking ⇒ lateral/yaw/offset stay at zero (the driver tracks n_ref = 0 exactly on
+    // a straight with κ_ref = 0, so nothing perturbs the plane).
     assert!(
         fs[ChassisState::Vy as usize].abs() < 1e-6,
         "vy={}",
@@ -236,8 +106,9 @@ fn flat_straight_stays_planar() {
 #[test]
 fn coastdown_decelerates_under_drag() {
     let t1 = limebeer();
-    let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it, (0.0, 0.0, 0.0, 0.0)); // no throttle
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let mut blocks = build_blocks(&t1, &mut it);
+    coasting(&mut blocks); // no throttle
     let mut solver = TransientSolver::new(
         blocks,
         line(20_000.0, 200, false, 0.0, 0.0, 80.0, None),
@@ -261,10 +132,11 @@ fn coastdown_decelerates_under_drag() {
 #[test]
 fn step_steer_builds_correct_yaw_and_loads_the_outside() {
     let t1 = limebeer();
-    let mut it = ChannelInterner::new();
-    // Constant steer feed-forward via kappa_ref on a straight road (path gains 0).
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    // Constant steer feed-forward via kappa_ref on a straight road (path feedback off).
     let (v, kappa) = (40.0, 0.006);
-    let blocks = build_blocks(&t1, &mut it, (0.0, 0.0, 0.0, 0.4));
+    let mut blocks = build_blocks(&t1, &mut it);
+    feed_forward_steer_only(&mut blocks);
     let mut solver = TransientSolver::new(
         blocks,
         line(8000.0, 200, false, 0.0, kappa, v, None),
@@ -276,21 +148,22 @@ fn step_steer_builds_correct_yaw_and_loads_the_outside() {
     }
     let fs = solver.fast_state();
     let r = fs[ChassisState::YawRate as usize];
-    // Positive steer ⇒ +yaw (left). Magnitude near the neutral-steer estimate v·δ/L (understeer
-    // makes it a bit lower), so bound it generously.
-    let neutral = v * (t1.wheelbase_m * kappa) / t1.wheelbase_m; // = v·κ
+    // The understeer-gradient feed-forward δ_ff = κ(L + K_us·v²) is designed so the steady yaw hits
+    // the target curvature: r → v·κ. Positive steer ⇒ +yaw (left). Bound it generously.
+    let neutral = v * kappa; // = v·κ (target yaw rate)
     assert!(r > 0.0, "left steer ⇒ +yaw, got {r}");
     assert!(
-        r > 0.4 * neutral && r < 1.2 * neutral,
-        "r={r} vs neutral {neutral}"
+        r > 0.5 * neutral && r < 1.3 * neutral,
+        "r={r} vs target {neutral}"
     );
 }
 
 #[test]
 fn relaxation_states_converge_to_steady_state() {
     let t1 = limebeer();
-    let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it, (0.0, 0.0, 0.0, 0.4));
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let mut blocks = build_blocks(&t1, &mut it);
+    feed_forward_steer_only(&mut blocks); // steady curve from the FF steer
     let mut solver = TransientSolver::new(
         blocks,
         line(8000.0, 200, false, 0.0, 0.006, 40.0, None),
@@ -313,7 +186,6 @@ fn relaxation_states_converge_to_steady_state() {
             (a_after - a_before[w]).abs() < 1e-4,
             "wheel {w} lagged α not converged"
         );
-        // A cornering front wheel carries a non-trivial slip angle.
     }
 }
 
@@ -321,8 +193,8 @@ fn relaxation_states_converge_to_steady_state() {
 fn skidpad_is_bit_reproducible() {
     let t1 = limebeer();
     let run = || {
-        let mut it = ChannelInterner::new();
-        let blocks = build_blocks(&t1, &mut it, (0.08, 0.7, 0.2, 0.4));
+        let mut it = outlap_core::bus::ChannelInterner::new();
+        let blocks = build_blocks(&t1, &mut it);
         let l = line(
             2.0 * std::f64::consts::PI * 60.0,
             400,
@@ -346,8 +218,8 @@ fn skidpad_is_bit_reproducible() {
 #[test]
 fn skidpad_stays_within_the_friction_circle() {
     let t1 = limebeer();
-    let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it, (0.08, 0.7, 0.2, 0.4));
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks(&t1, &mut it);
     let l = line(
         2.0 * std::f64::consts::PI * 60.0,
         400,
