@@ -88,4 +88,14 @@ impl<T: Float> TireModel<T> {
             TireModel::Brush(b) => b.forces(s),
         }
     }
+
+    /// Unloaded (free) tyre radius `R_0`, m. For the Magic-Formula model this is the `UNLOADED_RADIUS`
+    /// parameter; the brush model carries no geometry, so it reports a `fallback` supplied by the
+    /// caller (the transient tier passes a class-typical radius, surfaced as estimated).
+    pub fn unloaded_radius(&self, fallback: T) -> T {
+        match self {
+            TireModel::Mf61(m) => m.params().r0,
+            TireModel::Brush(_) => fallback,
+        }
+    }
 }

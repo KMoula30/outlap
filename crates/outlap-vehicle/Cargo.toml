@@ -5,6 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+num-traits.workspace = true
+outlap-core = { path = "../outlap-core" }
+outlap-tire = { path = "../outlap-tire" }
+# The T2 chassis block reuses the T1 quasi-static load-transfer algebra (PR2 export) so both tiers
+# derive per-wheel normal loads from the identical expressions (HANDOFF §6.1 "one vehicle
+# description, four derived views"). outlap-qss is wasm-clean, so this keeps the vehicle crate
+# wasm-clean too.
+outlap-qss = { path = "../outlap-qss" }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

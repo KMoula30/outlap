@@ -24,6 +24,8 @@ jobs:
       - run: cargo build --target wasm32-unknown-unknown -p outlap-raceline   # clarabel is wasm-clean
       - run: cargo build --target wasm32-unknown-unknown -p outlap-tire      # tire kernels stay wasm-clean
       - run: cargo build --target wasm32-unknown-unknown -p outlap-qss       # QSS solvers stay wasm-clean (parallel feature off)
+      - run: cargo build --target wasm32-unknown-unknown -p outlap-vehicle    # T2 blocks stay wasm-clean
+      - run: cargo build --target wasm32-unknown-unknown -p outlap-transient  # T2 orchestration stays wasm-clean
 
   python:
     runs-on: ubuntu-latest
@@ -37,12 +39,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable   # uv sync builds the outlap-core extension (maturin)
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --directory python --group notebooks --extra tire-fit
+      - run: uv sync --directory python --group notebooks --group derivations --extra tire-fit
       - run: uv run --directory python ruff check src tests
       - run: uv run --directory python ruff format --check src tests
       - run: uv run --directory python pyright                            # strict (pyproject config)
       - run: uv run --directory python pytest
       - run: uv run --directory python python -m outlap.schemas --check   # schemas in sync
+      # Decision #32: re-execute the SymPy Kane derivation, regenerate the RHS fixture, and fail if it
+      # drifts from the committed one — the symbolic source stays authoritative for the chassis EOM
+      # (the Rust 1e-12 test `cargo test -p outlap-vehicle` checks the same fixture). Run from the
+      # notebook's own dir so its `sys.path` insert finds the derivation module; `--project` selects
+      # the venv without changing cwd.
+      - run: cd docs/derivations && uv run --project "$GITHUB_WORKSPACE/python" jupyter execute --kernel_name python3 t2_chassis_kane.ipynb
+      - run: git diff --exit-code docs/derivations/fixtures/t2_chassis_rhs.json
 
   notebooks:
     runs-on: ubuntu-latest

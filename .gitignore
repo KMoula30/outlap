@@ -19,3 +19,4 @@ ttc-data/
 # vehicle holds imported drive-unit maps / packs, and the real-data twin of the notebook 07 capstone.
 data/vehicles/*/local/
 notebooks/07_qss_t1_local.ipynb
+debug_plots/
