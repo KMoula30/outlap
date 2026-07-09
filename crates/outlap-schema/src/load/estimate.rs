@@ -56,6 +56,104 @@ pub fn estimate(spec: &mut Vehicle, prov: &mut ProvenanceMap, estimated: &mut Ve
             }
         }
     }
+
+    estimate_driver(spec.driver.as_ref(), prov, estimated);
+}
+
+/// Surface the ideal-driver gains that fall back to the MacAdam/PI literature defaults (Decision #8).
+/// This records-only (it does not fill the spec, so the resolved-set hash is unchanged for a vehicle
+/// with no `driver:` block) — the block assembly applies the same defaults via the schema accessors.
+fn estimate_driver(
+    driver: Option<&crate::vehicle::Driver>,
+    prov: &mut ProvenanceMap,
+    estimated: &mut Vec<ReportEntry>,
+) {
+    use crate::vehicle::Driver;
+    // (missing?, pointer, heuristic, default value, what the default is).
+    let d = driver;
+    let fields: [(bool, &str, &'static str, f64, &str); 10] = [
+        (
+            d.is_none_or(|v| v.preview_time_s.is_none()),
+            "/driver/preview_time_s",
+            "driver_preview_time",
+            Driver::DEFAULT_PREVIEW_TIME_S,
+            "MacAdam preview time, s",
+        ),
+        (
+            d.is_none_or(|v| v.preview_gain.is_none()),
+            "/driver/preview_gain",
+            "driver_preview_gain",
+            Driver::DEFAULT_PREVIEW_GAIN,
+            "preview steer gain, rad/m",
+        ),
+        (
+            d.is_none_or(|v| v.heading_gain.is_none()),
+            "/driver/heading_gain",
+            "driver_heading_gain",
+            Driver::DEFAULT_HEADING_GAIN,
+            "heading-error steer gain, rad/rad",
+        ),
+        (
+            d.is_none_or(|v| v.yaw_damping.is_none()),
+            "/driver/yaw_damping",
+            "driver_yaw_damping",
+            Driver::DEFAULT_YAW_DAMPING,
+            "yaw-rate damping, rad/(rad/s)",
+        ),
+        (
+            d.is_none_or(|v| v.max_steer_rad.is_none()),
+            "/driver/max_steer_rad",
+            "driver_max_steer",
+            Driver::DEFAULT_MAX_STEER_RAD,
+            "max road-wheel steer, rad",
+        ),
+        (
+            d.is_none_or(|v| v.speed_kp.is_none()),
+            "/driver/speed_kp",
+            "driver_speed_kp",
+            Driver::DEFAULT_SPEED_KP,
+            "speed PI proportional gain, pedal/(m/s)",
+        ),
+        (
+            d.is_none_or(|v| v.speed_ki.is_none()),
+            "/driver/speed_ki",
+            "driver_speed_ki",
+            Driver::DEFAULT_SPEED_KI,
+            "speed PI integral gain, pedal/(m/s·s)",
+        ),
+        (
+            d.is_none_or(|v| v.ff_accel_scale_mps2.is_none()),
+            "/driver/ff_accel_scale_mps2",
+            "driver_ff_accel_scale",
+            Driver::DEFAULT_FF_ACCEL_SCALE_MPS2,
+            "feed-forward usable accel (gg headroom), m/s²",
+        ),
+        (
+            d.is_none_or(|v| v.stability_slip_limit_rad.is_none()),
+            "/driver/stability_slip_limit_rad",
+            "driver_stability_slip_limit",
+            Driver::DEFAULT_STABILITY_SLIP_LIMIT_RAD,
+            "sideslip stability-cut threshold, rad",
+        ),
+        (
+            d.is_none_or(|v| v.stability_slip_gain.is_none()),
+            "/driver/stability_slip_gain",
+            "driver_stability_slip_gain",
+            Driver::DEFAULT_STABILITY_SLIP_GAIN,
+            "sideslip stability-cut rate, 1/rad",
+        ),
+    ];
+    for (missing, ptr, heuristic, value, what) in fields {
+        if missing {
+            record(
+                prov,
+                estimated,
+                ptr,
+                heuristic,
+                format!("literature default {value} — {what} (tuned on limebeer_2014_f1)"),
+            );
+        }
+    }
 }
 
 fn estimate_axle(

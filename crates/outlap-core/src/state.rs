@@ -8,12 +8,17 @@
 //!
 //! # Frozen fast-state layout
 //!
-//! The fast buffer is `[chassis | relaxation]`. The chassis region reserves the full **14-DOF**
-//! ([`ChassisState`]) footprint so the T3 groundwork is laid without a layout break: T2 integrates
-//! only the first ten slots ([`ChassisState::T2_DOF`]); the heave/pitch/roll + four-unsprung slots
-//! sit reserved and read as zero until T3. The relaxation region holds a lagged `κ` and `α` per
-//! wheel ([`WHEELS`]). This layout is a frozen contract (see the PR layout note); downstream code
-//! addresses states by the [`ChassisState`] / [`RelaxState`] enums, never by bare integers.
+//! The fast buffer is `[chassis | relaxation | controller]`. The chassis region reserves the full
+//! **14-DOF** ([`ChassisState`]) footprint so the T3 groundwork is laid without a layout break: T2
+//! integrates only the first ten slots ([`ChassisState::T2_DOF`]); the heave/pitch/roll +
+//! four-unsprung slots sit reserved and read as zero until T3. The relaxation region holds a lagged
+//! `κ` and `α` per wheel ([`WHEELS`]). The **controller** region ([`ControllerState`]) holds the
+//! continuous controller states the split integrator advances by the RK sweep alongside the chassis
+//! DOF — currently the driver's speed-tracking integral (the augmented-ODE form of the §7.7 PI
+//! speed loop); discrete controller states (gear index, shift timers) will land on the event queue /
+//! slow clock, not here. Existing regions keep their indices (the controller region is appended, so
+//! the chassis/relaxation layout is unchanged); downstream code addresses states by the
+//! [`ChassisState`] / [`RelaxState`] / [`ControllerState`] enums, never by bare integers.
 
 use num_traits::Float;
 
@@ -98,10 +103,25 @@ pub enum RelaxState {
     COUNT,
 }
 
+/// Continuous **controller** fast-state slots the RK sweep integrates alongside the chassis DOF
+/// (HANDOFF §6.1 "actuator lags"; §7.7). The driver's speed-tracking integral lives here as a true
+/// augmented ODE state (`ξ̇ = v_ref − v_x`), so the PI loop is stepped consistently across the RK
+/// stages rather than snapshotted at the step boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum ControllerState {
+    /// Driver speed-tracking integral `ξ = ∫(v_ref − v_x) dt`, m.
+    SpeedIntegral = 0,
+    /// Number of controller slots. Keep last.
+    COUNT,
+}
+
 /// Offset (in slots) where the relaxation region begins.
 const RELAX_BASE: usize = ChassisState::COUNT as usize;
-/// Total fast-state slots: chassis (14-DOF footprint) + relaxation (2 × [`WHEELS`]).
-const FAST_SLOTS: usize = RELAX_BASE + (RelaxState::COUNT as usize) * WHEELS;
+/// Offset (in slots) where the controller region begins (past chassis + relaxation).
+const CONTROLLER_BASE: usize = RELAX_BASE + (RelaxState::COUNT as usize) * WHEELS;
+/// Total fast-state slots: chassis (14-DOF footprint) + relaxation (2 × [`WHEELS`]) + controller.
+const FAST_SLOTS: usize = CONTROLLER_BASE + (ControllerState::COUNT as usize);
 
 /// The number of fast-state slots reserved per lane (chassis + relaxation).
 #[must_use]
@@ -160,6 +180,30 @@ impl StateLayout {
     pub fn relax_slot(which: RelaxState, wheel: usize) -> usize {
         RELAX_BASE + (which as usize) * WHEELS + wheel
     }
+
+    /// Flat index of the controller state `which` in the fast buffer.
+    #[must_use]
+    pub fn controller_slot(which: ControllerState) -> usize {
+        CONTROLLER_BASE + (which as usize)
+    }
+
+    /// The fast-buffer slots the RK sweep integrates for the T2 tier: the `T2_DOF` chassis DOF plus
+    /// the continuous controller states. Allocation-free into `out` (must hold at least
+    /// `T2_DOF + ControllerState::COUNT` entries); returns the number written. Relaxation slots are
+    /// **not** here — the split integrator advances them on the exact-exponential channel, not RK.
+    #[must_use]
+    pub fn t2_integrated_slots(out: &mut [usize]) -> usize {
+        let mut k = 0;
+        for slot in 0..ChassisState::T2_DOF {
+            out[k] = slot;
+            k += 1;
+        }
+        for c in 0..(ControllerState::COUNT as usize) {
+            out[k] = CONTROLLER_BASE + c;
+            k += 1;
+        }
+        k
+    }
 }
 
 /// Read-only view of one lane's **fast** state over an `SoA` buffer. Access is allocation-free.
@@ -189,6 +233,13 @@ impl<'a, T: Float> StateView<'a, T> {
     #[must_use]
     pub fn relax(&self, which: RelaxState, wheel: usize) -> T {
         self.data[StateLayout::relax_slot(which, wheel) * self.batch + self.lane]
+    }
+
+    /// Read a continuous controller state (e.g. the driver speed-tracking integral).
+    #[inline]
+    #[must_use]
+    pub fn controller(&self, which: ControllerState) -> T {
+        self.data[StateLayout::controller_slot(which) * self.batch + self.lane]
     }
 
     /// Read a raw fast slot by flat index (escape hatch for generic code).
@@ -225,6 +276,13 @@ impl<'a, T: Float> DerivView<'a, T> {
     #[inline]
     pub fn set_slot(&mut self, slot: usize, value: T) {
         let i = slot * self.batch + self.lane;
+        self.data[i] = value;
+    }
+
+    /// Set a continuous controller-state derivative (e.g. `ξ̇ = v_ref − v_x` for the driver PI loop).
+    #[inline]
+    pub fn set_controller(&mut self, which: ControllerState, value: T) {
+        let i = StateLayout::controller_slot(which) * self.batch + self.lane;
         self.data[i] = value;
     }
 }
@@ -281,14 +339,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_footprint_is_chassis_plus_relaxation() {
+    fn fast_footprint_is_chassis_plus_relaxation_plus_controller() {
         assert_eq!(
             fast_slot_count(),
-            ChassisState::COUNT as usize + (RelaxState::COUNT as usize) * WHEELS
+            ChassisState::COUNT as usize
+                + (RelaxState::COUNT as usize) * WHEELS
+                + (ControllerState::COUNT as usize)
         );
         // The T2 tier integrates only the first ten chassis slots; the rest are reserved for T3.
         assert_eq!(ChassisState::T2_DOF, 10);
         assert!(ChassisState::T2_DOF < ChassisState::COUNT as usize);
+        // The controller region sits past chassis + relaxation (existing indices unchanged).
+        assert_eq!(
+            StateLayout::controller_slot(ControllerState::SpeedIntegral),
+            ChassisState::COUNT as usize + (RelaxState::COUNT as usize) * WHEELS
+        );
+    }
+
+    #[test]
+    fn t2_integrated_slots_are_chassis_dof_plus_controller() {
+        let mut buf = [0usize; ChassisState::T2_DOF + ControllerState::COUNT as usize];
+        let k = StateLayout::t2_integrated_slots(&mut buf);
+        assert_eq!(k, ChassisState::T2_DOF + ControllerState::COUNT as usize);
+        // The chassis DOF come first, in order, then the controller integral.
+        assert_eq!(
+            &buf[..ChassisState::T2_DOF],
+            &(0..10).collect::<Vec<_>>()[..]
+        );
+        assert_eq!(
+            buf[ChassisState::T2_DOF],
+            StateLayout::controller_slot(ControllerState::SpeedIntegral)
+        );
+        // No relaxation slot is RK-integrated (they use the exact-exponential channel).
+        for wheel in 0..WHEELS {
+            assert!(!buf[..k].contains(&StateLayout::relax_slot(RelaxState::Kappa, wheel)));
+        }
+    }
+
+    #[test]
+    fn controller_state_reads_and_writes_a_lane() {
+        let batch = 2;
+        let mut fast = vec![0.0f64; fast_slot_count() * batch];
+        DerivView::new(&mut fast, batch, 1).set_controller(ControllerState::SpeedIntegral, -3.5);
+        assert_eq!(
+            StateView::new(&fast, batch, 1).controller(ControllerState::SpeedIntegral),
+            -3.5
+        );
+        // Lane 0 untouched.
+        assert_eq!(
+            StateView::new(&fast, batch, 0).controller(ControllerState::SpeedIntegral),
+            0.0
+        );
     }
 
     #[test]

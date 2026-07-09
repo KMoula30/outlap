@@ -1,0 +1,3 @@
+# Proper nouns that the `doc_markdown` lint would otherwise flag as unbackticked code identifiers.
+# `..` keeps clippy's built-in defaults (GitHub, TensorFlow, …).
+doc-valid-idents = ["MacAdam", ".."]

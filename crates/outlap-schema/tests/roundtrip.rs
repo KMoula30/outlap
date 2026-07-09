@@ -67,6 +67,75 @@ fn yaml_serialization_round_trips() {
 }
 
 #[test]
+fn driver_section_resolves_explicit_values_and_surfaces_defaulted_gains() {
+    // The f1_2026 fixture carries a *partial* driver section: the given fields resolve verbatim, the
+    // omitted gains fall back to the MacAdam/PI literature defaults and are surfaced as estimated.
+    let l = loader();
+    let a = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default()).unwrap();
+    let driver = a.spec.driver.as_ref().expect("f1 has a driver section");
+    assert_eq!(driver.preview_time_s, Some(0.7));
+    assert_eq!(driver.max_steer_rad, Some(0.35));
+    assert_eq!(driver.speed_kp, Some(0.25));
+    assert_eq!(driver.speed_ki, Some(0.06));
+    // Resolved accessors: explicit where given, literature default where omitted.
+    assert_eq!(driver.preview_time_s(), 0.7);
+    assert_eq!(
+        driver.preview_gain(),
+        outlap_schema::vehicle::Driver::DEFAULT_PREVIEW_GAIN
+    );
+    // The omitted gains appear in the estimated report; the given ones do not.
+    let estimated_ptrs: Vec<&str> = a
+        .report
+        .estimated
+        .iter()
+        .map(|e| e.pointer.as_str())
+        .collect();
+    assert!(estimated_ptrs.contains(&"/driver/preview_gain"));
+    assert!(estimated_ptrs.contains(&"/driver/ff_accel_scale_mps2"));
+    assert!(!estimated_ptrs.contains(&"/driver/preview_time_s"));
+    assert!(!estimated_ptrs.contains(&"/driver/speed_kp"));
+}
+
+#[test]
+fn absent_driver_section_surfaces_all_gains_as_estimated() {
+    // ev_1du_rwd has no driver section: every driver gain is a literature default → all reported.
+    let l = loader();
+    let a = load_vehicle("ev_1du_rwd/vehicle.yaml", &l, &LoadOptions::default()).unwrap();
+    assert!(a.spec.driver.is_none(), "no driver section given");
+    let n = a
+        .report
+        .estimated
+        .iter()
+        .filter(|e| e.pointer.starts_with("/driver/"))
+        .count();
+    assert_eq!(n, 10, "all ten driver gains surfaced as estimated");
+    // Record-only: the hash matches an in-memory re-resolve (no spec mutation from the driver
+    // estimation), so a vehicle with no driver section is unchanged by the feature.
+    let b = resolve_vehicle(&a.spec, &Overrides::default(), &l, &LoadOptions::default()).unwrap();
+    assert_eq!(a.report.resolved_hash, b.report.resolved_hash);
+}
+
+#[test]
+fn negative_driver_preview_time_is_a_semantic_error() {
+    let l = loader();
+    let mut spec = load_vehicle("ev_1du_rwd/vehicle.yaml", &l, &LoadOptions::default())
+        .unwrap()
+        .spec;
+    spec.driver = Some(outlap_schema::vehicle::Driver {
+        preview_time_s: Some(-0.5),
+        ..Default::default()
+    });
+    let err = resolve_vehicle(&spec, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("negative preview time must be rejected");
+    match err {
+        outlap_schema::error::SchemaError::Semantic { message, .. } => {
+            assert!(message.contains("preview_time_s"), "message: {message}");
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+#[test]
 fn referenced_files_load_standalone() {
     let l = loader();
     let ptm = load_ptm("ptm/ice_v6.ptm.yaml", &l).unwrap();

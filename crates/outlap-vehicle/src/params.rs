@@ -14,7 +14,10 @@ pub const G: f64 = 9.806_65;
 
 /// The interned dynamic-bus channels the road publishes each step (Decision #39). The chassis reads
 /// `kappa`/`grade`/`banking` for the curvilinear kinematics and the in-plane gravity projection; the
-/// driver reads `n_ref`/`kappa_ref`/`v_ref` (PR4 target-line plumbing). Interned once at assembly.
+/// driver reads the current-station target-line channels (`n_ref`/`kappa_ref`/`v_ref`) plus the
+/// **preview** channels (`*_preview`) the orchestrator samples at the look-ahead station
+/// `s + v_x·t_preview` for the MacAdam-style preview steer and the speed feed-forward (PR5,
+/// §7.7). Interned once at assembly.
 #[derive(Clone, Copy, Debug)]
 pub struct RoadChannels {
     /// Plan-view curvature `κ_h(s)` of the reference line at the current station (1/m, +left).
@@ -25,12 +28,19 @@ pub struct RoadChannels {
     pub banking: ChannelId,
     /// Vertical curvature `κ_v(s)` (1/m, crest < 0, dip > 0) — normal-load modulation in the Fz block.
     pub kappa_v: ChannelId,
-    /// Target lateral offset `n_ref(s)` (m, +left) the driver tracks.
+    /// Target lateral offset `n_ref(s)` (m, +left) at the current station (recorded; driver uses the
+    /// preview offset for tracking).
     pub n_ref: ChannelId,
-    /// Target-line curvature `κ_ref(s)` (1/m) — yaw-rate feed-forward `r_target = v·κ_ref`.
+    /// Target-line curvature `κ_ref(s)` (1/m) at the current station.
     pub kappa_ref: ChannelId,
-    /// Target speed `v_ref(s)` (m/s) from the QSS speed profile the driver tracks.
+    /// Target speed `v_ref(s)` (m/s) at the current station.
     pub v_ref: ChannelId,
+    /// Previewed target offset `n_ref(s + L_p)` (m, +left) at the look-ahead station.
+    pub n_ref_preview: ChannelId,
+    /// Previewed target curvature `κ_ref(s + L_p)` (1/m) — curvature feed-forward arm.
+    pub kappa_ref_preview: ChannelId,
+    /// Previewed target speed `v_ref(s + L_p)` (m/s) — speed feed-forward.
+    pub v_ref_preview: ChannelId,
 }
 
 impl RoadChannels {
@@ -45,6 +55,9 @@ impl RoadChannels {
             n_ref: interner.intern("road.n_ref"),
             kappa_ref: interner.intern("road.kappa_ref"),
             v_ref: interner.intern("road.v_ref"),
+            n_ref_preview: interner.intern("road.n_ref_preview"),
+            kappa_ref_preview: interner.intern("road.kappa_ref_preview"),
+            v_ref_preview: interner.intern("road.v_ref_preview"),
         }
     }
 }

@@ -39,6 +39,6 @@ pub use interp::{InterpError, MonotoneCubic};
 pub use relax::{exact_exponential, semi_implicit_decay, SlowClock};
 pub use spline::{CubicSpline, SplineError};
 pub use state::{
-    fast_slot_count, ChassisState, DerivView, RelaxState, SlowDerivView, SlowStateView,
-    StateLayout, StateView,
+    fast_slot_count, ChassisState, ControllerState, DerivView, RelaxState, SlowDerivView,
+    SlowStateView, StateLayout, StateView,
 };
