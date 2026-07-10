@@ -107,6 +107,32 @@
         "level"
       ]
     },
+    "DerateVsTemp": {
+      "description": "A derate curve vs pack temperature: paired equal-length temperature / factor arrays.",
+      "type": "object",
+      "properties": {
+        "factor": {
+          "description": "Derate factor at each breakpoint, `0..1` (`0` accepts no charge, `1` the full ceiling).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "temp_c": {
+          "description": "Temperature breakpoints, °C (ascending).",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "required": [
+        "temp_c",
+        "factor"
+      ]
+    },
     "Ecm": {
       "description": "The equivalent-circuit model: RC-pair count, table axes, and the sidecar reference.",
       "type": "object",
@@ -187,7 +213,7 @@
       "type": "object",
       "properties": {
         "cell_v_max": {
-          "description": "Maximum cell terminal voltage, V.",
+          "description": "Maximum cell terminal voltage, V — the charge ceiling. Enforced: charge power is capped so the\nloaded terminal voltage never exceeds `ns · cell_v_max`.",
           "type": "number",
           "format": "double"
         },
@@ -206,8 +232,19 @@
           "$ref": "#/$defs/PowerVsSoc"
         },
         "peak_regen_power_w_vs_soc": {
-          "description": "Peak regen (charge) power vs SoC, W (a positive-magnitude ceiling on charging).",
+          "description": "Peak regen (charge) power vs SoC, W (a positive-magnitude ceiling on charging), stated at the\npack's reference temperature. Scaled by `regen_derate_vs_temp` for the cold/hot ceiling.",
           "$ref": "#/$defs/PowerVsSoc"
+        },
+        "regen_derate_vs_temp": {
+          "description": "Charge-acceptance derate vs pack temperature: a `0..1` factor multiplying\n`peak_regen_power_w_vs_soc` (`battery/1.1`).\n\nA cold lithium-ion cell cannot accept a fast charge. Below roughly 10 °C the anode's\nintercalation kinetics slow until plating metallic lithium becomes the competing reaction, so\nbattery-management systems cut charge current hard — typically to zero below 0 °C — to avoid\nirreversible capacity loss and dendrite growth. That is a *kinetic* limit: it does not fall\nout of the ohmic `R0(soc, temp)` grid, so it must be declared.\n\nWhen absent, the pack accepts its full SoC-curve ceiling at every temperature and the\nloaded-model report marks that as estimated. The voltage ceiling below still applies, so a\nnearly-full pack always tapers regardless.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DerateVsTemp"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

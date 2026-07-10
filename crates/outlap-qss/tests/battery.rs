@@ -84,6 +84,7 @@ fn constant_pack(ocv: f64, r0: f64, r1: f64, tau: f64) -> (Pack, outlap_qss::Pac
                 soc: vec![0.0, 1.0],
                 power_w: vec![1.0e9, 1.0e9],
             },
+            regen_derate_vs_temp: None,
             cell_v_min: 0.0,
             cell_v_max: 100.0,
             max_c_rate: 100.0,
@@ -97,6 +98,293 @@ fn constant_pack(ocv: f64, r0: f64, r1: f64, tau: f64) -> (Pack, outlap_qss::Pac
         meta: BatteryMeta::default(),
     };
     Pack::assemble(&doc, &table, Some(0.5)).unwrap()
+}
+
+// --- Charge acceptance: SoC ∧ temperature (series regen blend, §7.6) -----------------------------
+
+/// Absolute zero offset, K (the crate's private `CELSIUS_K`).
+const CELSIUS_K: f64 = 273.15;
+
+/// A single-cell pack whose `R0` is temperature-graded (cold ⇒ high) and whose OCV is flat, so the
+/// charge-acceptance ceilings can be isolated one at a time. `ns = 1`, so `v_max_pack = cell_v_max`.
+fn charge_pack(
+    ocv: f64,
+    r0_cold: f64,
+    r0_warm: f64,
+    cell_v_max: f64,
+    peak_regen_w: f64,
+    derate: Option<outlap_schema::battery::DerateVsTemp>,
+) -> (Pack, outlap_qss::PackState) {
+    // Grid corners: (soc, temp_c) ∈ {0,1} × {-20, 40}. R0 grades with temperature only.
+    let cols = vec![
+        ("soc".to_owned(), vec![0.0, 0.0, 1.0, 1.0]),
+        ("temp_c".to_owned(), vec![-20.0, 40.0, -20.0, 40.0]),
+        ("ocv_v".to_owned(), vec![ocv; 4]),
+        (
+            "r0_ohm".to_owned(),
+            vec![r0_cold, r0_warm, r0_cold, r0_warm],
+        ),
+        ("r1_ohm".to_owned(), vec![1.0e-6; 4]),
+        ("tau1_s".to_owned(), vec![1.0; 4]),
+        ("dudt_v_per_k".to_owned(), vec![0.0; 4]),
+    ];
+    let table = GriddedTable::from_long(&cols, &["soc", "temp_c"]).unwrap();
+    let doc = BatteryDoc {
+        schema: SchemaVersion::new("battery", 1, 1),
+        model: BatteryModelKind::RcPairs,
+        topology: PackTopology { ns: 1, np: 1 },
+        capacity: PackCapacity {
+            q_pack_ah: 1.0e9,
+            e_pack_wh: 1.0,
+        },
+        soc_window: [0.0, 0.9],
+        ecm: Ecm {
+            rc_pairs: 1,
+            axes: EcmAxes {
+                soc: vec![0.0, 1.0],
+                temp_c: vec![-20.0, 40.0],
+            },
+            tables: BatteryTables {
+                file: "x.parquet".into(),
+                level: TableLevel::Cell,
+            },
+        },
+        limits: PackLimits {
+            peak_discharge_power_w_vs_soc: PowerVsSoc {
+                soc: vec![0.0, 1.0],
+                power_w: vec![1.0e9, 1.0e9],
+            },
+            peak_regen_power_w_vs_soc: PowerVsSoc {
+                soc: vec![0.0, 1.0],
+                power_w: vec![peak_regen_w, peak_regen_w],
+            },
+            regen_derate_vs_temp: derate,
+            cell_v_min: 0.0,
+            cell_v_max,
+            max_c_rate: 100.0,
+        },
+        thermal: PackThermal {
+            mass_kg: 1.0,
+            cp_j_per_kgk: 1000.0,
+            thermal_resistance_k_per_w: 0.0,
+            coolant_temp_c: 25.0,
+        },
+        meta: BatteryMeta::default(),
+    };
+    Pack::assemble(&doc, &table, Some(0.5)).unwrap()
+}
+
+/// A BMS-style charge derate: nothing below 0 °C, full acceptance by 25 °C.
+fn plating_derate() -> outlap_schema::battery::DerateVsTemp {
+    outlap_schema::battery::DerateVsTemp {
+        temp_c: vec![-20.0, 0.0, 10.0, 25.0, 45.0],
+        factor: vec![0.0, 0.0, 0.35, 1.0, 1.0],
+    }
+}
+
+/// A resistance low enough that the voltage ceiling sits far above the design curve, so the kinetic
+/// derate is the only thing that can bind. (At a realistic 0.02 Ω a *single cell* only accepts ~126 W
+/// — the voltage ceiling would mask the derate entirely. Packs escape this via `ns` in series.)
+const R0_NEGLIGIBLE: f64 = 1.0e-6;
+
+/// A cold pack must not accept the charge a warm one does — the kinetic (lithium-plating) derate.
+/// The design curve and the voltage headroom are identical at both temperatures here, so the *only*
+/// thing that can move the ceiling is temperature.
+#[test]
+fn cold_pack_accepts_less_charge_than_warm() {
+    let (pack, st) = charge_pack(
+        3.6,
+        R0_NEGLIGIBLE,
+        R0_NEGLIGIBLE,
+        4.2,
+        50_000.0,
+        Some(plating_derate()),
+    );
+    let cold = outlap_qss::PackState {
+        temp_k: -5.0 + CELSIUS_K,
+        ..st
+    };
+    let warm = outlap_qss::PackState {
+        temp_k: 30.0 + CELSIUS_K,
+        ..st
+    };
+    let (p_cold, p_warm) = (
+        pack.regen_power_limit_w(&cold),
+        pack.regen_power_limit_w(&warm),
+    );
+    assert!(
+        p_cold < p_warm,
+        "cold pack must accept less charge: cold={p_cold} warm={p_warm}"
+    );
+    assert_eq!(
+        p_cold, 0.0,
+        "below 0 °C the BMS accepts no charge: {p_cold}"
+    );
+    assert!(p_warm > 0.0, "a warm pack accepts charge: {p_warm}");
+}
+
+/// The derate is a *scaling* of the design curve, not a replacement: at a partial-derate temperature
+/// the ceiling is exactly `factor · peak_regen(SoC)` (the voltage ceiling is far away here).
+#[test]
+fn derate_scales_the_design_curve() {
+    let peak = 50_000.0;
+    let (pack, st) = charge_pack(
+        3.6,
+        R0_NEGLIGIBLE,
+        R0_NEGLIGIBLE,
+        4.2,
+        peak,
+        Some(plating_derate()),
+    );
+    let at10 = outlap_qss::PackState {
+        temp_k: 10.0 + CELSIUS_K,
+        ..st
+    };
+    let limit = pack.regen_power_limit_w(&at10);
+    assert!(
+        (limit - 0.35 * peak).abs() < 1e-6 * peak,
+        "expected 0.35·{peak}, got {limit}"
+    );
+}
+
+/// With no derate curve declared, temperature must not gate acceptance (backward compatibility with
+/// `battery/1.0` documents) — only the SoC curve and the voltage ceiling bind.
+#[test]
+fn absent_derate_curve_leaves_acceptance_temperature_independent() {
+    let (pack, st) = charge_pack(3.6, R0_NEGLIGIBLE, R0_NEGLIGIBLE, 4.2, 50_000.0, None);
+    let cold = outlap_qss::PackState {
+        temp_k: -15.0 + CELSIUS_K,
+        ..st
+    };
+    let warm = outlap_qss::PackState {
+        temp_k: 35.0 + CELSIUS_K,
+        ..st
+    };
+    assert_eq!(pack.regen_derate_factor(&cold), 1.0);
+    let (p_cold, p_warm) = (
+        pack.regen_power_limit_w(&cold),
+        pack.regen_power_limit_w(&warm),
+    );
+    // The design curve binds at both ends; R0 is flat in temperature, so only interpolation
+    // round-off can separate them.
+    assert!(
+        (p_cold - p_warm).abs() <= 1e-9 * p_warm,
+        "no derate curve ⇒ the ceiling is temperature-independent: cold={p_cold} warm={p_warm}"
+    );
+}
+
+/// A nearly-full pack tapers on the **voltage** ceiling even when the design curve and the derate
+/// both say "take it all": charging pushes the terminal voltage above the EMF, and it may not pass
+/// `ns · cell_v_max`. This is the constant-voltage taper, and it is what stops a full battery from
+/// swallowing a whole braking event.
+#[test]
+fn nearly_full_pack_tapers_on_the_voltage_ceiling() {
+    // OCV 4.19 V sits 10 mV under the 4.2 V ceiling ⇒ tiny headroom ⇒ tiny charge power.
+    let (pack, st) = charge_pack(4.19, 0.02, 0.02, 4.2, 1.0e9, None);
+    let warm = outlap_qss::PackState {
+        temp_k: 25.0 + CELSIUS_K,
+        ..st
+    };
+    let limit = pack.regen_power_limit_w(&warm);
+    let expected = 4.2 * (4.2 - 4.19) / 0.02; // V_max · (V_max − emf) / R0
+    assert!(
+        (limit - expected).abs() < 1e-9 * expected,
+        "voltage-limited ceiling: expected {expected}, got {limit}"
+    );
+    assert!(limit < 1.0e9, "the 1 GW design curve must not win");
+
+    // At the ceiling exactly, nothing is accepted.
+    let (full, st_full) = charge_pack(4.2, 0.02, 0.02, 4.2, 1.0e9, None);
+    let at_ceiling = outlap_qss::PackState {
+        temp_k: 25.0 + CELSIUS_K,
+        ..st_full
+    };
+    assert_eq!(full.regen_power_limit_w(&at_ceiling), 0.0);
+}
+
+/// The voltage ceiling itself tightens when cold, because `R0(SoC, T)` rises: the same voltage
+/// headroom admits less current. This is the *ohmic* half of the cold story, independent of the
+/// declared kinetic derate.
+#[test]
+fn voltage_ceiling_tightens_when_cold() {
+    // No derate curve, so only the ohmic term can differ; R0 is 5× higher cold.
+    let (pack, st) = charge_pack(4.19, 0.10, 0.02, 4.2, 1.0e9, None);
+    let cold = outlap_qss::PackState {
+        temp_k: -20.0 + CELSIUS_K,
+        ..st
+    };
+    let warm = outlap_qss::PackState {
+        temp_k: 40.0 + CELSIUS_K,
+        ..st
+    };
+    let (p_cold, p_warm) = (
+        pack.voltage_limited_charge_power_w(&cold),
+        pack.voltage_limited_charge_power_w(&warm),
+    );
+    assert!(
+        (p_cold * 5.0 - p_warm).abs() < 1e-6 * p_warm,
+        "5× the resistance ⇒ 1/5 the voltage-limited power: cold={p_cold} warm={p_warm}"
+    );
+    assert!(p_cold < p_warm);
+}
+
+/// Above the usable SoC window nothing is accepted, whatever the temperature says.
+#[test]
+fn full_pack_accepts_nothing_above_the_soc_window() {
+    let (pack, st) = charge_pack(3.6, 0.02, 0.02, 4.2, 50_000.0, None);
+    let full = outlap_qss::PackState {
+        soc: 0.95, // window top is 0.90
+        temp_k: 25.0 + CELSIUS_K,
+        ..st
+    };
+    assert_eq!(pack.regen_power_limit_w(&full), 0.0);
+}
+
+/// An absent derate curve is an *estimate*, and estimates are surfaced in the loaded-model report —
+/// never applied silently (#41). A declared curve is data, so it earns no note.
+#[test]
+fn an_absent_charge_derate_is_surfaced_as_estimated() {
+    let (bare, _) = charge_pack(3.6, R0_NEGLIGIBLE, R0_NEGLIGIBLE, 4.2, 50_000.0, None);
+    assert!(!bare.regen_derate_declared());
+    assert!(
+        bare.notes()
+            .iter()
+            .any(|n| n.contains("temperature-independent")),
+        "the assumption is surfaced: {:?}",
+        bare.notes()
+    );
+
+    let (declared, _) = charge_pack(
+        3.6,
+        R0_NEGLIGIBLE,
+        R0_NEGLIGIBLE,
+        4.2,
+        50_000.0,
+        Some(plating_derate()),
+    );
+    assert!(declared.regen_derate_declared());
+    assert!(
+        declared.notes().is_empty(),
+        "a declared curve is data, not an estimate: {:?}",
+        declared.notes()
+    );
+}
+
+/// The ceiling is a positive magnitude at every reachable state — never negative, never NaN.
+#[test]
+fn charge_acceptance_is_never_negative() {
+    let (pack, st) = charge_pack(3.6, 0.10, 0.001, 4.2, 50_000.0, Some(plating_derate()));
+    for &soc in &[0.0, 0.25, 0.5, 0.75, 0.89, 0.9, 1.0] {
+        for &t in &[-30.0, -20.0, 0.0, 25.0, 40.0, 60.0] {
+            let s = outlap_qss::PackState {
+                soc,
+                temp_k: t + CELSIUS_K,
+                ..st
+            };
+            let p = pack.regen_power_limit_w(&s);
+            assert!(p >= 0.0 && p.is_finite(), "soc={soc} T={t} ⇒ {p}");
+        }
+    }
 }
 
 #[test]

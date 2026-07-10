@@ -123,11 +123,27 @@ pub enum TableLevel {
 pub struct PackLimits {
     /// Peak discharge power vs SoC, W (a positive-power ceiling).
     pub peak_discharge_power_w_vs_soc: PowerVsSoc,
-    /// Peak regen (charge) power vs SoC, W (a positive-magnitude ceiling on charging).
+    /// Peak regen (charge) power vs SoC, W (a positive-magnitude ceiling on charging), stated at the
+    /// pack's reference temperature. Scaled by `regen_derate_vs_temp` for the cold/hot ceiling.
     pub peak_regen_power_w_vs_soc: PowerVsSoc,
+    /// Charge-acceptance derate vs pack temperature: a `0..1` factor multiplying
+    /// `peak_regen_power_w_vs_soc` (`battery/1.1`).
+    ///
+    /// A cold lithium-ion cell cannot accept a fast charge. Below roughly 10 °C the anode's
+    /// intercalation kinetics slow until plating metallic lithium becomes the competing reaction, so
+    /// battery-management systems cut charge current hard — typically to zero below 0 °C — to avoid
+    /// irreversible capacity loss and dendrite growth. That is a *kinetic* limit: it does not fall
+    /// out of the ohmic `R0(soc, temp)` grid, so it must be declared.
+    ///
+    /// When absent, the pack accepts its full SoC-curve ceiling at every temperature and the
+    /// loaded-model report marks that as estimated. The voltage ceiling below still applies, so a
+    /// nearly-full pack always tapers regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regen_derate_vs_temp: Option<DerateVsTemp>,
     /// Minimum cell terminal voltage, V.
     pub cell_v_min: f64,
-    /// Maximum cell terminal voltage, V.
+    /// Maximum cell terminal voltage, V — the charge ceiling. Enforced: charge power is capped so the
+    /// loaded terminal voltage never exceeds `ns · cell_v_max`.
     pub cell_v_max: f64,
     /// Maximum continuous C-rate (informational; power limits bind first).
     pub max_c_rate: f64,
@@ -141,6 +157,16 @@ pub struct PowerVsSoc {
     pub soc: Vec<f64>,
     /// Power at each breakpoint, W.
     pub power_w: Vec<f64>,
+}
+
+/// A derate curve vs pack temperature: paired equal-length temperature / factor arrays.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct DerateVsTemp {
+    /// Temperature breakpoints, °C (ascending).
+    pub temp_c: Vec<f64>,
+    /// Derate factor at each breakpoint, `0..1` (`0` accepts no charge, `1` the full ceiling).
+    pub factor: Vec<f64>,
 }
 
 /// The lumped-node thermal parameters of the pack.

@@ -106,6 +106,8 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// document, then to 4 for the `sim/1.1` `flat_track` analysis flag (tier dispatch + Limebeer
 /// cross-check), then to 5 for the `vehicle/1.5` optional `driver` section (MacAdam preview + PI
 /// speed-tracking gains, §7.7), then to 6 for the `vehicle/1.6` optional torque-vectoring
-/// `max_yaw_moment_nm` cap (§8.0); an unknown key in a file that declares a newer MINOR than this is
-/// flagged as possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 6;
+/// `max_yaw_moment_nm` cap (§8.0), then to 7 for the `ptm/1.2` optional
+/// `max_regen_torque_nm_vs_speed` machine braking envelope alongside the `battery/1.1` optional
+/// `regen_derate_vs_temp` charge-acceptance curve (series regen blend, §7.6); an unknown key in a
+/// file that declares a newer MINOR than this is flagged as possibly-newer-schema.
+pub const SCHEMA_MINOR: u16 = 7;

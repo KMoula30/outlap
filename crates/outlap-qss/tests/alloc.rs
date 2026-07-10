@@ -323,6 +323,7 @@ fn setup_pack() -> (Pack, PackState) {
                 soc: vec![0.0, 1.0],
                 power_w: vec![300_000.0, 300_000.0],
             },
+            regen_derate_vs_temp: None,
             cell_v_min: 2.5,
             cell_v_max: 4.2,
             max_c_rate: 3.0,

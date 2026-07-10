@@ -21,8 +21,8 @@ use outlap_schema::vehicle::Driver as DriverCfg;
 use outlap_schema::{load_conditions, load_vehicle, LoadOptions};
 use outlap_transient::{LineSamples, LineTable, T2Blocks};
 use outlap_vehicle::{
-    drive_weights, ActuationChannels, Aero, Chassis, ChassisParams, Driver, LoadTransfer,
-    Powertrain, RegenParams, RelaxProvider, RoadChannels, Tire, TorqueVectoring, G,
+    drive_weights, ActuationChannels, Aero, AxleRegen, Chassis, ChassisParams, Driver,
+    LoadTransfer, Powertrain, RegenParams, RelaxProvider, RoadChannels, Tire, TorqueVectoring, G,
 };
 
 const WHEEL_INERTIA_KGM2: f64 = 1.1;
@@ -87,6 +87,55 @@ pub fn traction_curve(t1: &T1Vehicle) -> MonotoneCubic<f64> {
         .collect();
     let fs: Vec<f64> = vs.iter().map(|&v| t1.max_tractive_force(v)).collect();
     MonotoneCubic::new(vs, fs).expect("monotone traction speed grid")
+}
+
+/// The uniform speed grid the envelopes are sampled on, m/s.
+fn speed_grid() -> Vec<f64> {
+    (0..TRACTION_SAMPLES)
+        .map(|i| i as f64 * TRACTION_V_MAX_MPS / (TRACTION_SAMPLES as f64 - 1.0))
+        .collect()
+}
+
+/// Sample each axle's peak regen **braking** wheel force `F_regen_max(v)` into the shared monotone
+/// cubic, one curve per axle: `[front, rear]`. An axle with no machine yields `None` and is braked by
+/// friction alone. This is the assembly-time `.ptm` read — the hot loop only ever sees the spline.
+#[must_use]
+pub fn regen_curves(t1: &T1Vehicle) -> [Option<MonotoneCubic<f64>>; 2] {
+    let vs = speed_grid();
+    let mut out = [None, None];
+    for (axle, slot) in out.iter_mut().enumerate() {
+        let fs: Vec<f64> = vs
+            .iter()
+            .map(|&v| t1.max_regen_force_by_axle(v)[axle])
+            .collect();
+        // An axle with no machine has an all-zero curve; represent that as "no machine" so the block
+        // skips it entirely rather than evaluating a spline that can only return zero.
+        if fs.iter().all(|&f| f <= 0.0) {
+            continue;
+        }
+        *slot = Some(MonotoneCubic::new(vs.clone(), fs).expect("monotone regen speed grid"));
+    }
+    out
+}
+
+/// Build per-axle regen parameters from the vehicle's own machines. `authority` is the blend
+/// authority (`brakes.regen_blend.max_regen_frac`); `efficiency` the machine+inverter recovery.
+#[must_use]
+pub fn regen_params(t1: &T1Vehicle, authority: f64, efficiency: f64) -> RegenParams<f64> {
+    let [front, rear] = regen_curves(t1);
+    let axle = |c: Option<MonotoneCubic<f64>>| {
+        c.map(|force_max| AxleRegen {
+            force_max,
+            efficiency,
+            authority,
+        })
+    };
+    let (front, rear) = (axle(front), axle(rear));
+    RegenParams {
+        enabled: front.is_some() || rear.is_some(),
+        front,
+        rear,
+    }
 }
 
 /// Build the full T2 block set from an assembled vehicle (the tuned ideal driver + minimal
@@ -158,13 +207,9 @@ pub fn build_blocks(t1: &T1Vehicle, it: &mut ChannelInterner) -> T2Blocks<f64> {
             radius,
             max_brake_torque: 6000.0,
             brake_front_bias: t1.brake_front_bias,
-            // Regen off by default (the base parity assembly); tests that exercise regen turn it on.
-            regen: RegenParams {
-                enabled: false,
-                max_regen_frac: 0.0,
-                efficiency: 0.9,
-                driven: t1.driven,
-            },
+            // Regen off by default (the base parity assembly); tests that exercise regen turn it on
+            // with `regen_params(t1, authority, efficiency)`.
+            regen: RegenParams::disabled(),
             actuation,
         },
         // Torque vectoring off by default (a no-op block); tests enable it explicitly.

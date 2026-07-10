@@ -70,14 +70,21 @@ pub struct Pack {
     soc_window: [f64; 2],
     /// Peak discharge power vs SoC, W (positive ceiling).
     peak_discharge: MonotoneCubic<f64>,
-    /// Peak regen power vs SoC, W (positive-magnitude ceiling).
+    /// Peak regen power vs SoC, W (positive-magnitude ceiling) at the reference temperature.
     peak_regen: MonotoneCubic<f64>,
+    /// Charge-acceptance derate vs pack temperature (°C → `0..1`). `None` ⇒ no kinetic derate.
+    regen_derate: Option<MonotoneCubic<f64>>,
+    /// Pack charge-voltage ceiling `ns · cell_v_max`, V.
+    v_max_pack_v: f64,
     /// Lumped thermal capacity `C = mass·c_p`, J/K.
     c_th_j_per_k: f64,
     /// Jacket thermal resistance to the coolant, K/W (`≤ 0` ⇒ the pack is pinned to the coolant).
     r_th_k_per_w: f64,
     /// Coolant/ambient sink temperature, K.
     t_coolant_k: f64,
+    /// Assembly-time notes (estimated/degraded values) for the loaded-model report — nothing silent
+    /// (#41). The Python boundary threads these into the lap's `notes`.
+    notes: Vec<String>,
 }
 
 /// The per-segment slow state of a [`Pack`]: SoC, the RC overpotential, the lumped temperature, and
@@ -154,6 +161,23 @@ impl Pack {
         let peak_regen =
             power_curve(&doc.limits.peak_regen_power_w_vs_soc).map_err(T1Error::Battery)?;
 
+        let regen_derate = doc
+            .limits
+            .regen_derate_vs_temp
+            .as_ref()
+            .map(derate_curve)
+            .transpose()
+            .map_err(T1Error::Battery)?;
+        let mut notes = Vec::new();
+        if regen_derate.is_none() {
+            notes.push(
+                "battery declares no `limits.regen_derate_vs_temp`; charge acceptance is assumed \
+                 temperature-independent (estimated) — a cold pack will accept its full SoC-curve \
+                 ceiling, which a real BMS would refuse"
+                    .to_owned(),
+            );
+        }
+
         let pack = Self {
             ocv: m(COL_OCV)?,
             r0: m(COL_R0)?,
@@ -166,9 +190,14 @@ impl Pack {
             soc_window: doc.soc_window,
             peak_discharge,
             peak_regen,
+            regen_derate,
+            // `cell_v_max` is stated per cell regardless of the table level, so the pack ceiling is
+            // always `ns ×` it (a pack-level ECM table does not pre-scale the voltage bounds).
+            v_max_pack_v: f64::from(doc.topology.ns) * doc.limits.cell_v_max,
             c_th_j_per_k: doc.thermal.mass_kg * doc.thermal.cp_j_per_kgk,
             r_th_k_per_w: doc.thermal.thermal_resistance_k_per_w,
             t_coolant_k: doc.thermal.coolant_temp_c + CELSIUS_K,
+            notes,
         };
         let soc0 = initial_soc.unwrap_or(pack.soc_window[1]);
         let state = PackState {
@@ -205,14 +234,68 @@ impl Pack {
         }
     }
 
-    /// The instantaneous regen (charge) power ceiling at the current SoC, W (0 above the SoC window).
+    /// The **charge-acceptance ceiling**: the instantaneous regen power the pack will take at its
+    /// current SoC *and* temperature, W (positive magnitude; `0` at or above the SoC window).
+    ///
+    /// Three ceilings compose by `min`, because a battery-management system enforces all three:
+    ///
+    /// 1. **Design/SoC ceiling** — the declared `peak_regen_power_w_vs_soc(SoC)` curve.
+    /// 2. **Kinetic (cold) derate** — `regen_derate_vs_temp(T)` scales that curve. A cold cell
+    ///    cannot accept a fast charge: below ~10 °C anode intercalation slows until lithium plating
+    ///    competes, so a real BMS cuts charge current hard (to zero below ~0 °C). This is a kinetic
+    ///    limit and does *not* emerge from the ohmic grid, so it is declared, not derived. Absent ⇒
+    ///    factor 1.
+    /// 3. **Voltage (CV) ceiling** — charging drives the terminal voltage *above* the open-circuit
+    ///    EMF by `I·R0`, and it may not exceed `ns · cell_v_max`. With `emf = OCV(SoC,T) − V_RC` and
+    ///    the pack-level `R0(SoC,T)`, the largest charge current is `(V_max − emf) / R0`, so
+    ///    `P ≤ V_max · (V_max − emf) / R0`. This is the constant-voltage taper: it vanishes as the
+    ///    pack fills (`emf → V_max`) and tightens when cold (`R0` rises), automatically.
+    ///
+    /// Ceiling 3 alone does *not* reproduce cold-charge refusal on a real pack — at mid SoC it sits
+    /// far above the design curve even at −10 °C. Both terms are needed, and each binds in its own
+    /// regime: (2) when cold, (3) when nearly full.
     #[must_use]
     pub fn regen_power_limit_w(&self, st: &PackState) -> f64 {
         if st.soc >= self.soc_window[1] {
-            0.0
-        } else {
-            self.peak_regen.eval(st.soc).max(0.0)
+            return 0.0;
         }
+        let design = self.peak_regen.eval(st.soc).max(0.0);
+        let derate = self.regen_derate_factor(st);
+        self.voltage_limited_charge_power_w(st).min(design * derate)
+    }
+
+    /// Assembly-time notes for the loaded-model report (estimated/degraded values surfaced, #41).
+    #[must_use]
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// Whether the pack declared a `regen_derate_vs_temp` curve. When `false`, charge acceptance is
+    /// temperature-independent and [`Self::notes`] says so.
+    #[must_use]
+    pub fn regen_derate_declared(&self) -> bool {
+        self.regen_derate.is_some()
+    }
+
+    /// The temperature derate factor on charge acceptance, `0..1` (`1` when no curve is declared).
+    #[must_use]
+    pub fn regen_derate_factor(&self, st: &PackState) -> f64 {
+        self.regen_derate
+            .as_ref()
+            .map_or(1.0, |c| c.eval(st.temp_k - CELSIUS_K).clamp(0.0, 1.0))
+    }
+
+    /// The charge power at which the loaded terminal voltage would reach `ns · cell_v_max`, W
+    /// (positive magnitude; `0` once the EMF already sits at the ceiling). See
+    /// [`Self::regen_power_limit_w`] ceiling 3.
+    #[must_use]
+    pub fn voltage_limited_charge_power_w(&self, st: &PackState) -> f64 {
+        let emf = self.open_circuit_voltage_v(st) - st.v_rc_v;
+        let headroom = self.v_max_pack_v - emf;
+        if headroom <= 0.0 {
+            return 0.0;
+        }
+        self.v_max_pack_v * headroom / self.r0_pack(st)
     }
 
     /// Advance one segment under a commanded **terminal current** `i_pack_a` (discharge positive)
@@ -328,4 +411,19 @@ fn power_curve(p: &outlap_schema::battery::PowerVsSoc) -> Result<MonotoneCubic<f
     }
     MonotoneCubic::new(p.soc.clone(), p.power_w.clone())
         .map_err(|e| format!("power-vs-soc curve is not monotone-fittable: {e}"))
+}
+
+/// Fit a monotone-cubic derate-vs-temperature curve from a schema `DerateVsTemp`. Evaluations off
+/// the ends clamp to the terminal factors — a pack colder than the coldest breakpoint accepts the
+/// coldest declared factor (typically 0), never an extrapolated negative one.
+fn derate_curve(d: &outlap_schema::battery::DerateVsTemp) -> Result<MonotoneCubic<f64>, String> {
+    if d.temp_c.len() != d.factor.len() || d.temp_c.len() < 2 {
+        return Err(format!(
+            "regen-derate curve needs ≥ 2 paired points; got temp_c={}, factor={}",
+            d.temp_c.len(),
+            d.factor.len()
+        ));
+    }
+    MonotoneCubic::new(d.temp_c.clone(), d.factor.clone())
+        .map_err(|e| format!("regen-derate curve is not monotone-fittable: {e}"))
 }

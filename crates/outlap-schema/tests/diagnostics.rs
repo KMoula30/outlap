@@ -261,3 +261,79 @@ fn all_six_reference_topologies_resolve() {
             .unwrap_or_else(|e| panic!("{path} topology should resolve: {e:?}"));
     }
 }
+
+// --- ptm/1.2 regen envelope + battery/1.1 charge derate (series regen blend) ---------------------
+
+/// The regen envelope is a *positive magnitude*. Signing it negative is the obvious authoring
+/// mistake, so the message says exactly what to do rather than just "invalid".
+#[test]
+fn a_negative_regen_envelope_is_rejected_with_a_plain_language_fix() {
+    let ptm = "schema: ptm/1.2\nkind: electric_machine\n\
+        axes: {speed_rpm: [0.0, 8000.0], load_axis: {torque_nm: [-300.0, 300.0]}, torque_nm: [-300.0, 300.0]}\n\
+        tables: {file: x.parquet}\n\
+        limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}, max_regen_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [-120.0, -120.0]}}\n\
+        inertia_kgm2: 0.1\nmass_kg: 80.0\n";
+    let loader = MemLoader::new().with("u.ptm.yaml", ptm);
+    let err = outlap_schema::load::load_ptm("u.ptm.yaml", &loader)
+        .expect_err("a negative regen envelope must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("positive-magnitude") && msg.contains("minus sign"),
+        "the message must tell the author what to do: {msg}"
+    );
+}
+
+/// A derate factor scales the declared ceiling, so it may not exceed 1 — that would silently *raise*
+/// the pack's charge acceptance above what the vehicle file declares.
+#[test]
+fn a_charge_derate_factor_above_one_is_rejected() {
+    let doc = battery_doc("temp_c: [0.0, 25.0]\n    factor: [0.0, 1.5]");
+    let loader = MemLoader::new().with("p.battery.yaml", &doc);
+    let err = outlap_schema::load_battery("p.battery.yaml", &loader)
+        .expect_err("a derate factor > 1 must be rejected");
+    assert!(
+        format!("{err}").contains("[0, 1]"),
+        "the bound is named: {err}"
+    );
+}
+
+/// Temperature breakpoints must ascend, or the interpolant is meaningless.
+#[test]
+fn a_charge_derate_with_descending_temperatures_is_rejected() {
+    let doc = battery_doc("temp_c: [25.0, 0.0]\n    factor: [1.0, 0.0]");
+    let loader = MemLoader::new().with("p.battery.yaml", &doc);
+    let err = outlap_schema::load_battery("p.battery.yaml", &loader)
+        .expect_err("descending temp_c must be rejected");
+    assert!(
+        format!("{err}").contains("ascending"),
+        "the message names the ordering requirement: {err}"
+    );
+}
+
+/// A well-formed derate curve loads cleanly (the happy path this validation must not break).
+#[test]
+fn a_well_formed_charge_derate_loads() {
+    let doc = battery_doc("temp_c: [-20.0, 0.0, 25.0]\n    factor: [0.0, 0.0, 1.0]");
+    let loader = MemLoader::new().with("p.battery.yaml", &doc);
+    let b = outlap_schema::load_battery("p.battery.yaml", &loader).expect("valid derate curve");
+    let d = b.limits.regen_derate_vs_temp.expect("curve present");
+    assert_eq!(d.factor, vec![0.0, 0.0, 1.0]);
+}
+
+/// A minimal `battery/1.1` document with the given `regen_derate_vs_temp` body spliced in.
+fn battery_doc(derate: &str) -> String {
+    format!(
+        "schema: battery/1.1\nmodel: rc_pairs\n\
+         topology: {{ns: 100, np: 1}}\n\
+         capacity: {{q_pack_ah: 50.0, e_pack_wh: 18000.0}}\n\
+         soc_window: [0.05, 0.95]\n\
+         ecm:\n  rc_pairs: 1\n  axes: {{soc: [0.0, 1.0], temp_c: [0.0, 45.0]}}\n  \
+         tables: {{file: t.parquet, level: cell}}\n\
+         limits:\n  \
+         peak_discharge_power_w_vs_soc: {{soc: [0.0, 1.0], power_w: [1000.0, 2000.0]}}\n  \
+         peak_regen_power_w_vs_soc: {{soc: [0.0, 1.0], power_w: [1000.0, 1000.0]}}\n  \
+         regen_derate_vs_temp:\n    {derate}\n  \
+         cell_v_min: 2.8\n  cell_v_max: 4.2\n  max_c_rate: 3.0\n\
+         thermal: {{mass_kg: 400.0, cp_j_per_kgk: 900.0, thermal_resistance_k_per_w: 0.02, coolant_temp_c: 25.0}}\n"
+    )
+}

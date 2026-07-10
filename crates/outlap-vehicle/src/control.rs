@@ -208,35 +208,83 @@ impl<T: Float> Block<T> for Driver<T> {
     }
 }
 
-/// Regen-brake blend parameters (`brakes.regen_blend`, HANDOFF §7.6): **series (blended) braking**, as
-/// production EVs and full hybrids do it. Under braking the machine absorbs up to
-/// [`max_regen_frac`](Self::max_regen_frac) of the driven axle's braking power into the battery —
-/// capped by the pack's SoC-dependent regen-power ceiling — and the friction brakes supply the
-/// deficit. The machine substitutes for the calipers *inside* the commanded brake torque rather than
-/// adding to it, so the axle total, the wheel deceleration, and hence the whole trajectory are
-/// identical with regen on or off (Decision #11); only the recovered energy differs. See
-/// `docs/theory/transient_control.md` §3 for the limits this model does not yet carry (the machine's
-/// torque–speed envelope, low-speed fade-out).
-#[derive(Clone, Copy, Debug)]
-pub struct RegenParams<T> {
-    /// Whether regen blending is active (a battery + a driven electric machine are present).
-    pub enabled: bool,
-    /// Maximum fraction of the driven-wheel braking power recovered, `0..=1`.
-    pub max_regen_frac: T,
-    /// Mechanical→electrical recovery efficiency (machine + inverter), `0..1` — a documented constant
-    /// proxy (the mapped `.ptm` efficiency drives QSS energy accounting; the wasm-clean block uses a
-    /// constant so it never touches a `.ptm` table).
+/// Speed below which regen fades linearly to zero, m/s. Real controllers hand braking back to the
+/// calipers at a walking pace: torque control degrades, the recoverable energy is negligible, and the
+/// machine must release the wheel before it stops. Also keeps `P = F·v` well-behaved at `v → 0`.
+pub const REGEN_FADE_SPEED_MPS: f64 = 2.0;
+
+/// One axle's regen machine (`ptm/1.2` envelope sampled at assembly). A machine can only ever brake
+/// the wheels it drives, so the front and rear machines are independent actuators sharing one pack.
+#[derive(Clone, Debug)]
+pub struct AxleRegen<T> {
+    /// Peak regen **braking wheel force** this axle's machine can produce vs vehicle speed, N (≥ 0)
+    /// — `outlap_qss::T1Vehicle::max_regen_force_by_axle` sampled into the shared monotone cubic.
+    pub force_max: MonotoneCubic<T>,
+    /// Mechanical→electrical recovery efficiency (machine + inverter + driveline), `0..1`. A
+    /// documented constant proxy: the mapped `.ptm` efficiency drives QSS energy accounting, and the
+    /// wasm-clean block must never touch a `.ptm` table.
     pub efficiency: T,
-    /// Which wheels are driven (only these recover braking energy).
-    pub driven: [bool; WHEELS],
+    /// Blend authority: the largest fraction of *this axle's* commanded brake torque the machine is
+    /// allowed to take (`brakes.regen_blend.max_regen_frac`). `1` ⇒ take everything the envelope and
+    /// the pack allow; the calipers always supply whatever is left.
+    pub authority: T,
 }
 
-/// Minimal drive/brake actuation with the PR6 rule-based control layer: throttle scales the
-/// **best-gear** wheel-force ceiling [`traction`](Self::traction) (the QSS instantaneous-shift
-/// envelope) — modulated by the shift FSM's [`torque_scale`](ActuationChannels::torque_scale) so a
-/// gear change costs the §8.2 torque interruption — distributed by the static
-/// [`drive_weight`](Self::drive_weight); brake scales a constant maximum brake torque split by the
-/// balance bar; and, under braking, the driven axle recovers energy per [`regen`](Self::regen). The
+/// Regen-brake blend parameters (`brakes.regen_blend`, HANDOFF §7.6): **series (blended) braking**, as
+/// production EVs and full hybrids do it.
+///
+/// Under braking each axle's machine absorbs as much of *its own axle's* commanded brake torque as it
+/// can, and the friction brakes supply the deficit. Three ceilings bound the machine, exactly as a
+/// real BMS/inverter pair enforces them:
+///
+/// 1. **Available regen torque** — the machine's speed-dependent braking envelope ([`AxleRegen`]).
+/// 2. **Battery charge acceptance** — the pack's ceiling at the current charge *and temperature* (a cold
+///    pack cannot take a fast charge), published on the slow clock into
+///    [`regen_limit_w`](ActuationChannels::regen_limit_w). Shared by both axles.
+/// 3. **Blend authority** — a policy cap on the machine's share of the axle.
+///
+/// The machine substitutes for the calipers *inside* the commanded brake torque rather than adding to
+/// it, so the axle total, the wheel deceleration, and hence the whole trajectory are identical with
+/// regen on or off (Decision #11); only the recovered energy differs. Whatever the machine cannot
+/// take, the calipers take.
+#[derive(Clone, Debug)]
+pub struct RegenParams<T> {
+    /// Whether regen blending is active (a battery and at least one driven electric machine).
+    pub enabled: bool,
+    /// The front-axle machine, if the front wheels are driven by one.
+    pub front: Option<AxleRegen<T>>,
+    /// The rear-axle machine, if the rear wheels are driven by one.
+    pub rear: Option<AxleRegen<T>>,
+}
+
+impl<T: Float> RegenParams<T> {
+    /// A disabled blend: no machine, no recovery, calipers do all the braking.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            front: None,
+            rear: None,
+        }
+    }
+
+    /// The low-speed fade factor at speed `vx`, `0..1` (see [`REGEN_FADE_SPEED_MPS`]).
+    fn fade(vx: T) -> T {
+        let fade_speed = T::from(REGEN_FADE_SPEED_MPS).unwrap_or_else(T::one);
+        if fade_speed <= T::zero() {
+            T::one()
+        } else {
+            (vx / fade_speed).min(T::one()).max(T::zero())
+        }
+    }
+}
+
+/// Drive/brake actuation with the PR6 rule-based control layer: throttle scales the **best-gear**
+/// wheel-force ceiling [`traction`](Self::traction) (the QSS instantaneous-shift envelope) — modulated
+/// by the shift FSM's [`torque_scale`](ActuationChannels::torque_scale) so a gear change costs the
+/// §8.2 torque interruption — distributed by the static [`drive_weight`](Self::drive_weight); brake
+/// scales a constant maximum brake torque split by the balance bar; and, under braking, each driven
+/// axle's machine recovers energy inside that commanded torque per [`regen`](Self::regen). The
 /// yaw-moment torque-vectoring allocation is a *separate* `actuate` block ([`TorqueVectoring`]) so the
 /// two concerns compose.
 ///
@@ -258,9 +306,10 @@ pub struct Powertrain<T> {
     pub max_brake_torque: T,
     /// Front brake-force bias, `0..1`.
     pub brake_front_bias: T,
-    /// Regen-brake blend parameters.
+    /// Per-axle regen-brake blend parameters (series braking).
     pub regen: RegenParams<T>,
-    /// Interned actuation channels (shift `torque_scale`, `regen_limit_w`; publishes `regen_power_w`).
+    /// Interned actuation channels (reads shift `torque_scale` + `regen_limit_w`; publishes
+    /// `regen_power_w` and the per-axle machine braking torques).
     pub actuation: ActuationChannels,
 }
 
@@ -272,7 +321,11 @@ impl<T: Float> Block<T> for Powertrain<T> {
     fn ports(&self) -> Ports {
         let base = CoreSignal::COUNT as usize;
         let ch = |sig: WheelSignal, w: usize| base + (sig as usize) * WHEELS + w;
-        let mut writes = vec![self.actuation.regen_power_w.index()];
+        let mut writes = vec![
+            self.actuation.regen_power_w.index(),
+            self.actuation.regen_torque_front_nm.index(),
+            self.actuation.regen_torque_rear_nm.index(),
+        ];
         for w in 0..WHEELS {
             writes.push(ch(WheelSignal::WheelDriveTorque, w));
             writes.push(ch(WheelSignal::WheelBrakeTorque, w));
@@ -306,41 +359,112 @@ impl<T: Float> Block<T> for Powertrain<T> {
         let front_share = self.brake_front_bias * total_brake / two; // per front wheel
         let rear_share = (one - self.brake_front_bias) * total_brake / two; // per rear wheel
 
-        let mut driven_brake_power = zero; // mechanical braking power at the driven wheels, W
+        // Commanded braking *force* per axle (what the calipers would deliver alone), N.
+        let mut axle_brake_force = [zero; 2];
         for w in 0..WHEELS {
             // Wheel drive torque = (share of available drive force) × rolling radius, so at steady
             // spin the tyre delivers ≈ that force (grip permitting; wheelspin caps it via the tyre).
             let drive = f_avail * self.drive_weight[w] * self.radius[w];
             bus.set_wheel(WheelSignal::WheelDriveTorque, w, lane, drive);
             let brake_w = if w < 2 { front_share } else { rear_share };
+            // The axle *total* brake torque — friction plus regen. This is what the tyre responds to,
+            // so the regen blend below never changes it and the trajectory is regen-invariant (#11).
             bus.set_wheel(WheelSignal::WheelBrakeTorque, w, lane, brake_w);
-            if self.regen.enabled && self.regen.driven[w] {
-                // Mechanical braking power dissipated at this driven wheel ≈ brake_force · v.
-                let brake_force = if self.radius[w] > zero {
-                    brake_w / self.radius[w]
-                } else {
-                    zero
-                };
-                driven_brake_power = driven_brake_power + brake_force * vx;
+            let axle = usize::from(w >= 2);
+            if self.radius[w] > zero {
+                axle_brake_force[axle] = axle_brake_force[axle] + brake_w / self.radius[w];
             }
         }
 
-        // Series (blended) braking: the machine takes `max_regen_frac` of the driven axle's braking
-        // power and the calipers supply the deficit, so `WheelBrakeTorque` above — the axle *total*,
-        // which is what the tyre responds to — is unchanged and the trajectory is identical to
-        // regen-off (Decision #11). The electrical yield is `mech · η`, hard-capped by the pack's
-        // SoC-dependent regen ceiling (published on the slow clock); when that cap binds the machine
-        // absorbs less and the calipers implicitly take more, leaving the axle total untouched.
-        let regen_power = if self.regen.enabled {
-            let regen_limit = bus
-                .get_channel(self.actuation.regen_limit_w, lane)
-                .max(zero);
-            let mech = self.regen.max_regen_frac.max(zero) * driven_brake_power;
-            (mech * self.regen.efficiency).min(regen_limit).max(zero)
-        } else {
-            zero
-        };
+        let (regen_power, axle_regen_torque) = self.blend_regen(vx, axle_brake_force, bus, lane);
         bus.set_channel(self.actuation.regen_power_w, lane, regen_power);
+        bus.set_channel(
+            self.actuation.regen_torque_front_nm,
+            lane,
+            axle_regen_torque[0],
+        );
+        bus.set_channel(
+            self.actuation.regen_torque_rear_nm,
+            lane,
+            axle_regen_torque[1],
+        );
+    }
+}
+
+impl<T: Float> Powertrain<T> {
+    /// The mean rolling radius of axle `a` (`0` front, `1` rear), m.
+    fn axle_radius(&self, a: usize) -> T {
+        let two = T::one() + T::one();
+        (self.radius[2 * a] + self.radius[2 * a + 1]) / two
+    }
+
+    /// **Series (blended) braking.** Each axle's machine takes as much of *its own* commanded braking
+    /// force as its envelope and blend authority allow; the calipers supply the deficit. The two
+    /// machines then share the pack's single charge-acceptance ceiling: if their combined electrical
+    /// demand exceeds it, both are scaled back proportionally and the calipers pick up the slack.
+    ///
+    /// Returns `(electrical regen power W, [front, rear] regen brake torque N·m)`. The wheel brake
+    /// torques on the bus are the axle *totals* and are deliberately untouched, so the car decelerates
+    /// identically whether the energy went into the pack or into the discs (Decision #11).
+    fn blend_regen(
+        &self,
+        vx: T,
+        axle_brake_force: [T; 2],
+        bus: &Bus<T>,
+        lane: usize,
+    ) -> (T, [T; 2]) {
+        let zero = T::zero();
+        if !self.regen.enabled {
+            return (zero, [zero; 2]);
+        }
+        let fade = RegenParams::fade(vx);
+        let machines = [self.regen.front.as_ref(), self.regen.rear.as_ref()];
+
+        // (1) Per-axle mechanical capture: bounded by the machine's speed-dependent braking envelope,
+        //     by the blend authority, and — implicitly — by what the driver actually asked for.
+        let mut mech = [zero; 2]; // mechanical power taken by each machine, W
+        let mut force = [zero; 2]; // regen braking force at each axle, N
+        for a in 0..2 {
+            let Some(m) = machines[a] else { continue };
+            let demand = (m.authority.max(zero).min(T::one())) * axle_brake_force[a].max(zero);
+            let capability = m.force_max.eval(vx).max(zero) * fade;
+            force[a] = demand.min(capability);
+            mech[a] = force[a] * vx;
+        }
+
+        // (2) The pack is shared. Scale both machines back together when their combined electrical
+        //     demand exceeds the charge-acceptance ceiling (SoC *and* temperature dependent), so the
+        //     split between axles is preserved and the calipers absorb the remainder.
+        let limit = bus
+            .get_channel(self.actuation.regen_limit_w, lane)
+            .max(zero);
+        let mut elec = [zero; 2];
+        for a in 0..2 {
+            if let Some(m) = machines[a] {
+                elec[a] = mech[a] * m.efficiency;
+            }
+        }
+        let demand_w = elec[0] + elec[1];
+        if demand_w > limit {
+            let scale = if demand_w > zero {
+                limit / demand_w
+            } else {
+                zero
+            };
+            for a in 0..2 {
+                elec[a] = elec[a] * scale;
+                force[a] = force[a] * scale;
+            }
+        }
+
+        // (3) Report the machine's braking torque per axle (telemetry); the calipers supply
+        //     `axle_brake_force − force` without any further bookkeeping — the bus already carries the
+        //     total, and the difference is the friction share.
+        let torque = [
+            force[0] * self.axle_radius(0),
+            force[1] * self.axle_radius(1),
+        ];
+        ((elec[0] + elec[1]).max(zero), torque)
     }
 }
 
@@ -710,11 +834,16 @@ mod tests {
             radius: [0.33; WHEELS],
             max_brake_torque: 6000.0,
             brake_front_bias: 0.6,
+            // A rear machine with an effectively unbounded braking envelope and full blend authority,
+            // so the *battery* ceiling is the only thing that can bind in this test.
             regen: RegenParams {
                 enabled: true,
-                max_regen_frac: 1.0,
-                efficiency: 0.9,
-                driven: REAR_DRIVEN,
+                front: None,
+                rear: Some(AxleRegen {
+                    force_max: MonotoneCubic::new(vec![0.0, 100.0], vec![1.0e9, 1.0e9]).unwrap(),
+                    efficiency: 0.9,
+                    authority: 1.0,
+                }),
             },
             actuation,
         };
@@ -750,8 +879,242 @@ mod tests {
         assert_eq!(
             bus.get_wheel(WheelSignal::WheelBrakeTorque, 2, 0),
             brake_rear,
-            "regen must not alter the commanded brake torque (energy-only blend)"
+            "regen substitutes for the calipers inside the axle total; it never alters it"
         );
         assert!((bus.get_channel(actuation.regen_power_w, 0) - 5000.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod regen_tests {
+    //! Series (blended) braking: the machine takes what it can of its **own** axle's commanded brake
+    //! torque, and the calipers supply the deficit. These tests drive `blend_regen` directly, so each
+    //! ceiling — machine envelope, blend authority, pack charge acceptance, low-speed fade — is
+    //! isolated one at a time.
+    #![allow(clippy::float_cmp)] // the no-op / full-handoff cases assert exact zeros and exact shares.
+
+    use super::{AxleRegen, Powertrain, RegenParams, REGEN_FADE_SPEED_MPS};
+    use crate::params::ActuationChannels;
+    use outlap_core::bus::{Bus, ChannelInterner};
+    use outlap_core::interp::MonotoneCubic;
+
+    const R: f64 = 0.33; // rolling radius, m
+    const ETA: f64 = 0.9; // machine + inverter recovery
+
+    /// A machine whose braking envelope is a flat `force_max` newtons at every speed.
+    fn machine(force_max: f64, authority: f64) -> AxleRegen<f64> {
+        AxleRegen {
+            force_max: MonotoneCubic::new(vec![0.0, 200.0], vec![force_max, force_max]).unwrap(),
+            efficiency: ETA,
+            authority,
+        }
+    }
+
+    /// A powertrain with the given per-axle machines, plus a bus carrying `pack_limit_w` as the
+    /// battery's charge-acceptance ceiling.
+    fn rig(
+        front: Option<AxleRegen<f64>>,
+        rear: Option<AxleRegen<f64>>,
+        pack_limit_w: f64,
+    ) -> (Powertrain<f64>, Bus<f64>) {
+        let mut it = ChannelInterner::new();
+        let actuation = ActuationChannels::intern(&mut it);
+        let mut bus = Bus::with_interner(&it, 1);
+        bus.set_channel(actuation.regen_limit_w, 0, pack_limit_w);
+        let pt = Powertrain {
+            traction: MonotoneCubic::new(vec![0.0, 200.0], vec![1.0, 1.0]).unwrap(),
+            drive_weight: [0.0, 0.0, 0.5, 0.5],
+            radius: [R; 4],
+            max_brake_torque: 6000.0,
+            brake_front_bias: 0.6,
+            regen: RegenParams {
+                enabled: front.is_some() || rear.is_some(),
+                front,
+                rear,
+            },
+            actuation,
+        };
+        (pt, bus)
+    }
+
+    /// Well above the fade-out speed, so the fade factor is exactly 1.
+    const V: f64 = 30.0;
+
+    /// The machine takes its whole authorised share and the calipers take the rest. Here the machine
+    /// is oversized and the pack is thirsty, so it takes the axle's *entire* commanded braking force —
+    /// the calipers contribute nothing on that axle.
+    #[test]
+    fn machine_takes_its_share_and_the_calipers_take_the_rest() {
+        let (pt, bus) = rig(None, Some(machine(1.0e6, 1.0)), 1.0e12);
+        let cmd = [4000.0, 3000.0]; // commanded braking force per axle, N
+        let (power, torque) = pt.blend_regen(V, cmd, &bus, 0);
+
+        // Front axle has no machine: the calipers do all of it.
+        assert_eq!(torque[0], 0.0, "no front machine ⇒ no front regen");
+        // Rear machine absorbs the whole rear command; the rear calipers supply 0.
+        assert_eq!(
+            torque[1],
+            cmd[1] * R,
+            "rear machine took the whole rear axle"
+        );
+        assert_eq!(power, cmd[1] * V * ETA, "electrical yield = F·v·η");
+    }
+
+    /// **A machine may only brake its own axle.** An oversized rear machine never reaches across to
+    /// absorb the front axle's braking, however much headroom it has.
+    #[test]
+    fn a_machine_never_brakes_the_other_axle() {
+        let (pt, bus) = rig(None, Some(machine(1.0e6, 1.0)), 1.0e12);
+        let cmd = [9000.0, 100.0]; // huge front demand, tiny rear demand
+        let (power, torque) = pt.blend_regen(V, cmd, &bus, 0);
+        assert_eq!(torque[0], 0.0);
+        assert_eq!(
+            torque[1],
+            cmd[1] * R,
+            "the rear machine is bounded by the *rear* command, not the front's"
+        );
+        assert_eq!(power, cmd[1] * V * ETA);
+    }
+
+    /// **A cold (or full) pack hands the braking back to the calipers.** With zero charge acceptance
+    /// the machine takes nothing: regen power and regen torque are exactly zero, and — because the bus
+    /// still carries the axle's full commanded brake torque — the car decelerates exactly the same.
+    #[test]
+    fn a_pack_that_cannot_accept_charge_hands_braking_to_the_calipers() {
+        let (pt, bus) = rig(Some(machine(1.0e6, 1.0)), Some(machine(1.0e6, 1.0)), 0.0);
+        let (power, torque) = pt.blend_regen(V, [4000.0, 3000.0], &bus, 0);
+        assert_eq!(power, 0.0, "a pack at 0 W acceptance recovers nothing");
+        assert_eq!(
+            torque,
+            [0.0, 0.0],
+            "…and the machines apply no braking torque"
+        );
+    }
+
+    /// **Available regen torque caps the machine.** A small machine takes only what its envelope
+    /// allows; the calipers cover the shortfall.
+    #[test]
+    fn the_machine_envelope_caps_the_regen_share() {
+        let cap = 800.0; // N of braking force the machine can produce
+        let (pt, bus) = rig(None, Some(machine(cap, 1.0)), 1.0e12);
+        let cmd = [0.0, 5000.0];
+        let (power, torque) = pt.blend_regen(V, cmd, &bus, 0);
+        assert_eq!(torque[1], cap * R, "capped by the machine envelope");
+        assert_eq!(power, cap * V * ETA);
+        // The calipers supply the deficit, and the axle total is untouched.
+        let caliper_force = cmd[1] - cap;
+        assert!(caliper_force > 0.0, "the calipers are doing the rest");
+    }
+
+    /// The blend authority is a policy cap on the machine's share of its axle.
+    #[test]
+    fn blend_authority_caps_the_machine_share() {
+        let (pt, bus) = rig(None, Some(machine(1.0e6, 0.3)), 1.0e12);
+        let cmd = [0.0, 5000.0];
+        let (_, torque) = pt.blend_regen(V, cmd, &bus, 0);
+        assert_eq!(
+            torque[1],
+            0.3 * cmd[1] * R,
+            "30 % authority ⇒ 30 % of the axle"
+        );
+    }
+
+    /// **One pack, two machines.** When their combined electrical demand exceeds the pack's
+    /// acceptance, both are scaled back by the same factor, so the front/rear split is preserved and
+    /// the calipers absorb the remainder on each axle.
+    #[test]
+    fn a_shared_pack_ceiling_scales_both_axles_proportionally() {
+        let (pt, bus_open) = rig(
+            Some(machine(1.0e6, 1.0)),
+            Some(machine(1.0e6, 1.0)),
+            1.0e12, // uncapped
+        );
+        let cmd = [4000.0, 2000.0];
+        let (uncapped_power, uncapped_torque) = pt.blend_regen(V, cmd, &bus_open, 0);
+
+        // Now allow only half of what they wanted.
+        let (pt, bus_capped) = rig(
+            Some(machine(1.0e6, 1.0)),
+            Some(machine(1.0e6, 1.0)),
+            uncapped_power / 2.0,
+        );
+        let (power, torque) = pt.blend_regen(V, cmd, &bus_capped, 0);
+
+        assert!(
+            (power - uncapped_power / 2.0).abs() < 1e-9 * uncapped_power,
+            "the pack ceiling binds: {power} vs {}",
+            uncapped_power / 2.0
+        );
+        for a in 0..2 {
+            assert!(
+                (torque[a] - uncapped_torque[a] / 2.0).abs() < 1e-9 * uncapped_torque[a],
+                "axle {a} scaled proportionally: {} vs {}",
+                torque[a],
+                uncapped_torque[a] / 2.0
+            );
+        }
+        // The 2:1 front/rear split survives the scaling.
+        assert!((torque[0] / torque[1] - 2.0).abs() < 1e-9);
+    }
+
+    /// Regen fades to nothing at a walking pace: torque control degrades and the machine must release
+    /// the wheel before the car stops. At exactly half the fade speed, half the capability remains.
+    #[test]
+    fn regen_fades_out_at_low_speed() {
+        let (pt, bus) = rig(None, Some(machine(1.0e6, 1.0)), 1.0e12);
+        let cmd = [0.0, 3000.0];
+
+        let (power_stopped, torque_stopped) = pt.blend_regen(0.0, cmd, &bus, 0);
+        assert_eq!(power_stopped, 0.0, "a stopped car recovers nothing");
+        assert_eq!(torque_stopped[1], 0.0);
+
+        // At half the fade speed the *envelope* is halved; the command still exceeds it here, so the
+        // machine is envelope-bound and the fade is directly visible.
+        let v_half = REGEN_FADE_SPEED_MPS / 2.0;
+        let small = machine(cmd[1], 1.0); // envelope exactly equals the command
+        let (pt_small, bus2) = rig(None, Some(small), 1.0e12);
+        let (_, torque_half) = pt_small.blend_regen(v_half, cmd, &bus2, 0);
+        assert!(
+            (torque_half[1] - 0.5 * cmd[1] * R).abs() < 1e-9 * cmd[1] * R,
+            "half fade speed ⇒ half the braking authority: {}",
+            torque_half[1]
+        );
+        let _ = pt;
+    }
+
+    /// A disabled blend is a byte-exact no-op — the calipers do everything, as on a car with no
+    /// machine at all.
+    #[test]
+    fn disabled_regen_is_a_no_op() {
+        let (mut pt, bus) = rig(Some(machine(1.0e6, 1.0)), Some(machine(1.0e6, 1.0)), 1.0e12);
+        pt.regen.enabled = false;
+        let (power, torque) = pt.blend_regen(V, [4000.0, 3000.0], &bus, 0);
+        assert_eq!(power, 0.0);
+        assert_eq!(torque, [0.0, 0.0]);
+    }
+
+    /// The machine can never recover more mechanical power than the driver asked the brakes for on
+    /// that axle — regen substitutes for the calipers, it never adds deceleration.
+    #[test]
+    fn regen_never_exceeds_the_commanded_braking() {
+        for &authority in &[0.0, 0.25, 0.6, 1.0] {
+            for &cap in &[10.0, 500.0, 1.0e6] {
+                let (pt, bus) = rig(
+                    Some(machine(cap, authority)),
+                    Some(machine(cap, authority)),
+                    1.0e12,
+                );
+                let cmd = [4000.0, 3000.0];
+                let (_, torque) = pt.blend_regen(V, cmd, &bus, 0);
+                for a in 0..2 {
+                    assert!(
+                        torque[a] <= cmd[a] * R + 1e-9,
+                        "axle {a}: machine torque {} exceeds the command {}",
+                        torque[a],
+                        cmd[a] * R
+                    );
+                }
+            }
+        }
     }
 }

@@ -99,21 +99,33 @@ fn default_true() -> bool {
 
 /// Limit envelopes.
 ///
-/// Only `max_torque_nm_vs_speed` (the peak envelope) is required. The others, when present, serve
-/// as **validation references**, not the derating mechanism — thermal capability is computed by the
-/// `.emotor` model from the loss tables (Decision #25).
+/// Only `max_torque_nm_vs_speed` (the peak envelope) is required. `cont_torque_nm_vs_speed` and
+/// `overload`, when present, serve as **validation references**, not the derating mechanism —
+/// thermal capability is computed by the `.emotor` model from the loss tables (Decision #25).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct PtmLimits {
     /// Peak torque vs speed, N·m (REQUIRED).
     pub max_torque_nm_vs_speed: TorqueCurve,
+    /// Peak **regenerative braking** torque vs speed, N·m as a **positive magnitude** (`ptm/1.2`).
+    /// This is the machine's negative-quadrant capability, the ceiling a regen brake blend may draw
+    /// on before the friction brakes fill the deficit.
+    ///
+    /// When absent, the machine is assumed **symmetric** — the regen envelope equals
+    /// `max_torque_nm_vs_speed`. That is the usual first-order truth for a PMSM/IM whose limit is set
+    /// by inverter current and flux weakening rather than by quadrant, and it is surfaced as an
+    /// *estimated* value in the loaded-model report. Declare this curve whenever the real machine is
+    /// asymmetric (many road drive units are, to protect the DC link).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_regen_torque_nm_vs_speed: Option<TorqueCurve>,
     /// Continuous torque vs speed, N·m (optional validation reference).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cont_torque_nm_vs_speed: Option<TorqueCurve>,
     /// Overload envelope by duration (optional validation reference).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overload: Option<Overload>,
-    /// Drag/braking torque vs speed, N·m (optional).
+    /// Drag/braking torque vs speed, N·m (optional). This is *parasitic* drag (engine pumping,
+    /// spin losses) — not the commandable regen envelope, which is `max_regen_torque_nm_vs_speed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drag_torque_nm_vs_speed: Option<TorqueCurve>,
 }
