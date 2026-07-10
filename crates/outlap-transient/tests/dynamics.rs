@@ -58,9 +58,10 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
     );
     let order = solver.schedule().order().to_vec();
     // The assembler-produced order must equal the solver's fixed execution order
-    // (driver → powertrain → load-transfer → aero → tyre → chassis), so the hardcoded
-    // eval order in `eval_rhs_raw` genuinely honours the topological sort.
-    assert_eq!(order, vec![0, 1, 2, 3, 4, 5]);
+    // (driver → powertrain → load-transfer → aero → tyre → torque-vectoring → chassis), so the
+    // hardcoded eval order in `eval_rhs_raw` genuinely honours the topological sort. The TV allocator
+    // reads the tyre/load forces and the powertrain torques, so the sort places it last in `actuate`.
+    assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6]);
     // Determinism: same specs → same schedule.
     let solver2 = TransientSolver::new(
         build_blocks(&t1, &mut outlap_core::bus::ChannelInterner::new()),
@@ -72,8 +73,10 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
     // Phase ordering: driver (control) precedes the chassis (integrate); the tyre (reads Fz) follows
     // the load-transfer writer.
     let pos = |b: usize| order.iter().position(|&x| x == b).unwrap();
-    assert!(pos(0) < pos(5), "driver before chassis");
+    assert!(pos(0) < pos(6), "driver before chassis");
     assert!(pos(2) < pos(4), "load-transfer before tyre");
+    assert!(pos(4) < pos(5), "tyre before torque-vectoring");
+    assert!(pos(5) < pos(6), "torque-vectoring before chassis");
     assert!(Phase::Control < Phase::Integrate);
 }
 

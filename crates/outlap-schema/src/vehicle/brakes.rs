@@ -39,7 +39,9 @@ pub struct BrakeDisc {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RegenBlend {
-    /// Maximum fraction of total brake torque provided by regen, 0..1.
+    /// Maximum fraction of the **driven axle's** brake torque provided by regen, 0..1 (the machine can
+    /// only ever brake its own axle). The calipers supply the deficit, so the axle's total brake torque
+    /// — and the trajectory — is unchanged: this is series/blended braking, not added deceleration.
     pub max_regen_frac: f64,
     /// Optional front-axle regen bias fraction, 0..1 (defaults to the friction balance if omitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]

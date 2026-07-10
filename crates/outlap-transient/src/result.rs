@@ -59,6 +59,18 @@ pub struct TransientLap<T> {
     pub y: Vec<T>,
     /// World trajectory `z`, m.
     pub z: Vec<T>,
+    /// Engaged gear index (0-based), from the shift FSM.
+    pub gear: Vec<T>,
+    /// Drive-torque scale `∈ [0, 1]` applied this step (`< 1` during a gear shift's torque cut/ramp).
+    pub torque_scale: Vec<T>,
+    /// Torque-vectoring yaw moment actually applied `ΔM_z`, N·m (+CCW).
+    pub yaw_moment_nm: Vec<T>,
+    /// Recovered regen electrical power at the driven axle, W (≥ 0).
+    pub regen_power_w: Vec<T>,
+    /// Pack state of charge, 0..1 (empty when no slow-state stack was attached).
+    pub state_of_charge: Vec<T>,
+    /// Pack temperature, °C (empty when no slow-state stack was attached).
+    pub pack_temp_c: Vec<T>,
     /// Total lap time (last `t` on a completed lap), s.
     pub lap_time_s: T,
 }
@@ -87,6 +99,12 @@ impl<T: Float> Default for TransientLap<T> {
             x: Vec::new(),
             y: Vec::new(),
             z: Vec::new(),
+            gear: Vec::new(),
+            torque_scale: Vec::new(),
+            yaw_moment_nm: Vec::new(),
+            regen_power_w: Vec::new(),
+            state_of_charge: Vec::new(),
+            pack_temp_c: Vec::new(),
             lap_time_s: T::zero(),
         }
     }

@@ -191,14 +191,21 @@ pub struct Split {
     pub left: Option<f64>,
 }
 
-/// Yaw-moment-proportional torque vectoring: `ΔM_z = k_yaw · (r_target − r)`.
+/// Yaw-moment-proportional torque vectoring: `ΔM_z = k_yaw · (r_target − r)`, with the demanded
+/// moment physically allocated across the driven wheels within their friction-ellipse and
+/// machine-envelope limits (HANDOFF §8.0; the allocator interface is shaped so a QP replaces the
+/// rule-based split post-v1, Decision #2).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct TorqueVectoring {
     /// Whether torque vectoring is enabled.
     #[serde(default)]
     pub enabled: bool,
-    /// Yaw-rate feedback gain.
+    /// Yaw-rate feedback gain `k_yaw` (N·m per rad/s).
     #[serde(default)]
     pub k_yaw: f64,
+    /// Optional hard cap on the commanded yaw moment `|ΔM_z|`, N·m (a machine-envelope proxy). When
+    /// omitted, the friction-ellipse per-wheel limits alone bound the allocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_yaw_moment_nm: Option<f64>,
 }

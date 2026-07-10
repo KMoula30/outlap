@@ -248,6 +248,25 @@ fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
             }
         }
     }
+    // Torque-vectoring gains (range-check whatever is given; the topology check covers reachability).
+    let tv = &spec.drivetrain.control.torque_vectoring;
+    if !tv.k_yaw.is_finite() || tv.k_yaw < 0.0 {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/drivetrain/control/torque_vectoring/k_yaw"),
+            "`k_yaw` must be a finite, non-negative gain (N·m per rad/s)",
+            Some("torque vectoring damps toward the reference yaw rate; a negative gain would drive the car unstable".into()),
+        ));
+    }
+    if let Some(cap) = tv.max_yaw_moment_nm {
+        positive(
+            cap,
+            "drivetrain.control.torque_vectoring.max_yaw_moment_nm",
+            "/drivetrain/control/torque_vectoring/max_yaw_moment_nm",
+            s,
+            sources,
+        )?;
+    }
     Ok(())
 }
 

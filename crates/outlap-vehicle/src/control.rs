@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The `control`/`actuate` blocks that close the transient loop: the ideal deterministic [`Driver`]
-//! (MacAdam-style preview steer + curvature feed-forward + PI speed tracking of the QSS profile) and
-//! the minimal-actuation [`Powertrain`] (static split → per-wheel drive force off the best-gear
-//! traction envelope + balance-bar friction braking). HANDOFF §7.7 (driver) and §8.0/§8.2 (splits);
-//! MacAdam 1981 for the preview law — see `docs/theory/driver.md`.
+//! (MacAdam-style preview steer + curvature feed-forward + PI speed tracking of the QSS profile), the
+//! [`Powertrain`] (static split → per-wheel drive force off the best-gear traction envelope +
+//! balance-bar friction braking + the regen blend), and the [`TorqueVectoring`] yaw-moment allocator.
+//! HANDOFF §7.7 (driver) and §8.0/§8.2 (splits, allocation); MacAdam 1981 for the preview law — see
+//! `docs/theory/driver.md` and `docs/theory/transient_control.md`.
 //!
-//! Both blocks are pure and generic over `f32`/`f64` and allocate nothing in the loop. The driver is
+//! All blocks are pure and generic over `f32`/`f64` and allocate nothing in the loop. The driver is
 //! a `control`-phase block (Decision #38: built-in core controller, external plugin trait deferred);
 //! it also carries the **augmented-ODE** speed integral, so its [`Block::derivatives`] writes both
 //! the steer/throttle/brake bus signals *and* the integral derivative `ξ̇ = v_ref − v_x` into the
 //! shared derivative buffer — the RK sweep advances `ξ` alongside the chassis DOF (the PI loop is a
-//! continuous state, not a step-boundary snapshot). The powertrain is an `actuate`-phase block.
+//! continuous state, not a step-boundary snapshot). The powertrain and the allocator are
+//! `actuate`-phase blocks, in that order (the allocator augments the wheel torques the powertrain
+//! wrote, inside the friction ellipse the tyre/load blocks set).
 //!
-//! **Scope (PR5, "first closed-loop laps"):** the shift is *instantaneous & ideal* — the best-gear
-//! wheel-force ceiling is baked into the [`Powertrain::traction`] envelope (as the QSS tier already
-//! picks gears instantaneously), so there is no gear index or shift event yet. The full torque-cut →
-//! ratio-swap → clutch-ramp shift FSM (with `shift_time_s`, on the step-boundary event queue) and
-//! the yaw-moment torque-vectoring allocator are **PR6**; a stochastic shift delay belongs on that
-//! event queue, and a "wander off the line" driver error belongs on the preview channels below — so
-//! neither future Monte-Carlo error is blocked by this minimal actuation.
+//! **The engaged gear indexes no force here (PR6).** The wheel-force ceiling stays the *best-gear*
+//! [`Powertrain::traction`] envelope, as the QSS tier already picks gears instantaneously. The shift
+//! FSM (`outlap_transient::control::Shifter`) therefore acts on this block through exactly one
+//! channel — the [`ActuationChannels::torque_scale`] torque interruption — and a stochastic shift
+//! delay rides on its step-boundary event queue. A "wander off the line" driver error belongs on the
+//! preview channels below, so neither future Monte-Carlo error is blocked by this actuation.
 
 use num_traits::Float;
 
@@ -27,7 +29,7 @@ use outlap_core::bus::{Bus, CoreSignal, WheelSignal, WHEELS};
 use outlap_core::interp::MonotoneCubic;
 use outlap_core::state::{ChassisState, ControllerState, DerivView, StateView};
 
-use crate::params::RoadChannels;
+use crate::params::{ActuationChannels, RoadChannels};
 
 /// Minimum driver look-ahead distance, m — floors `L_p = v_x·t_preview` so the preview terms stay
 /// well-posed at low speed (and the feed-forward accel denominator never hits zero).
@@ -206,20 +208,46 @@ impl<T: Float> Block<T> for Driver<T> {
     }
 }
 
-/// Minimal drive/brake actuation (**superseded by PR6's shift FSM + torque-vectoring allocator**):
-/// throttle scales the **best-gear** wheel-force ceiling [`traction`](Self::traction) (the QSS
-/// instantaneous-shift envelope), distributed to the wheels by the pre-resolved static
-/// [`drive_weight`](Self::drive_weight) (axle/side split × driven mask); brake scales a constant
-/// maximum brake torque split by the balance bar. No gear index, no torque vectoring.
+/// Regen-brake blend parameters (`brakes.regen_blend`, HANDOFF §7.6): **series (blended) braking**, as
+/// production EVs and full hybrids do it. Under braking the machine absorbs up to
+/// [`max_regen_frac`](Self::max_regen_frac) of the driven axle's braking power into the battery —
+/// capped by the pack's SoC-dependent regen-power ceiling — and the friction brakes supply the
+/// deficit. The machine substitutes for the calipers *inside* the commanded brake torque rather than
+/// adding to it, so the axle total, the wheel deceleration, and hence the whole trajectory are
+/// identical with regen on or off (Decision #11); only the recovered energy differs. See
+/// `docs/theory/transient_control.md` §3 for the limits this model does not yet carry (the machine's
+/// torque–speed envelope, low-speed fade-out).
+#[derive(Clone, Copy, Debug)]
+pub struct RegenParams<T> {
+    /// Whether regen blending is active (a battery + a driven electric machine are present).
+    pub enabled: bool,
+    /// Maximum fraction of the driven-wheel braking power recovered, `0..=1`.
+    pub max_regen_frac: T,
+    /// Mechanical→electrical recovery efficiency (machine + inverter), `0..1` — a documented constant
+    /// proxy (the mapped `.ptm` efficiency drives QSS energy accounting; the wasm-clean block uses a
+    /// constant so it never touches a `.ptm` table).
+    pub efficiency: T,
+    /// Which wheels are driven (only these recover braking energy).
+    pub driven: [bool; WHEELS],
+}
+
+/// Minimal drive/brake actuation with the PR6 rule-based control layer: throttle scales the
+/// **best-gear** wheel-force ceiling [`traction`](Self::traction) (the QSS instantaneous-shift
+/// envelope) — modulated by the shift FSM's [`torque_scale`](ActuationChannels::torque_scale) so a
+/// gear change costs the §8.2 torque interruption — distributed by the static
+/// [`drive_weight`](Self::drive_weight); brake scales a constant maximum brake torque split by the
+/// balance bar; and, under braking, the driven axle recovers energy per [`regen`](Self::regen). The
+/// yaw-moment torque-vectoring allocation is a *separate* `actuate` block ([`TorqueVectoring`]) so the
+/// two concerns compose.
 ///
 /// The static split reproduces the differential's behaviour at *equal* per-wheel grip (open ⇒ 50/50;
 /// locked/LSD ⇒ 50/50 with no load transfer to bias against); the grip-proportional, friction-ellipse
 /// diff allocation needs per-wheel `F_z`, which is only available after load transfer, and lands with
-/// the PR6 allocator.
+/// the post-v1 QP allocator.
 #[derive(Clone, Debug)]
 pub struct Powertrain<T> {
     /// Best-gear maximum wheel drive force vs vehicle speed `F_drive_max(v)`, N — the QSS traction
-    /// ceiling sampled into the shared monotone-cubic interpolant (instantaneous ideal shift).
+    /// ceiling sampled into the shared monotone-cubic interpolant.
     pub traction: MonotoneCubic<T>,
     /// Per-wheel drive-force weights `[FL, FR, RL, RR]` (static axle/side split over the driven
     /// wheels; sums to 1, zero on undriven corners).
@@ -230,6 +258,10 @@ pub struct Powertrain<T> {
     pub max_brake_torque: T,
     /// Front brake-force bias, `0..1`.
     pub brake_front_bias: T,
+    /// Regen-brake blend parameters.
+    pub regen: RegenParams<T>,
+    /// Interned actuation channels (shift `torque_scale`, `regen_limit_w`; publishes `regen_power_w`).
+    pub actuation: ActuationChannels,
 }
 
 impl<T: Float> Block<T> for Powertrain<T> {
@@ -240,30 +272,41 @@ impl<T: Float> Block<T> for Powertrain<T> {
     fn ports(&self) -> Ports {
         let base = CoreSignal::COUNT as usize;
         let ch = |sig: WheelSignal, w: usize| base + (sig as usize) * WHEELS + w;
-        let mut writes = Vec::new();
+        let mut writes = vec![self.actuation.regen_power_w.index()];
         for w in 0..WHEELS {
             writes.push(ch(WheelSignal::WheelDriveTorque, w));
             writes.push(ch(WheelSignal::WheelBrakeTorque, w));
         }
         Ports::new(
-            vec![CoreSignal::Throttle as usize, CoreSignal::Brake as usize],
+            vec![
+                CoreSignal::Throttle as usize,
+                CoreSignal::Brake as usize,
+                self.actuation.torque_scale.index(),
+                self.actuation.regen_limit_w.index(),
+            ],
             writes,
         )
     }
 
     fn derivatives(&self, x: &StateView<T>, bus: &mut Bus<T>, _dx: &mut DerivView<T>, lane: usize) {
-        let vx = x.chassis(ChassisState::Vx).max(T::zero());
+        let (zero, one) = (T::zero(), T::one());
+        let vx = x.chassis(ChassisState::Vx).max(zero);
         let throttle = bus.get(CoreSignal::Throttle, lane);
         let brake = bus.get(CoreSignal::Brake, lane);
+        // Shift-FSM torque scale (0 during the cut, ramping to 1 on re-engagement); the orchestrator
+        // publishes it every step, so a bare `1.0` never leaks in from a cleared bus (assembly guard).
+        let torque_scale = bus.get_channel(self.actuation.torque_scale, lane);
 
-        // Total available wheel drive force at this speed (best gear), gated by throttle.
-        let f_avail = throttle * self.traction.eval(vx);
+        // Total available wheel drive force at this speed (best gear), gated by throttle and the
+        // shift torque interruption.
+        let f_avail = throttle * torque_scale * self.traction.eval(vx);
 
         let total_brake = brake * self.max_brake_torque;
-        let two = T::one() + T::one();
+        let two = one + one;
         let front_share = self.brake_front_bias * total_brake / two; // per front wheel
-        let rear_share = (T::one() - self.brake_front_bias) * total_brake / two; // per rear wheel
+        let rear_share = (one - self.brake_front_bias) * total_brake / two; // per rear wheel
 
+        let mut driven_brake_power = zero; // mechanical braking power at the driven wheels, W
         for w in 0..WHEELS {
             // Wheel drive torque = (share of available drive force) × rolling radius, so at steady
             // spin the tyre delivers ≈ that force (grip permitting; wheelspin caps it via the tyre).
@@ -271,7 +314,221 @@ impl<T: Float> Block<T> for Powertrain<T> {
             bus.set_wheel(WheelSignal::WheelDriveTorque, w, lane, drive);
             let brake_w = if w < 2 { front_share } else { rear_share };
             bus.set_wheel(WheelSignal::WheelBrakeTorque, w, lane, brake_w);
+            if self.regen.enabled && self.regen.driven[w] {
+                // Mechanical braking power dissipated at this driven wheel ≈ brake_force · v.
+                let brake_force = if self.radius[w] > zero {
+                    brake_w / self.radius[w]
+                } else {
+                    zero
+                };
+                driven_brake_power = driven_brake_power + brake_force * vx;
+            }
         }
+
+        // Series (blended) braking: the machine takes `max_regen_frac` of the driven axle's braking
+        // power and the calipers supply the deficit, so `WheelBrakeTorque` above — the axle *total*,
+        // which is what the tyre responds to — is unchanged and the trajectory is identical to
+        // regen-off (Decision #11). The electrical yield is `mech · η`, hard-capped by the pack's
+        // SoC-dependent regen ceiling (published on the slow clock); when that cap binds the machine
+        // absorbs less and the calipers implicitly take more, leaving the axle total untouched.
+        let regen_power = if self.regen.enabled {
+            let regen_limit = bus
+                .get_channel(self.actuation.regen_limit_w, lane)
+                .max(zero);
+            let mech = self.regen.max_regen_frac.max(zero) * driven_brake_power;
+            (mech * self.regen.efficiency).min(regen_limit).max(zero)
+        } else {
+            zero
+        };
+        bus.set_channel(self.actuation.regen_power_w, lane, regen_power);
+    }
+}
+
+/// The result of a torque-vectoring allocation: the per-wheel longitudinal force deltas and the yaw
+/// moment they actually realise (≤ the demand once the friction-ellipse limits bind).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct YawAllocation<T> {
+    /// Per-wheel longitudinal wheel-frame force delta `Δf_x` `[FL, FR, RL, RR]`, N (`+` adds drive,
+    /// `−` adds brake). Each keeps the wheel inside its friction ellipse.
+    pub delta_fx: [T; WHEELS],
+    /// The yaw moment `ΔM_z` the deltas realise (N·m, +CCW) — `sign(demand)·min(|demand|, feasible)`.
+    pub moment_nm: T,
+}
+
+/// Allocate a demanded yaw moment `demand_nm` (+CCW) across the wheels as a set of longitudinal
+/// force deltas, each clamped inside that wheel's **friction ellipse** (HANDOFF §8.0). This is the
+/// rule-based v1 allocator; its interface (a feasibility set + a proportional fill) is shaped so a QP
+/// allocator can replace the body without touching callers (Decision #2).
+///
+/// For each wheel the longitudinal grip headroom is `f_x,max = √((μ·F_z)² − F_y²)` (0 when the wheel
+/// is already at its lateral limit). Each wheel pushes its delta in the sign that adds toward the
+/// demanded moment (`−sign(demand·y_i)`), by an amount that never takes `|F_x + Δf_x|` past
+/// `f_x,max`; drive-incapable wheels may only *brake* (negative delta). The demand is filled
+/// proportionally to each wheel's contributable moment `|y_i|·headroom`, so the realised moment is
+/// `min(|demand|, Σ|y_i|·headroom)` — a genuine per-wheel split, never a lumped moment injection.
+///
+/// `mu` is the friction-ellipse radius coefficient (the vehicle's representative peak grip); `y` are
+/// the lateral arms (+left); `drive_capable[i]` marks wheels a machine can add drive torque to.
+#[must_use]
+pub fn allocate_yaw_moment<T: Float>(
+    demand_nm: T,
+    y: &[T; WHEELS],
+    fx: &[T; WHEELS],
+    fy: &[T; WHEELS],
+    fz: &[T; WHEELS],
+    mu: T,
+    drive_capable: &[bool; WHEELS],
+) -> YawAllocation<T> {
+    let zero = T::zero();
+    let mut sign_dir = [zero; WHEELS];
+    let mut head = [zero; WHEELS];
+    let mut max_moment = zero;
+    for i in 0..WHEELS {
+        let radius_sq = (mu * fz[i]) * (mu * fz[i]) - fy[i] * fy[i];
+        let fx_max = if radius_sq > zero {
+            radius_sq.sqrt()
+        } else {
+            zero
+        };
+        // The delta sign that adds toward the demand at this wheel: contribution to Mz is −y_i·Δf_x,
+        // so a positive demand wants Δf_x with sign −sign(y_i) (·sign(demand) for either polarity).
+        let s = if demand_nm * y[i] > zero {
+            -T::one()
+        } else if demand_nm * y[i] < zero {
+            T::one()
+        } else {
+            zero
+        };
+        // Grip headroom in that direction (drive-incapable wheels cannot add positive/drive delta).
+        let h = if s > zero {
+            if drive_capable[i] {
+                (fx_max - fx[i]).max(zero)
+            } else {
+                zero
+            }
+        } else if s < zero {
+            (fx_max + fx[i]).max(zero)
+        } else {
+            zero
+        };
+        sign_dir[i] = s;
+        head[i] = h;
+        max_moment = max_moment + y[i].abs() * h;
+    }
+    // Fill the demand proportionally to each wheel's contributable moment; clamp to the feasible set.
+    let scale = if max_moment > zero {
+        (demand_nm.abs() / max_moment).min(T::one())
+    } else {
+        zero
+    };
+    let mut delta_fx = [zero; WHEELS];
+    for i in 0..WHEELS {
+        delta_fx[i] = sign_dir[i] * scale * head[i];
+    }
+    let moment_nm = demand_nm.signum() * scale * max_moment;
+    YawAllocation {
+        delta_fx,
+        moment_nm,
+    }
+}
+
+/// The rule-based **torque-vectoring** allocator block (HANDOFF §8.0; Decision #2): it drives the yaw
+/// rate toward the reference `r_target = v_x·κ_ref` with `ΔM_z = k_yaw·(r_target − r)`, then realises
+/// that moment **physically** by adding per-wheel drive/brake torque within the friction ellipse
+/// ([`allocate_yaw_moment`]) — so the moment emerges through the tyres, not as a lumped external
+/// couple. An `actuate`-phase block that runs *after* the powertrain (whose wheel torques it augments)
+/// and the tyre/load blocks (whose forces/loads set the ellipse). Disabled ⇒ a no-op that only zeroes
+/// its telemetry channel, so a car that does not enable TV is byte-identical to the pre-PR6 lap.
+#[derive(Clone, Copy, Debug)]
+pub struct TorqueVectoring<T> {
+    /// Whether torque vectoring is active.
+    pub enabled: bool,
+    /// Yaw-rate feedback gain `k_yaw`, N·m per rad/s.
+    pub k_yaw: T,
+    /// Hard cap on `|ΔM_z|`, N·m (`+∞` when the schema leaves `max_yaw_moment_nm` unset).
+    pub max_moment: T,
+    /// Friction-ellipse radius coefficient `μ` (the vehicle's representative peak grip).
+    pub mu: T,
+    /// Per-wheel lateral arm `y_i` (+left), m.
+    pub y: [T; WHEELS],
+    /// Per-wheel effective rolling radius, m (force↔torque at the contact patch).
+    pub radius: [T; WHEELS],
+    /// Which wheels a machine can add *drive* torque to (all wheels may brake).
+    pub drive_capable: [bool; WHEELS],
+    /// Interned road channels (reads `κ_ref` for the reference yaw rate).
+    pub road: RoadChannels,
+    /// Interned actuation channels (publishes the realised `yaw_moment_cmd`).
+    pub actuation: ActuationChannels,
+}
+
+impl<T: Float> Block<T> for TorqueVectoring<T> {
+    fn phase(&self) -> Phase {
+        Phase::Actuate
+    }
+
+    fn ports(&self) -> Ports {
+        let base = CoreSignal::COUNT as usize;
+        let ch = |sig: WheelSignal, w: usize| base + (sig as usize) * WHEELS + w;
+        let mut reads = vec![self.road.kappa_ref.index()];
+        let mut writes = vec![self.actuation.yaw_moment_cmd.index()];
+        for sig in [
+            WheelSignal::TireFx,
+            WheelSignal::TireFy,
+            WheelSignal::TireFz,
+        ] {
+            for w in 0..WHEELS {
+                reads.push(ch(sig, w));
+            }
+        }
+        for w in 0..WHEELS {
+            // Read-modify-write: augment the powertrain's per-wheel drive/brake torques.
+            reads.push(ch(WheelSignal::WheelDriveTorque, w));
+            reads.push(ch(WheelSignal::WheelBrakeTorque, w));
+            writes.push(ch(WheelSignal::WheelDriveTorque, w));
+            writes.push(ch(WheelSignal::WheelBrakeTorque, w));
+        }
+        Ports::new(reads, writes)
+    }
+
+    fn derivatives(&self, x: &StateView<T>, bus: &mut Bus<T>, _dx: &mut DerivView<T>, lane: usize) {
+        let zero = T::zero();
+        if !self.enabled {
+            bus.set_channel(self.actuation.yaw_moment_cmd, lane, zero);
+            return;
+        }
+        let vx = x.chassis(ChassisState::Vx).max(zero);
+        let r = x.chassis(ChassisState::YawRate);
+        let kappa_ref = bus.get_channel(self.road.kappa_ref, lane);
+        let r_target = vx * kappa_ref;
+        let demand = (self.k_yaw * (r_target - r))
+            .max(-self.max_moment)
+            .min(self.max_moment);
+
+        let mut fx = [zero; WHEELS];
+        let mut fy = [zero; WHEELS];
+        let mut fz = [zero; WHEELS];
+        for i in 0..WHEELS {
+            fx[i] = bus.get_wheel(WheelSignal::TireFx, i, lane);
+            fy[i] = bus.get_wheel(WheelSignal::TireFy, i, lane);
+            fz[i] = bus.get_wheel(WheelSignal::TireFz, i, lane);
+        }
+        let alloc =
+            allocate_yaw_moment(demand, &self.y, &fx, &fy, &fz, self.mu, &self.drive_capable);
+
+        // Realise the deltas as extra per-wheel drive/brake torque (force · rolling radius): the wheel
+        // spin responds, the slip evolves, and the tyre produces the extra longitudinal force — the
+        // yaw moment emerges through the tyres over the relaxation lag, not as a lumped couple.
+        for i in 0..WHEELS {
+            let dtq = alloc.delta_fx[i] * self.radius[i];
+            if dtq >= zero {
+                let cur = bus.get_wheel(WheelSignal::WheelDriveTorque, i, lane);
+                bus.set_wheel(WheelSignal::WheelDriveTorque, i, lane, cur + dtq);
+            } else {
+                let cur = bus.get_wheel(WheelSignal::WheelBrakeTorque, i, lane);
+                bus.set_wheel(WheelSignal::WheelBrakeTorque, i, lane, cur - dtq);
+            }
+        }
+        bus.set_channel(self.actuation.yaw_moment_cmd, lane, alloc.moment_nm);
     }
 }
 
@@ -324,4 +581,177 @@ pub fn drive_weights<T: Float>(
         *wi = *wi / sum;
     }
     w
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::float_cmp)]
+    use super::*;
+    use outlap_core::bus::ChannelInterner;
+    use outlap_core::state::fast_slot_count;
+
+    use crate::params::{ActuationChannels, RoadChannels};
+
+    /// Symmetric rear-drive test geometry: track ±0.8 m, driven rear.
+    const Y: [f64; WHEELS] = [0.8, -0.8, 0.8, -0.8];
+    const REAR_DRIVEN: [bool; WHEELS] = [false, false, true, true];
+
+    #[test]
+    fn allocation_stays_inside_the_friction_ellipse() {
+        // Sweep demand, load, and the current force state; every commanded delta must keep each
+        // wheel inside its ellipse |Fx + ΔFx| ≤ √((μFz)² − Fy²), and |ΔMz| ≤ |demand|.
+        let mu = 1.5;
+        for &demand in &[-4000.0, -500.0, 0.0, 500.0, 4000.0, 40_000.0] {
+            for &fz in &[1500.0, 4000.0, 8000.0] {
+                for &fy in &[0.0, 2000.0, 5000.0] {
+                    for &fx0 in &[-3000.0, 0.0, 3000.0] {
+                        let fzs = [fz; WHEELS];
+                        let fys = [fy, -fy, fy, -fy];
+                        let fxs = [fx0; WHEELS];
+                        let a = allocate_yaw_moment(demand, &Y, &fxs, &fys, &fzs, mu, &REAR_DRIVEN);
+                        for i in 0..WHEELS {
+                            let fx_max_sq = (mu * fz) * (mu * fz) - fy * fy;
+                            let fx_max = if fx_max_sq > 0.0 {
+                                fx_max_sq.sqrt()
+                            } else {
+                                0.0
+                            };
+                            let total = fxs[i] + a.delta_fx[i];
+                            // Containment holds whenever the baseline was itself feasible.
+                            if fx0.abs() <= fx_max + 1e-6 {
+                                assert!(
+                                    total.abs() <= fx_max + 1e-6,
+                                    "wheel {i} left the ellipse: |{total}| > {fx_max} \
+                                     (demand={demand}, fz={fz}, fy={fy}, fx0={fx0})"
+                                );
+                            }
+                            // Drive-incapable (front) wheels never gain drive torque (positive Δ).
+                            if !REAR_DRIVEN[i] {
+                                assert!(a.delta_fx[i] <= 1e-9, "front wheel {i} gained drive");
+                            }
+                        }
+                        assert!(
+                            a.moment_nm.abs() <= demand.abs() + 1e-6,
+                            "realised moment {} exceeds demand {demand}",
+                            a.moment_nm
+                        );
+                        if demand != 0.0 && a.moment_nm != 0.0 {
+                            assert_eq!(
+                                a.moment_nm.signum(),
+                                demand.signum(),
+                                "realised moment fights the demand"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn allocation_realises_the_full_demand_when_grip_is_ample() {
+        // Ample grip (light lateral use, high load): the demand is met in full as a couple.
+        let mu = 1.6;
+        let fz = [6000.0; WHEELS];
+        let fy = [500.0, -500.0, 500.0, -500.0];
+        let fx = [0.0; WHEELS];
+        let a = allocate_yaw_moment(1200.0, &Y, &fx, &fy, &fz, mu, &REAR_DRIVEN);
+        assert!(
+            (a.moment_nm - 1200.0).abs() < 1e-6,
+            "moment={}",
+            a.moment_nm
+        );
+        // Rear couple: outer (right, y<0) drives +, inner (left, y>0) brakes −.
+        assert!(a.delta_fx[3] > 0.0 && a.delta_fx[2] < 0.0);
+    }
+
+    #[test]
+    fn disabled_torque_vectoring_is_a_no_op() {
+        let mut it = ChannelInterner::new();
+        let road = RoadChannels::intern(&mut it);
+        let actuation = ActuationChannels::intern(&mut it);
+        let tv = TorqueVectoring {
+            enabled: false,
+            k_yaw: 500.0,
+            max_moment: f64::INFINITY,
+            mu: 1.5,
+            y: Y,
+            radius: [0.33; WHEELS],
+            drive_capable: REAR_DRIVEN,
+            road,
+            actuation,
+        };
+        let mut bus = Bus::<f64>::with_interner(&it, 1);
+        // Seed non-trivial forces + a yaw error, then run: the wheel torques must be untouched.
+        for w in 0..WHEELS {
+            bus.set_wheel(WheelSignal::TireFz, w, 0, 5000.0);
+            bus.set_wheel(WheelSignal::WheelDriveTorque, w, 0, 100.0);
+        }
+        let mut fast = vec![0.0; fast_slot_count()];
+        fast[ChassisState::Vx as usize] = 40.0;
+        fast[ChassisState::YawRate as usize] = 0.5;
+        let sv = StateView::new(&fast, 1, 0);
+        let mut dfast = vec![0.0; fast_slot_count()];
+        let mut dv = DerivView::new(&mut dfast, 1, 0);
+        tv.derivatives(&sv, &mut bus, &mut dv, 0);
+        for w in 0..WHEELS {
+            assert_eq!(bus.get_wheel(WheelSignal::WheelDriveTorque, w, 0), 100.0);
+        }
+        assert_eq!(bus.get_channel(actuation.yaw_moment_cmd, 0), 0.0);
+    }
+
+    #[test]
+    fn regen_recovers_only_within_the_battery_ceiling_without_changing_brake_torque() {
+        let mut it = ChannelInterner::new();
+        let actuation = ActuationChannels::intern(&mut it);
+        let pt = Powertrain {
+            traction: MonotoneCubic::new(vec![0.0, 100.0], vec![5000.0, 5000.0]).unwrap(),
+            drive_weight: [0.0, 0.0, 0.5, 0.5],
+            radius: [0.33; WHEELS],
+            max_brake_torque: 6000.0,
+            brake_front_bias: 0.6,
+            regen: RegenParams {
+                enabled: true,
+                max_regen_frac: 1.0,
+                efficiency: 0.9,
+                driven: REAR_DRIVEN,
+            },
+            actuation,
+        };
+        let mut bus = Bus::<f64>::with_interner(&it, 1);
+        bus.set_channel(actuation.torque_scale, 0, 1.0);
+        bus.set(CoreSignal::Brake, 0, 1.0);
+        let mut fast = vec![0.0; fast_slot_count()];
+        fast[ChassisState::Vx as usize] = 50.0;
+        let sv = StateView::new(&fast, 1, 0);
+        let mut dfast = vec![0.0; fast_slot_count()];
+
+        // Case 1: a generous ceiling — regen equals mech·η of the driven-wheel braking power.
+        bus.set_channel(actuation.regen_limit_w, 0, 1.0e9);
+        {
+            let mut dv = DerivView::new(&mut dfast, 1, 0);
+            pt.derivatives(&sv, &mut bus, &mut dv, 0);
+        }
+        let brake_rear = bus.get_wheel(WheelSignal::WheelBrakeTorque, 2, 0);
+        assert!(brake_rear > 0.0, "rear friction brake torque still applied");
+        let mech = 2.0 * (brake_rear / 0.33) * 50.0; // both rear wheels
+        let recovered = bus.get_channel(actuation.regen_power_w, 0);
+        assert!(
+            (recovered - mech * 0.9).abs() < 1e-6,
+            "recovered={recovered}, mech={mech}"
+        );
+
+        // Case 2: a tight ceiling clips the recovery, and the friction brake torque is unchanged.
+        bus.set_channel(actuation.regen_limit_w, 0, 5000.0);
+        {
+            let mut dv = DerivView::new(&mut dfast, 1, 0);
+            pt.derivatives(&sv, &mut bus, &mut dv, 0);
+        }
+        assert_eq!(
+            bus.get_wheel(WheelSignal::WheelBrakeTorque, 2, 0),
+            brake_rear,
+            "regen must not alter the commanded brake torque (energy-only blend)"
+        );
+        assert!((bus.get_channel(actuation.regen_power_w, 0) - 5000.0).abs() < 1e-6);
+    }
 }
