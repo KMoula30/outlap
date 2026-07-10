@@ -105,6 +105,7 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// 3 for the `ptm/1.1` optional Vdc axis (Vdc–SoC coupling, §8.4) alongside the new `battery/1.0`
 /// document, then to 4 for the `sim/1.1` `flat_track` analysis flag (tier dispatch + Limebeer
 /// cross-check), then to 5 for the `vehicle/1.5` optional `driver` section (MacAdam preview + PI
-/// speed-tracking gains, §7.7); an unknown key in a file that declares a newer MINOR than this is
+/// speed-tracking gains, §7.7), then to 6 for the `vehicle/1.6` optional torque-vectoring
+/// `max_yaw_moment_nm` cap (§8.0); an unknown key in a file that declares a newer MINOR than this is
 /// flagged as possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 5;
+pub const SCHEMA_MINOR: u16 = 6;

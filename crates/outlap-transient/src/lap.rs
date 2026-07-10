@@ -35,10 +35,11 @@ use outlap_core::state::{
 use outlap_schema::sim::FzCoupling;
 
 use outlap_vehicle::{
-    preview_distance, relax_wheel, Aero, Chassis, Driver, LoadTransfer, Powertrain, RoadChannels,
-    Tire,
+    preview_distance, relax_wheel, ActuationChannels, Aero, Chassis, Driver, LoadTransfer,
+    Powertrain, RoadChannels, Tire, TorqueVectoring,
 };
 
+use crate::control::{Shifter, SlowStack};
 use crate::line_table::LineTable;
 use crate::result::TransientLap;
 
@@ -98,18 +99,24 @@ pub struct T2Blocks<T> {
     pub aero: Aero<T>,
     /// The load-transfer (algebraic `F_z`) block.
     pub load: LoadTransfer<T>,
-    /// The (placeholder) driver block.
+    /// The ideal-driver block.
     pub driver: Driver<T>,
-    /// The (placeholder) powertrain block.
+    /// The powertrain (drive/brake actuation + regen blend) block.
     pub powertrain: Powertrain<T>,
+    /// The torque-vectoring allocator block (a no-op when disabled).
+    pub tv: TorqueVectoring<T>,
     /// The interned road channels.
     pub road: RoadChannels,
+    /// The interned actuation channels (shift/regen plumbing).
+    pub actuation: ActuationChannels,
 }
 
 impl<T: Float> T2Blocks<T> {
     /// The assembler-facing port specs, in fixed registration order (used for the [`Schedule`] and
-    /// the ordering-determinism test).
-    fn specs(&self) -> [BlockSpec; 6] {
+    /// the ordering-determinism test). The torque-vectoring allocator registers after the tyre/load
+    /// blocks whose forces/loads it reads and the powertrain whose torques it augments, so the
+    /// topological sort places it last in the `actuate` phase (before the `integrate` chassis).
+    fn specs(&self) -> [BlockSpec; 7] {
         [
             BlockSpec::new(Block::phase(&self.driver), Block::ports(&self.driver)),
             BlockSpec::new(
@@ -119,6 +126,7 @@ impl<T: Float> T2Blocks<T> {
             BlockSpec::new(Block::phase(&self.load), Block::ports(&self.load)),
             BlockSpec::new(Block::phase(&self.aero), Block::ports(&self.aero)),
             BlockSpec::new(Block::phase(&self.tire), Block::ports(&self.tire)),
+            BlockSpec::new(Block::phase(&self.tv), Block::ports(&self.tv)),
             BlockSpec::new(Block::phase(&self.chassis), Block::ports(&self.chassis)),
         ]
     }
@@ -140,6 +148,21 @@ pub struct TransientSolver<T> {
     bus: Bus<T>,
     schedule: Schedule,
     slow_clock: SlowClock,
+    // Rule-based control layer (PR6): the shift FSM (discrete gear state on the event queue) and the
+    // slow-state stack (battery SoC on the decimated clock) are optional artifacts handed in by the
+    // caller; absent ⇒ an ideal single-gear, no-regen lap (byte-identical to the PR5 skeleton).
+    shifter: Option<Shifter<T>>,
+    slow: Option<Box<dyn SlowStack>>,
+    actuation: ActuationChannels,
+    /// Drive-torque scale published this step (`1` when engaged / no shift FSM).
+    torque_scale: T,
+    /// Battery regen power ceiling published this step, W (0 without a slow stack).
+    regen_limit_w: T,
+    /// Regen electrical energy accumulated since the last slow-clock fire, J.
+    regen_energy_accum: T,
+    /// Fast steps elapsed since the last slow-clock fire (to flush the final partial window at lap
+    /// end, so no recovered energy is dropped between the last fire and the finish line).
+    slow_pending_steps: u32,
     ax_prev: T,
     ay_prev: T,
     t: T,
@@ -165,6 +188,7 @@ impl<T: Float> TransientSolver<T> {
         let bus = Bus::with_interner(interner, 1);
         let schedule = assemble(&blocks.specs()).expect("acyclic T2 block set");
         let slow_clock = SlowClock::new(cfg.slow_decimation.max(1));
+        let actuation = blocks.actuation;
         let mut solver = Self {
             blocks,
             line,
@@ -177,12 +201,36 @@ impl<T: Float> TransientSolver<T> {
             bus,
             schedule,
             slow_clock,
+            shifter: None,
+            slow: None,
+            actuation,
+            torque_scale: T::one(),
+            regen_limit_w: T::zero(),
+            regen_energy_accum: T::zero(),
+            slow_pending_steps: 0,
             ax_prev: T::zero(),
             ay_prev: T::zero(),
             t: T::zero(),
         };
         solver.seed_initial_state();
         solver
+    }
+
+    /// Attach a gear-shift FSM (consuming). Without one the lap runs a single fixed gear (the QSS
+    /// instantaneous-shift traction ceiling), so a shift never interrupts drive torque.
+    #[must_use]
+    pub fn with_shifter(mut self, shifter: Shifter<T>) -> Self {
+        self.shifter = Some(shifter);
+        self
+    }
+
+    /// Attach a slow-state stack (consuming) — the battery pack whose charge the decimated slow clock
+    /// advances, closing the regen recharge path. Without one, regen is recorded as 0 (no battery).
+    #[must_use]
+    pub fn with_slow_stack(mut self, slow: Box<dyn SlowStack>) -> Self {
+        self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
+        self.slow = Some(slow);
+        self
     }
 
     /// The assembler-produced schedule (registration index order of the block specs).
@@ -231,7 +279,7 @@ impl<T: Float> TransientSolver<T> {
         self.fast[s as usize]
     }
 
-    /// Clear the bus, publish road, run the block chain; the chassis writes `dfast`.
+    /// Clear the bus, publish road + actuation, run the block chain; the chassis writes `dfast`.
     fn eval_rhs(&mut self) {
         eval_rhs_raw(
             &self.blocks,
@@ -239,6 +287,8 @@ impl<T: Float> TransientSolver<T> {
             &self.fast,
             &mut self.dfast,
             &mut self.bus,
+            self.torque_scale,
+            self.regen_limit_w,
         );
     }
 
@@ -296,9 +346,17 @@ impl<T: Float> TransientSolver<T> {
         }
     }
 
-    /// Advance the simulation by one fixed step (relaxation + RK sweep).
+    /// Advance the simulation by one fixed step (control update + relaxation + RK sweep + slow clock).
     pub fn step(&mut self) {
         let dt = self.cfg.dt;
+
+        // (0) rule-based control layer boundary decision (frozen across the RK sweep, like the
+        //     relaxation and load-transfer coupling): advance the shift FSM at the current speed to
+        //     get this step's drive-torque scale; the regen ceiling is refreshed on the slow clock.
+        if let Some(shifter) = self.shifter.as_mut() {
+            let v = self.fast[ChassisState::Vx as usize];
+            self.torque_scale = shifter.update(self.t, dt, v);
+        }
 
         // (1) coupling + relaxation (leaves the lagged slip frozen for the RK sweep).
         self.couple_and_relax();
@@ -320,14 +378,17 @@ impl<T: Float> TransientSolver<T> {
             blocks,
             line,
             t,
+            torque_scale,
+            regen_limit_w,
             ..
         } = self;
         let t_now = *t;
+        let (ts, rl) = (*torque_scale, *regen_limit_w);
         arena.step(x_int, t_now, dt, |_ti, xs, dxs| {
             for (k, &slot) in integrated.iter().enumerate() {
                 fast[slot] = xs[k];
             }
-            eval_rhs_raw(blocks, line, fast, dfast, bus);
+            eval_rhs_raw(blocks, line, fast, dfast, bus, ts, rl);
             for (k, d) in dxs.iter_mut().enumerate() {
                 *d = dfast[integrated[k]];
             }
@@ -352,10 +413,40 @@ impl<T: Float> TransientSolver<T> {
         self.ax_prev = ax;
         self.ay_prev = ay;
 
-        // (4) slow-state clock (no slow states in the M4 skeleton; thermal/SOC land in later PRs).
-        let _ = self.slow_clock.tick();
+        // (4) slow-state clock (Decision #6): accumulate this step's recovered regen energy, and on
+        //     the decimated boundary Coulomb-count it into the pack SoC and refresh the regen ceiling
+        //     (published on the bus for the powertrain's blend cap on the next steps).
+        if self.slow.is_some() {
+            let regen_power = self.bus.get_channel(self.actuation.regen_power_w, 0);
+            self.regen_energy_accum = self.regen_energy_accum + regen_power * dt;
+            self.slow_pending_steps += 1;
+        }
+        if self.slow_clock.tick() {
+            self.advance_slow(dt);
+        }
 
         self.t = self.t + dt;
+    }
+
+    /// Advance the slow-state stack by the accumulated regen energy over the pending window, then
+    /// refresh the published regen ceiling. The window length is the number of fast steps since the
+    /// last advance × `dt` — the full `slow_decimation` on a clock fire, or a shorter partial window
+    /// when flushed at lap end — so the energy the powertrain produced reaches the pack exactly.
+    fn advance_slow(&mut self, dt: T) {
+        let Some(slow) = self.slow.as_mut() else {
+            return;
+        };
+        if self.slow_pending_steps == 0 {
+            return;
+        }
+        let steps = T::from(self.slow_pending_steps).unwrap_or_else(T::one);
+        let slow_dt = (dt * steps).to_f64().unwrap_or(0.0);
+        let energy = self.regen_energy_accum.to_f64().unwrap_or(0.0);
+        let avg_power = if slow_dt > 0.0 { energy / slow_dt } else { 0.0 };
+        slow.on_slow_step(slow_dt, avg_power);
+        self.regen_energy_accum = T::zero();
+        self.slow_pending_steps = 0;
+        self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
     }
 
     /// Record the current state + bus diagnostics as one row of `lap`.
@@ -400,6 +491,20 @@ impl<T: Float> TransientSolver<T> {
         lap.x.push(pos[0]);
         lap.y.push(pos[1]);
         lap.z.push(pos[2]);
+        // Rule-based control-layer telemetry.
+        let gear = self.shifter.as_ref().map_or(0, Shifter::gear);
+        lap.gear.push(T::from(gear).unwrap_or_else(T::zero));
+        lap.torque_scale.push(self.torque_scale);
+        lap.yaw_moment_nm
+            .push(self.bus.get_channel(self.actuation.yaw_moment_cmd, 0));
+        lap.regen_power_w
+            .push(self.bus.get_channel(self.actuation.regen_power_w, 0));
+        if let Some(slow) = self.slow.as_ref() {
+            lap.state_of_charge
+                .push(T::from(slow.soc()).unwrap_or_else(T::zero));
+            lap.pack_temp_c
+                .push(T::from(slow.temp_c()).unwrap_or_else(T::zero));
+        }
     }
 
     /// Run until the arc length reaches `s_end` or `max_steps` elapse, recording every step.
@@ -416,6 +521,18 @@ impl<T: Float> TransientSolver<T> {
             self.record(&mut lap);
             if self.get_fast(ChassisState::S) >= s_end {
                 break;
+            }
+        }
+        // Flush the final partial slow window so recovered regen energy between the last slow-clock
+        // fire and the finish line is Coulomb-counted (energy closure at the lap boundary).
+        self.advance_slow(self.cfg.dt);
+        // Re-stamp the last recorded SoC/temperature with the flushed slow state.
+        if let Some(slow) = self.slow.as_ref() {
+            if let Some(last) = lap.state_of_charge.last_mut() {
+                *last = T::from(slow.soc()).unwrap_or(*last);
+            }
+            if let Some(last) = lap.pack_temp_c.last_mut() {
+                *last = T::from(slow.temp_c()).unwrap_or(*last);
             }
         }
         lap.lap_time_s = self.t;
@@ -463,18 +580,28 @@ fn eval_rhs_raw<T: Float>(
     fast: &[T],
     dfast: &mut [T],
     bus: &mut Bus<T>,
+    torque_scale: T,
+    regen_limit_w: T,
 ) {
     let s = fast[ChassisState::S as usize];
     let vx = fast[ChassisState::Vx as usize];
     bus.clear();
     publish_road(line, &blocks.road, bus, s, vx, blocks.driver.preview_time);
+    // Publish the rule-based control-layer boundary values (frozen across the RK sweep): the shift
+    // FSM's drive-torque scale and the battery regen ceiling the powertrain reads.
+    bus.set_channel(blocks.actuation.torque_scale, 0, torque_scale);
+    bus.set_channel(blocks.actuation.regen_limit_w, 0, regen_limit_w);
     let sv = StateView::new(fast, 1, 0);
     let mut dv = DerivView::new(dfast, 1, 0);
+    // sense → control → actuate → integrate. The torque-vectoring allocator runs at the tail of the
+    // actuate phase, after the powertrain (whose torques it augments) and the tyre/load blocks (whose
+    // forces/loads set the friction ellipse), matching the assembler-produced schedule.
     blocks.driver.derivatives(&sv, bus, &mut dv, 0);
     blocks.powertrain.derivatives(&sv, bus, &mut dv, 0);
     blocks.load.derivatives(&sv, bus, &mut dv, 0);
     blocks.aero.derivatives(&sv, bus, &mut dv, 0);
     blocks.tire.derivatives(&sv, bus, &mut dv, 0);
+    blocks.tv.derivatives(&sv, bus, &mut dv, 0);
     blocks.chassis.derivatives(&sv, bus, &mut dv, 0);
 }
 

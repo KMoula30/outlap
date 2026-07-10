@@ -930,7 +930,7 @@
           "format": "double"
         },
         "max_regen_frac": {
-          "description": "Maximum fraction of total brake torque provided by regen, 0..1.",
+          "description": "Maximum fraction of the **driven axle's** brake torque provided by regen, 0..1 (the machine can\nonly ever brake its own axle). The calipers supply the deficit, so the axle's total brake torque\n— and the trajectory — is unchanged: this is series/blended braking, not added deceleration.",
           "type": "number",
           "format": "double"
         }
@@ -1047,7 +1047,7 @@
       ]
     },
     "TorqueVectoring": {
-      "description": "Yaw-moment-proportional torque vectoring: `ΔM_z = k_yaw · (r_target − r)`.",
+      "description": "Yaw-moment-proportional torque vectoring: `ΔM_z = k_yaw · (r_target − r)`, with the demanded\nmoment physically allocated across the driven wheels within their friction-ellipse and\nmachine-envelope limits (HANDOFF §8.0; the allocator interface is shaped so a QP replaces the\nrule-based split post-v1, Decision #2).",
       "type": "object",
       "properties": {
         "enabled": {
@@ -1056,10 +1056,18 @@
           "default": false
         },
         "k_yaw": {
-          "description": "Yaw-rate feedback gain.",
+          "description": "Yaw-rate feedback gain `k_yaw` (N·m per rad/s).",
           "type": "number",
           "format": "double",
           "default": 0.0
+        },
+        "max_yaw_moment_nm": {
+          "description": "Optional hard cap on the commanded yaw moment `|ΔM_z|`, N·m (a machine-envelope proxy). When\nomitted, the friction-ellipse per-wheel limits alone bound the allocation.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
       }
     },

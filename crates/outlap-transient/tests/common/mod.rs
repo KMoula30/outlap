@@ -8,6 +8,7 @@
 //! the shared monotone cubic. The QSS crates are dev-only dependencies (the solver never touches
 //! them — it receives sampled tables), so this assembly lives in the tests, not the crate.
 #![allow(dead_code)] // shared across several test binaries; not all use every helper.
+#![allow(clippy::cast_precision_loss)] // small loop counters → f64 grid coordinates.
 
 use std::path::PathBuf;
 
@@ -20,8 +21,8 @@ use outlap_schema::vehicle::Driver as DriverCfg;
 use outlap_schema::{load_conditions, load_vehicle, LoadOptions};
 use outlap_transient::{LineSamples, LineTable, T2Blocks};
 use outlap_vehicle::{
-    drive_weights, Aero, Chassis, ChassisParams, Driver, LoadTransfer, Powertrain, RelaxProvider,
-    RoadChannels, Tire, G,
+    drive_weights, ActuationChannels, Aero, Chassis, ChassisParams, Driver, LoadTransfer,
+    Powertrain, RegenParams, RelaxProvider, RoadChannels, Tire, TorqueVectoring, G,
 };
 
 const WHEEL_INERTIA_KGM2: f64 = 1.1;
@@ -93,6 +94,7 @@ pub fn traction_curve(t1: &T1Vehicle) -> MonotoneCubic<f64> {
 #[must_use]
 pub fn build_blocks(t1: &T1Vehicle, it: &mut ChannelInterner) -> T2Blocks<f64> {
     let road = RoadChannels::intern(it);
+    let actuation = ActuationChannels::intern(it);
     let (a, b, tf, tr) = (t1.a_f, t1.b_r, t1.t_f, t1.t_r);
     let x = [a, a, -b, -b];
     let y = [tf * 0.5, -tf * 0.5, tr * 0.5, -tr * 0.5];
@@ -156,8 +158,29 @@ pub fn build_blocks(t1: &T1Vehicle, it: &mut ChannelInterner) -> T2Blocks<f64> {
             radius,
             max_brake_torque: 6000.0,
             brake_front_bias: t1.brake_front_bias,
+            // Regen off by default (the base parity assembly); tests that exercise regen turn it on.
+            regen: RegenParams {
+                enabled: false,
+                max_regen_frac: 0.0,
+                efficiency: 0.9,
+                driven: t1.driven,
+            },
+            actuation,
+        },
+        // Torque vectoring off by default (a no-op block); tests enable it explicitly.
+        tv: TorqueVectoring {
+            enabled: false,
+            k_yaw: 0.0,
+            max_moment: f64::INFINITY,
+            mu: 1.5,
+            y,
+            radius,
+            drive_capable: t1.driven,
+            road,
+            actuation,
         },
         road,
+        actuation,
     }
 }
 

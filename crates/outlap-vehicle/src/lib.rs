@@ -32,6 +32,9 @@ pub mod forces;
 pub mod params;
 
 pub use chassis::Chassis;
-pub use control::{drive_weights, preview_distance, Driver, Powertrain, PREVIEW_FLOOR_M};
+pub use control::{
+    allocate_yaw_moment, drive_weights, preview_distance, Driver, Powertrain, RegenParams,
+    TorqueVectoring, YawAllocation, PREVIEW_FLOOR_M,
+};
 pub use forces::{relax_wheel, Aero, LoadTransfer, RelaxProvider, RelaxTargets, Tire};
-pub use params::{ChassisParams, RoadChannels, WheelGeometry, G};
+pub use params::{ActuationChannels, ChassisParams, RoadChannels, WheelGeometry, G};

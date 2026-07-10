@@ -62,6 +62,45 @@ impl RoadChannels {
     }
 }
 
+/// The interned dynamic-bus channels the **rule-based control layer** (PR6) exchanges (HANDOFF §8).
+/// The orchestrator publishes the shift-FSM outputs (`gear`, `torque_scale`) and the battery regen
+/// ceiling (`regen_limit_w`) at each step — decided on the step-boundary / slow clock and frozen
+/// across the RK sweep, exactly like the relaxation and load-transfer coupling; the control blocks
+/// then publish their diagnostics (`yaw_moment_cmd`, `regen_power_w`) that the recorder logs and the
+/// slow-state stack integrates. Interned once at assembly (Decision #39; never in the loop).
+#[derive(Clone, Copy, Debug)]
+pub struct ActuationChannels {
+    /// Engaged gear index (0-based, as an `f64`) the shift FSM currently holds — telemetry only.
+    pub gear: ChannelId,
+    /// Drive-torque scale `∈ [0, 1]` during a gear shift: `0` through the torque-cut window, ramping
+    /// back to `1` over the clutch re-engagement. Multiplies the traction ceiling (the torque
+    /// interruption of §8.2). Solver-published each step.
+    pub torque_scale: ChannelId,
+    /// Battery regen (charge) power ceiling `P_regen,max`, W (from the pack's SoC-dependent limit on
+    /// the slow clock; `0` when no battery is present). Caps the regen brake blend. Solver-published.
+    pub regen_limit_w: ChannelId,
+    /// Commanded torque-vectoring yaw moment `ΔM_z`, N·m (+CCW) — the ellipse-feasible moment the
+    /// allocator actually applied through the per-wheel force deltas. TV-published (telemetry).
+    pub yaw_moment_cmd: ChannelId,
+    /// Recovered electrical regen power `P_regen`, W (≥ 0) at the driven axle this step —
+    /// powertrain-published; the slow-state stack Coulomb-counts it into the pack state of charge.
+    pub regen_power_w: ChannelId,
+}
+
+impl ActuationChannels {
+    /// Intern the fixed set of actuation channels on `interner` (idempotent; call once at assembly).
+    #[must_use]
+    pub fn intern(interner: &mut ChannelInterner) -> Self {
+        Self {
+            gear: interner.intern("ctrl.gear"),
+            torque_scale: interner.intern("ctrl.torque_scale"),
+            regen_limit_w: interner.intern("ctrl.regen_limit_w"),
+            yaw_moment_cmd: interner.intern("ctrl.yaw_moment_cmd"),
+            regen_power_w: interner.intern("ctrl.regen_power_w"),
+        }
+    }
+}
+
 /// Per-wheel body-frame geometry and inertia (ISO 8855: x forward, y left; `[FL, FR, RL, RR]`).
 #[derive(Clone, Copy, Debug)]
 pub struct WheelGeometry<T> {
