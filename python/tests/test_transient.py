@@ -35,6 +35,8 @@ LIMEBEER = str(_DATA / "vehicles/limebeer_2014_f1")
 # The only committed car that carries a battery *and* its ECM sidecar: a rear-drive EV, so the front
 # axle has no machine and must recover nothing.
 MODEL3_RWD = str(_DATA / "vehicles/tesla_model3_rwd")
+# The only committed car with a multi-ratio gearbox (8 speeds) — exercises the shift FSM.
+F1_2026 = str(_DATA / "vehicles/f1_2026")
 
 # CI-speed envelope: what these tests assert (dataset shape, attrs, regen sign conventions) is
 # fidelity-independent, and every distinct override regenerates the g-g-g-v envelope (a cold step).
@@ -102,15 +104,17 @@ def test_control_layer_telemetry_crosses_the_boundary(f1_lap: xr.Dataset) -> Non
         "torque_scale",
         "yaw_moment_nm",
         "regen_power_w",
+        "traction_power_w",
         "regen_torque_front_nm",
         "regen_torque_rear_nm",
     ):
         assert f1_lap[name].dims == ("time",), name
-    # No shift FSM is attached yet, so the drive torque is never interrupted.
+    # limebeer is single-speed (its drive unit is defined at the wheel shaft), so no shift interrupts
+    # the drive torque — gears change and torque cuts are covered by the f1_2026 test below.
     assert (f1_lap["torque_scale"] == 1.0).all()
-    assert (f1_lap["regen_power_w"] >= 0.0).all(), (
-        "regen power is a non-negative magnitude"
-    )
+    assert (f1_lap["regen_power_w"] >= 0.0).all() and (
+        f1_lap["traction_power_w"] >= 0.0
+    ).all(), "regen and traction power are non-negative magnitudes"
 
 
 def test_provenance_attrs_are_recorded(f1_lap: xr.Dataset) -> None:
@@ -169,30 +173,52 @@ def test_each_machine_regens_only_its_own_axle(ev_lap: xr.Dataset) -> None:
     assert float(ev_lap["regen_power_w"].max()) > 0.0
 
 
-def test_recovered_energy_raises_the_state_of_charge(ev_lap: xr.Dataset) -> None:
+def test_state_of_charge_moves_both_ways_under_power_and_braking(
+    ev_lap: xr.Dataset,
+) -> None:
+    """The pack discharges under power (the machines draw electrical energy) and charges under braking
+    (regen), so the state of charge moves both ways over a lap — not a monotone rise."""
     soc = ev_lap["state_of_charge"].values
-    assert soc[-1] > soc[0], "braking energy reaches the pack"
-    assert (np.diff(soc) >= -1e-12).all(), (
-        "the T2 pack only charges (no traction draw yet)"
-    )
-    # The recovered energy is finite and the pack warms as it takes it.
-    recovered_j = float(
-        np.trapezoid(ev_lap["regen_power_w"].values, ev_lap["time"].values)
-    )
-    assert recovered_j > 0.0
-    assert float(ev_lap["pack_temp_c"][-1]) >= float(ev_lap["pack_temp_c"][0])
+    assert soc.min() < soc.max(), "SoC is not flat"
+    # Both directions are exercised across the lap.
+    dsoc = np.diff(soc)
+    assert (dsoc < 0).any(), "the pack discharges somewhere (under power)"
+    assert (dsoc > 0).any(), "the pack charges somewhere (under braking)"
+    # Both electrical channels are non-negative magnitudes and both are exercised.
+    tp = ev_lap["traction_power_w"].values
+    rp = ev_lap["regen_power_w"].values
+    assert (tp >= 0).all() and (rp >= 0).all()
+    assert float(tp.max()) > 0.0, "the machines draw traction power"
+    assert float(rp.max()) > 0.0, "the machines recover regen power"
 
 
-def test_a_full_pack_refuses_charge_and_says_so(catalunya: Track) -> None:
-    """Charge acceptance is zero at the top of the SoC window, so the calipers do all the braking —
-    correct physics, and surfaced rather than silently producing a dead regen channel."""
+def test_net_energy_closes_the_state_of_charge(ev_lap: xr.Dataset) -> None:
+    """ΔSoC tracks the net electrical energy (regen recovered − traction drawn) — the pack neither
+    creates nor loses energy in the plumbing (the exact capacity is internal, so check the sign)."""
+    t = ev_lap["time"].values
+    recovered = float(np.trapezoid(ev_lap["regen_power_w"].values, t))
+    drawn = float(np.trapezoid(ev_lap["traction_power_w"].values, t))
+    soc = ev_lap["state_of_charge"].values
+    net = recovered - drawn
+    # Net and ΔSoC share a sign: draw-dominated ⇒ SoC falls, regen-dominated ⇒ SoC rises.
+    assert np.sign(soc[-1] - soc[0]) == np.sign(net) or abs(net) < 1e3
+
+
+def test_a_full_pack_discharges_to_make_headroom_then_regenerates(
+    catalunya: Track,
+) -> None:
+    """The battery point: a stint seeded FULL (98%) is no longer stuck. Under power the machines draw
+    it down, opening headroom, so regen recovers energy as the lap goes on — the SoC moves both ways
+    rather than sitting pinned at a dead full pack."""
     lap = solve_transient_lap(
         MODEL3_RWD, catalunya, ds_m=DEFAULT_DS_M, sim=COARSE_SIM, initial_soc=0.98
     )
     ds = transient_lap_dataset(lap)
-    assert float(ds["regen_power_w"].max()) == 0.0
-    assert float(ds["regen_torque_rear_nm"].max()) == 0.0
-    assert any("accept no charge" in n for n in ds.attrs["notes"])
+    soc = ds["state_of_charge"].values
+    assert soc[0] == pytest.approx(0.98, abs=1e-6), "seeded full"
+    assert soc.min() < 0.98, "the full pack discharges under power (makes headroom)"
+    # Once there is headroom, regen recovers — a full pack is no longer a dead channel.
+    assert float(ds["regen_power_w"].max()) > 0.0, "regen works once headroom opens"
 
 
 def test_the_default_pack_seed_is_surfaced(ev_lap: xr.Dataset) -> None:
@@ -242,3 +268,35 @@ def test_solve_lap_dataset_dispatches_t2_to_the_transient_tier(
 ) -> None:
     assert f1_lap.attrs["tier"] == "t2"
     assert "time" in f1_lap.sizes
+
+
+# --- Gear-shift FSM -------------------------------------------------------------------------------
+
+
+def test_a_geared_car_shifts_and_the_shifts_cut_torque(catalunya: Track) -> None:
+    """The 8-speed f1_2026 changes gear as it speeds up, and each shift shows as a drive-torque cut
+    (the §8.2 torque interruption). A single-speed car (limebeer) never shifts."""
+    ds = solve_lap_dataset(
+        F1_2026, catalunya, ds_m=DEFAULT_DS_M, tier="t2", sim=COARSE_SIM
+    )
+    gear = ds["gear"].values
+    ts = ds["torque_scale"].values
+    assert len(set(int(g) for g in np.unique(gear))) >= 2, (
+        "the car uses more than one gear"
+    )
+    assert int((np.diff(gear) != 0).sum()) > 0, "gears change over the lap"
+    # A shift interrupts the drive torque: torque_scale dips below 1 during the cut/ramp.
+    assert float(ts.min()) < 1.0, "a shift cuts the drive torque"
+    assert (ts >= 0.0).all() and (ts <= 1.0 + 1e-9).all(), (
+        "torque_scale stays in [0, 1]"
+    )
+    assert any("gear-shift FSM:" in n for n in ds.attrs["notes"]), (
+        "the shift plan is surfaced"
+    )
+
+
+def test_a_single_speed_car_never_shifts(f1_lap: xr.Dataset) -> None:
+    # limebeer's drive unit is defined at the wheel shaft (no gearbox) → the FSM is inert.
+    assert (f1_lap["gear"] == 0.0).all()
+    assert (f1_lap["torque_scale"] == 1.0).all()
+    assert any("gear-shift FSM inert" in n for n in f1_lap.attrs["notes"])

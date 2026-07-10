@@ -179,7 +179,7 @@ pub struct TransientSolver<T> {
     /// Battery regen power ceiling published this step, W (0 without a slow stack).
     regen_limit_w: T,
     /// Regen electrical energy accumulated since the last slow-clock fire, J.
-    regen_energy_accum: T,
+    net_charge_energy_accum: T,
     /// Fast steps elapsed since the last slow-clock fire (to flush the final partial window at lap
     /// end, so no recovered energy is dropped between the last fire and the finish line).
     slow_pending_steps: u32,
@@ -226,7 +226,7 @@ impl<T: Float> TransientSolver<T> {
             actuation,
             torque_scale: T::one(),
             regen_limit_w: T::zero(),
-            regen_energy_accum: T::zero(),
+            net_charge_energy_accum: T::zero(),
             slow_pending_steps: 0,
             ax_prev: T::zero(),
             ay_prev: T::zero(),
@@ -433,12 +433,15 @@ impl<T: Float> TransientSolver<T> {
         self.ax_prev = ax;
         self.ay_prev = ay;
 
-        // (4) slow-state clock (Decision #6): accumulate this step's recovered regen energy, and on
-        //     the decimated boundary Coulomb-count it into the pack SoC and refresh the regen ceiling
-        //     (published on the bus for the powertrain's blend cap on the next steps).
+        // (4) slow-state clock (Decision #6): accumulate this step's **net** electrical energy —
+        //     recovered regen minus the traction draw — and on the decimated boundary Coulomb-count it
+        //     into the pack SoC and refresh the regen ceiling (published on the bus for the
+        //     powertrain's blend cap on the next steps). Net negative ⇒ the pack discharges under power.
         if self.slow.is_some() {
             let regen_power = self.bus.get_channel(self.actuation.regen_power_w, 0);
-            self.regen_energy_accum = self.regen_energy_accum + regen_power * dt;
+            let traction_power = self.bus.get_channel(self.actuation.traction_power_w, 0);
+            self.net_charge_energy_accum =
+                self.net_charge_energy_accum + (regen_power - traction_power) * dt;
             self.slow_pending_steps += 1;
         }
         if self.slow_clock.tick() {
@@ -448,10 +451,11 @@ impl<T: Float> TransientSolver<T> {
         self.t = self.t + dt;
     }
 
-    /// Advance the slow-state stack by the accumulated regen energy over the pending window, then
-    /// refresh the published regen ceiling. The window length is the number of fast steps since the
-    /// last advance × `dt` — the full `slow_decimation` on a clock fire, or a shorter partial window
-    /// when flushed at lap end — so the energy the powertrain produced reaches the pack exactly.
+    /// Advance the slow-state stack by the accumulated **net** electrical energy (regen − traction)
+    /// over the pending window, then refresh the published regen ceiling. The window length is the
+    /// number of fast steps since the last advance × `dt` — the full `slow_decimation` on a clock
+    /// fire, or a shorter partial window when flushed at lap end — so the net energy the powertrain
+    /// exchanged with the pack reaches it exactly.
     fn advance_slow(&mut self, dt: T) {
         let Some(slow) = self.slow.as_mut() else {
             return;
@@ -461,10 +465,10 @@ impl<T: Float> TransientSolver<T> {
         }
         let steps = T::from(self.slow_pending_steps).unwrap_or_else(T::one);
         let slow_dt = (dt * steps).to_f64().unwrap_or(0.0);
-        let energy = self.regen_energy_accum.to_f64().unwrap_or(0.0);
+        let energy = self.net_charge_energy_accum.to_f64().unwrap_or(0.0);
         let avg_power = if slow_dt > 0.0 { energy / slow_dt } else { 0.0 };
         slow.on_slow_step(slow_dt, avg_power);
-        self.regen_energy_accum = T::zero();
+        self.net_charge_energy_accum = T::zero();
         self.slow_pending_steps = 0;
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
     }
@@ -519,6 +523,8 @@ impl<T: Float> TransientSolver<T> {
             .push(self.bus.get_channel(self.actuation.yaw_moment_cmd, 0));
         lap.regen_power_w
             .push(self.bus.get_channel(self.actuation.regen_power_w, 0));
+        lap.traction_power_w
+            .push(self.bus.get_channel(self.actuation.traction_power_w, 0));
         lap.regen_torque_front_nm.push(
             self.bus
                 .get_channel(self.actuation.regen_torque_front_nm, 0),

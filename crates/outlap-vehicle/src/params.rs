@@ -86,6 +86,10 @@ pub struct ActuationChannels {
     /// Recovered electrical regen power `P_regen`, W (≥ 0) summed over the driven axles this step —
     /// powertrain-published; the slow-state stack Coulomb-counts it into the pack state of charge.
     pub regen_power_w: ChannelId,
+    /// Electrical **traction** power drawn from the pack, W (≥ 0) this step — the drive power the
+    /// electric machines put down, divided by their efficiency (motoring). Powertrain-published; the
+    /// slow-state stack discharges it from the pack, so the state of charge moves both ways over a lap.
+    pub traction_power_w: ChannelId,
     /// Front-axle **machine** braking torque, N·m (≥ 0) — the share of the front axle's commanded
     /// brake torque the front machine took. The calipers supplied the rest. Powertrain-published.
     pub regen_torque_front_nm: ChannelId,
@@ -103,6 +107,7 @@ impl ActuationChannels {
             regen_limit_w: interner.intern("ctrl.regen_limit_w"),
             yaw_moment_cmd: interner.intern("ctrl.yaw_moment_cmd"),
             regen_power_w: interner.intern("ctrl.regen_power_w"),
+            traction_power_w: interner.intern("ctrl.traction_power_w"),
             regen_torque_front_nm: interner.intern("ctrl.regen_torque_front_nm"),
             regen_torque_rear_nm: interner.intern("ctrl.regen_torque_rear_nm"),
         }

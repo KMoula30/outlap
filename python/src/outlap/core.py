@@ -332,6 +332,14 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
             lap.regen_power_w(),
             {"units": "W", "long_name": "recovered electrical regen power"},
         ),
+        "traction_power_w": (
+            "time",
+            lap.traction_power_w(),
+            {
+                "units": "W",
+                "long_name": "electrical traction power drawn from the pack",
+            },
+        ),
         "regen_torque_front_nm": (
             "time",
             lap.regen_torque_front_nm(),

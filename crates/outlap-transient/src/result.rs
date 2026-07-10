@@ -67,6 +67,9 @@ pub struct TransientLap<T> {
     pub yaw_moment_nm: Vec<T>,
     /// Recovered regen electrical power summed over the driven axles, W (≥ 0).
     pub regen_power_w: Vec<T>,
+    /// Electrical traction power drawn from the pack, W (≥ 0) — the drive power the electric machines
+    /// put down over their motoring efficiency. `regen_power_w − this` is the net pack charge power.
+    pub traction_power_w: Vec<T>,
     /// Front-axle machine braking torque, N·m (≥ 0) — the share of the front axle's commanded brake
     /// torque the machine took. `front_axle_brake_torque − this` is what the front calipers supplied.
     pub regen_torque_front_nm: Vec<T>,
@@ -108,6 +111,7 @@ impl<T: Float> Default for TransientLap<T> {
             torque_scale: Vec::new(),
             yaw_moment_nm: Vec::new(),
             regen_power_w: Vec::new(),
+            traction_power_w: Vec::new(),
             regen_torque_front_nm: Vec::new(),
             regen_torque_rear_nm: Vec::new(),
             state_of_charge: Vec::new(),
