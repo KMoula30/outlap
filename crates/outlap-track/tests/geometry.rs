@@ -253,3 +253,32 @@ fn rejects_mislabelled_closed_track() {
         "got {err:?}"
     );
 }
+
+#[test]
+fn pathological_vertical_curvature_is_clamped_to_a_physical_bound() {
+    // A crest far tighter than any real road (`z'' = −c`, c = 0.1 ⇒ κ_v = −0.1 at the apex, a 10 m
+    // vertical radius). The physical backstop clamps it to −0.05 (a 20 m radius) so a solver's
+    // κ_v·v² normal-load term can never be driven to a divergent value by bad elevation data.
+    let c = 0.1;
+    let xa = 100.0;
+    let rows: Vec<CenterlineRow> = (0..=200)
+        .map(|i| {
+            let x = f64::from(i);
+            row(x, x, 0.0, 5.0 - 0.5 * c * (x - xa).powi(2), 0.0)
+        })
+        .collect();
+    let t = track(false, rows);
+    // Unclamped this would be −0.1; the guard holds it at the −0.05 bound.
+    assert!(
+        (t.curvature_v(xa) + 0.05).abs() < 1e-9,
+        "apex κ_v {} not clamped to −0.05",
+        t.curvature_v(xa)
+    );
+    for i in 0..=200 {
+        let kv = t.curvature_v(f64::from(i));
+        assert!(
+            kv.abs() <= 0.05 + 1e-12,
+            "κ_v {kv} exceeds the clamp at x={i}"
+        );
+    }
+}
