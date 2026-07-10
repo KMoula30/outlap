@@ -111,6 +111,26 @@ pub struct T2Blocks<T> {
     pub actuation: ActuationChannels,
 }
 
+impl From<outlap_vehicle::T2Parts<f64>> for T2Blocks<f64> {
+    /// Take the blocks the shared assembly pipeline (`outlap_vehicle::assemble_t2`) produced. The
+    /// assembly lives in `outlap-vehicle` because it needs the QSS trim/envelope algebra to sample
+    /// the traction and regen envelopes; this crate stays free of that dependency and only owns the
+    /// step loop.
+    fn from(p: outlap_vehicle::T2Parts<f64>) -> Self {
+        Self {
+            chassis: p.chassis,
+            tire: p.tire,
+            aero: p.aero,
+            load: p.load,
+            driver: p.driver,
+            powertrain: p.powertrain,
+            tv: p.tv,
+            road: p.road,
+            actuation: p.actuation,
+        }
+    }
+}
+
 impl<T: Float> T2Blocks<T> {
     /// The assembler-facing port specs, in fixed registration order (used for the [`Schedule`] and
     /// the ordering-determinism test). The torque-vectoring allocator registers after the tyre/load

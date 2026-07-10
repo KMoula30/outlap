@@ -47,9 +47,9 @@ fn coasting(solver_blocks: &mut outlap_transient::T2Blocks<f64>) {
 
 #[test]
 fn assembler_order_is_deterministic_and_phase_sorted() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = outlap_core::bus::ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it);
+    let blocks = build_blocks(&t1, &spec, &mut it);
     let solver = TransientSolver::new(
         blocks,
         line(100.0, 50, false, 0.0, 0.0, 20.0, None),
@@ -64,7 +64,7 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
     assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6]);
     // Determinism: same specs → same schedule.
     let solver2 = TransientSolver::new(
-        build_blocks(&t1, &mut outlap_core::bus::ChannelInterner::new()),
+        build_blocks(&t1, &spec, &mut outlap_core::bus::ChannelInterner::new()),
         line(100.0, 50, false, 0.0, 0.0, 20.0, None),
         &it,
         cfg(),
@@ -82,9 +82,9 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
 
 #[test]
 fn flat_straight_stays_planar() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = outlap_core::bus::ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it);
+    let blocks = build_blocks(&t1, &spec, &mut it);
     let mut solver = TransientSolver::new(
         blocks,
         line(4000.0, 200, false, 0.0, 0.0, 40.0, None),
@@ -108,9 +108,9 @@ fn flat_straight_stays_planar() {
 
 #[test]
 fn coastdown_decelerates_under_drag() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = outlap_core::bus::ChannelInterner::new();
-    let mut blocks = build_blocks(&t1, &mut it);
+    let mut blocks = build_blocks(&t1, &spec, &mut it);
     coasting(&mut blocks); // no throttle
     let mut solver = TransientSolver::new(
         blocks,
@@ -134,11 +134,11 @@ fn coastdown_decelerates_under_drag() {
 
 #[test]
 fn step_steer_builds_correct_yaw_and_loads_the_outside() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = outlap_core::bus::ChannelInterner::new();
     // Constant steer feed-forward via kappa_ref on a straight road (path feedback off).
     let (v, kappa) = (40.0, 0.006);
-    let mut blocks = build_blocks(&t1, &mut it);
+    let mut blocks = build_blocks(&t1, &spec, &mut it);
     feed_forward_steer_only(&mut blocks);
     let mut solver = TransientSolver::new(
         blocks,
@@ -163,9 +163,9 @@ fn step_steer_builds_correct_yaw_and_loads_the_outside() {
 
 #[test]
 fn relaxation_states_converge_to_steady_state() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = outlap_core::bus::ChannelInterner::new();
-    let mut blocks = build_blocks(&t1, &mut it);
+    let mut blocks = build_blocks(&t1, &spec, &mut it);
     feed_forward_steer_only(&mut blocks); // steady curve from the FF steer
     let mut solver = TransientSolver::new(
         blocks,
@@ -194,10 +194,10 @@ fn relaxation_states_converge_to_steady_state() {
 
 #[test]
 fn skidpad_is_bit_reproducible() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let run = || {
         let mut it = outlap_core::bus::ChannelInterner::new();
-        let blocks = build_blocks(&t1, &mut it);
+        let blocks = build_blocks(&t1, &spec, &mut it);
         let l = line(
             2.0 * std::f64::consts::PI * 60.0,
             400,
@@ -220,9 +220,9 @@ fn skidpad_is_bit_reproducible() {
 
 #[test]
 fn skidpad_stays_within_the_friction_circle() {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = outlap_core::bus::ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it);
+    let blocks = build_blocks(&t1, &spec, &mut it);
     let l = line(
         2.0 * std::f64::consts::PI * 60.0,
         400,

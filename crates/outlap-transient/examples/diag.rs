@@ -30,9 +30,9 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
 
-    let t1 = common::limebeer();
+    let (t1, spec) = common::limebeer();
     let mut interner = ChannelInterner::new();
-    let mut blocks = common::build_blocks(&t1, &mut interner);
+    let mut blocks = common::build_blocks(&t1, &spec, &mut interner);
     // Path feedback off → constant steer = the curvature feed-forward; PI holds v_ref.
     blocks.driver.preview_gain = 0.0;
     blocks.driver.heading_gain = 0.0;

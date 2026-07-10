@@ -1412,6 +1412,8 @@ dependencies = [
  "outlap-schema",
  "outlap-tire",
  "outlap-track",
+ "outlap-transient",
+ "outlap-vehicle",
  "pyo3",
  "serde_json",
 ]
@@ -1515,6 +1517,7 @@ dependencies = [
  "num-traits",
  "outlap-core",
  "outlap-qss",
+ "outlap-schema",
  "outlap-tire",
  "proptest",
  "serde_json",

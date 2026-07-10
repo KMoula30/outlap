@@ -23,6 +23,10 @@ outlap-tire = { path = "../outlap-tire" }
 # builds for wasm; the wasm build of outlap-qss keeps the feature off and stays thread-free).
 outlap-qss = { path = "../outlap-qss", features = ["parallel"] }
 outlap-raceline = { path = "../outlap-raceline" }
+# The T2 transient tier: `outlap-vehicle` owns the shared block assembly (it needs the QSS trim
+# algebra); `outlap-transient` owns the step loop and stays free of any QSS dependency.
+outlap-vehicle = { path = "../outlap-vehicle" }
+outlap-transient = { path = "../outlap-transient" }
 serde_json = "1"
 miette = "7.6.0"
 

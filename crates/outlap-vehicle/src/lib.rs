@@ -26,11 +26,13 @@
     clippy::similar_names
 )]
 
+pub mod assembly;
 pub mod chassis;
 pub mod control;
 pub mod forces;
 pub mod params;
 
+pub use assembly::{assemble_t2, regen_params, traction_curve, T2Options, T2Parts};
 pub use chassis::Chassis;
 pub use control::{
     allocate_yaw_moment, drive_weights, preview_distance, AxleRegen, Driver, Powertrain,

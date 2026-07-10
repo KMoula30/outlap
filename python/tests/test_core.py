@@ -288,10 +288,10 @@ def test_flat_track_mode_records_and_flattens(catalunya: Track) -> None:
     assert flat.attrs["lap_time_s"] != full.attrs["lap_time_s"]
 
 
-def test_transient_tiers_raise_typed_errors(catalunya: Track) -> None:
-    for tier, milestone in (("t2", "M4"), ("t3", "M6")):
-        with pytest.raises(ValueError, match=milestone):
-            solve_lap_dataset(F1_DIR, catalunya, tier=tier, sim=COARSE_SIM)
+def test_unimplemented_tier_raises_a_typed_error(catalunya: Track) -> None:
+    # t2 landed with the transient tier (see `test_transient.py`); t3 is still M6.
+    with pytest.raises(ValueError, match="M6"):
+        solve_lap_dataset(F1_DIR, catalunya, tier="t3", sim=COARSE_SIM)
 
 
 def test_unknown_sim_field_fails_loudly(catalunya: Track) -> None:

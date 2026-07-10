@@ -808,12 +808,15 @@ fn install_sidecars(
 /// the thermal assembly are surfaced as notes.
 ///
 /// Returns the owned parts; the [`SlowCoupling`] itself borrows the `T1Vehicle` at the call site.
-fn build_slow_stack(
+/// Load the vehicle's battery pack (document + ECM sidecar) into a runnable [`Pack`]. `None` when the
+/// car declares no battery, or when its stack files are not present (a note says which — nothing
+/// silent); a present-but-broken file is a real error. Shared by the QSS slow coupling and the T2
+/// slow-state stack, so both see the same charge-acceptance model.
+fn load_pack(
     resolved: &ResolvedVehicle,
     vl: &FsLoader,
-    conditions: &Conditions,
     notes: &mut Vec<String>,
-) -> PyResult<Option<(MachineThermal, Pack, PackState)>> {
+) -> PyResult<Option<(Pack, PackState)>> {
     use outlap_schema::sidecar::read_gridded_table;
 
     let Some(batt) = &resolved.spec.battery else {
@@ -840,6 +843,20 @@ fn build_slow_stack(
         return Ok(None);
     };
     let ecm = read_gridded_table(&ecm_bytes, &Pack::ecm_axis_names()).map_err(err)?;
+    let (pack, state) = Pack::assemble(&doc, &ecm, None).map_err(err)?;
+    notes.extend(pack.notes().iter().cloned());
+    Ok(Some((pack, state)))
+}
+
+fn build_slow_stack(
+    resolved: &ResolvedVehicle,
+    vl: &FsLoader,
+    conditions: &Conditions,
+    notes: &mut Vec<String>,
+) -> PyResult<Option<(MachineThermal, Pack, PackState)>> {
+    let Some((pack, pack_state)) = load_pack(resolved, vl, notes)? else {
+        return Ok(None);
+    };
     // The first drive unit with a `.emotor` thermal ref carries the machine slow state (the QSS
     // coupling marches ONE thermal network this milestone; multi-machine stacks arrive with the
     // ERS energy manager). Extra thermal declarations are dropped WITH a note (nothing silent).
@@ -899,8 +916,7 @@ fn build_slow_stack(
             .iter()
             .map(|e| format!("machine thermal: {e}")),
     );
-    let (pack, state) = Pack::assemble(&doc, &ecm, None).map_err(err)?;
-    Ok(Some((thermal, pack, state)))
+    Ok(Some((thermal, pack, pack_state)))
 }
 
 /// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
@@ -955,8 +971,9 @@ fn flat4(v: &[[f64; 4]]) -> Vec<f64> {
 /// `{"flat_track": True, "envelope": {"v_points": 24}}`) override the file/defaults; `tier=` wins.
 ///
 /// `t0` runs the point-mass velocity profile on the corrected g-g-g-v envelope; `t1` adds a
-/// per-station re-trim for per-wheel loads/slips/forces + setup metrics; `t2`/`t3` raise (they land
-/// in M4/M6). When `track` is a generated racing line, pass `raceline_ds_m` for honest provenance.
+/// per-station re-trim for per-wheel loads/slips/forces + setup metrics. `t2` is the transient tier
+/// and is time-indexed, so it has its own entry point ([`solve_transient_lap`]); `t3` raises (M6).
+/// When `track` is a generated racing line, pass `raceline_ds_m` for honest provenance.
 ///
 /// What-if experiments (Decision #35): `overrides` is a `{dotted.path: value}` vehicle patch;
 /// `conditions` is a nested dict deep-merged onto the session conditions.
@@ -1010,7 +1027,16 @@ fn solve_lap(
 
     // Enum dispatch on the resolved tier (assembly-time, never in the loop).
     let qss: QssLap = match sim_cfg.tier {
-        tier @ (Tier::T2 | Tier::T3) => return Err(err(tier_not_implemented(tier))),
+        // The transient tier is time-indexed, not station-indexed, so it returns a different
+        // artifact. Point the caller at it rather than at a bare "not implemented".
+        Tier::T2 => {
+            return Err(PyValueError::new_err(
+                "the transient tier (t2) produces a time-indexed lap: call \
+                 `outlap.solve_transient_lap(...)`, or `outlap.solve_lap_dataset(..., tier=\"t2\")` \
+                 for an xarray view",
+            ))
+        }
+        tier @ Tier::T3 => return Err(err(tier_not_implemented(tier))),
         wanted => {
             let mut t1v = T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded)
                 .map_err(err)?;
@@ -1153,6 +1179,576 @@ fn vehicle_report<'py>(
     Ok(d)
 }
 
+// ---------------------------------------------------------------------------------------------
+// T2 transient tier (PR7): Track → LineTable, the pack-backed slow stack, and the time-indexed lap.
+// ---------------------------------------------------------------------------------------------
+
+/// Fraction of the QSS speed profile the transient driver tracks by default. The point-mass profile
+/// spends the whole grip envelope longitudinally; a transient car with a real tyre needs a margin to
+/// stay inside its combined-slip limit on a real circuit. Surfaced in the lap notes.
+const DEFAULT_SPEED_MARGIN: f64 = 0.85;
+/// Hard cap on transient steps, so a car that cannot complete the lap terminates instead of hanging.
+const MAX_TRANSIENT_STEPS: usize = 2_000_000;
+
+/// The battery pack as the transient solver's slow-state stack (Decision #6): it Coulomb-counts the
+/// recovered regen energy on the decimated slow clock and publishes back the pack's
+/// **charge-acceptance ceiling** at the current SoC *and temperature*, which caps the series regen
+/// blend. Held here at the native edge, so the wasm-clean transient crate keeps no QSS dependency.
+///
+/// The pack only *charges* on a T2 lap: the traction ceiling is a wheel-force envelope, not an
+/// electrical power draw, so the drive-side discharge is not fed back to the pack this milestone. The
+/// SoC therefore rises monotonically over a lap, and a note says so.
+struct PackSlowStack {
+    pack: Pack,
+    state: PackState,
+}
+
+impl outlap_transient::SlowStack for PackSlowStack {
+    fn on_slow_step(&mut self, dt_s: f64, regen_power_w: f64) {
+        // `Pack::step_power` takes discharge-positive terminal power, so charging is negative. The
+        // step advances SoC (Coulomb count), the RC overpotential, and the lumped temperature.
+        let _ = self
+            .pack
+            .step_power(&mut self.state, -regen_power_w.max(0.0), dt_s);
+    }
+    fn regen_power_limit_w(&self) -> f64 {
+        self.pack.regen_power_limit_w(&self.state)
+    }
+    fn soc(&self) -> f64 {
+        self.state.soc
+    }
+    fn temp_c(&self) -> f64 {
+        self.state.temp_k - 273.15
+    }
+}
+
+/// Build the transient [`LineTable`] from the (possibly raceline-offset) track, the T0 path, and the
+/// QSS speed profile the driver tracks.
+///
+/// The chassis and driver curvature both come from the T0 path's **own smoothed** `kappa_l`, so
+/// `κ_ref` aligns with the `v_ref` the point-mass solver braked for; feeding the driver the raw line
+/// curvature instead makes it try to corner harder than the profile ever planned. Grade, banking and
+/// vertical curvature are zeroed under `flat_track`; the world trajectory always comes from the line.
+fn line_from_track(
+    line: &outlap_track::Track,
+    path: &T0Path,
+    v_ref: &[f64],
+    flat: bool,
+) -> PyResult<outlap_transient::LineTable<f64>> {
+    let s = &path.s;
+    let n = s.len();
+    if v_ref.len() != n {
+        return Err(PyValueError::new_err(format!(
+            "speed profile has {} stations but the path has {n}",
+            v_ref.len()
+        )));
+    }
+    let mut samples = outlap_transient::LineSamples {
+        s: s.clone(),
+        kappa_h: path.kappa_l.clone(),
+        grade: vec![0.0; n],
+        banking: vec![0.0; n],
+        kappa_v: vec![0.0; n],
+        n_ref: vec![0.0; n],
+        kappa_ref: path.kappa_l.clone(),
+        v_ref: v_ref.to_vec(),
+        x_ref: Vec::with_capacity(n),
+        y_ref: Vec::with_capacity(n),
+        z_ref: vec![0.0; n],
+        lat_x: Vec::with_capacity(n),
+        lat_y: Vec::with_capacity(n),
+        lat_z: vec![0.0; n],
+        closed: path.closed,
+    };
+    for (i, &si) in s.iter().enumerate() {
+        let f = line.road_frame(si);
+        samples.x_ref.push(f.origin[0]);
+        samples.y_ref.push(f.origin[1]);
+        samples.lat_x.push(f.lateral[0]);
+        samples.lat_y.push(f.lateral[1]);
+        if !flat {
+            samples.z_ref[i] = f.origin[2];
+            samples.lat_z[i] = f.lateral[2];
+            samples.grade[i] = f.grade;
+            samples.banking[i] = f.banking;
+            samples.kappa_v[i] = f.kappa_v;
+        }
+    }
+    outlap_transient::LineTable::new(&samples).map_err(err)
+}
+
+/// Index of the straightest station (min `|κ|`). A cold transient — zero relaxation, zero yaw,
+/// running straight — seeded *at* a corner is unphysical, so the lap starts on a straight and the
+/// closed line wraps `s` back through the start/finish.
+fn straightest_station(kappa: &[f64]) -> usize {
+    (0..kappa.len())
+        .min_by(|&a, &b| {
+            kappa[a]
+                .abs()
+                .partial_cmp(&kappa[b].abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0)
+}
+
+/// A solved **transient (T2)** lap: fixed-step, time-indexed channels, per-wheel `time × wheel`
+/// arrays, and the rule-based control layer's telemetry (gear, shift torque scale, torque-vectoring
+/// yaw moment, per-axle regen torque, pack SoC/temperature).
+#[pyclass(frozen)]
+pub struct TransientLap {
+    t: Vec<f64>,
+    s: Vec<f64>,
+    n: Vec<f64>,
+    psi_rel: Vec<f64>,
+    vx: Vec<f64>,
+    vy: Vec<f64>,
+    yaw_rate: Vec<f64>,
+    ax: Vec<f64>,
+    ay: Vec<f64>,
+    steer: Vec<f64>,
+    throttle: Vec<f64>,
+    brake: Vec<f64>,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    gear: Vec<f64>,
+    torque_scale: Vec<f64>,
+    yaw_moment_nm: Vec<f64>,
+    regen_power_w: Vec<f64>,
+    regen_torque_front_nm: Vec<f64>,
+    regen_torque_rear_nm: Vec<f64>,
+    // Per-wheel channels, row-major `n × 4` (FL/FR/RL/RR).
+    omega: Vec<f64>,
+    vertical_load_n: Vec<f64>,
+    slip_ratio: Vec<f64>,
+    slip_angle_rad: Vec<f64>,
+    force_long_n: Vec<f64>,
+    force_lat_n: Vec<f64>,
+    // Slow states; `None` when the car has no battery (or its files are absent).
+    state_of_charge: Option<Vec<f64>>,
+    pack_temp_c: Option<Vec<f64>>,
+    /// Total lap time, s.
+    #[pyo3(get)]
+    lap_time_s: f64,
+    /// The resolved solver tier (always `"t2"`).
+    #[pyo3(get)]
+    tier: String,
+    /// The recorded normal-load coupling mode (`"one_step_lag"` / `"fixed_point"`).
+    #[pyo3(get)]
+    fz_coupling: String,
+    /// Whether the lap ran in flat-track analysis mode.
+    #[pyo3(get)]
+    flat_track: bool,
+    /// Resolved fixed step size, s.
+    #[pyo3(get)]
+    dt_s: f64,
+    /// Resolved integrator order (Heun: 2, RK4: 4).
+    #[pyo3(get)]
+    integrator_order: u32,
+    /// The fraction of the QSS speed profile the driver tracked.
+    #[pyo3(get)]
+    speed_margin: f64,
+    /// Whether the car reached the end of the lap within the step budget.
+    #[pyo3(get)]
+    completed: bool,
+    /// The wheel-channel order for the per-wheel arrays (`["FL","FR","RL","RR"]`).
+    #[pyo3(get)]
+    wheels: Vec<String>,
+    /// Simplification/degradation notes (nothing silent).
+    #[pyo3(get)]
+    notes: Vec<String>,
+    /// blake3 hash of the resolved vehicle spec that produced this lap.
+    #[pyo3(get)]
+    resolved_hash: String,
+}
+
+/// Build a `n × 4` numpy array (row-major) from a flat per-wheel channel.
+fn wheel_array_2d<'py>(py: Python<'py>, flat: &[f64]) -> Bound<'py, PyArray2<f64>> {
+    let n = flat.len() / 4;
+    numpy::ndarray::Array2::from_shape_vec((n, 4), flat.to_vec())
+        .expect("n×4 per-wheel channel")
+        .into_pyarray(py)
+}
+
+#[pymethods]
+impl TransientLap {
+    /// Time since the lap start, s (the primary index — a fixed `dt` grid).
+    fn t<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.t.clone().into_pyarray(py)
+    }
+
+    /// Arc length along the reference line, m.
+    fn s<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.s.clone().into_pyarray(py)
+    }
+
+    /// Lateral offset from the reference line (ISO 8855, `+` left), m.
+    fn n<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.n.clone().into_pyarray(py)
+    }
+
+    /// Heading relative to the road tangent, rad.
+    fn psi_rel<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.psi_rel.clone().into_pyarray(py)
+    }
+
+    /// Body-frame longitudinal velocity, m/s.
+    fn vx<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.vx.clone().into_pyarray(py)
+    }
+
+    /// Body-frame lateral velocity (`+` left), m/s.
+    fn vy<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.vy.clone().into_pyarray(py)
+    }
+
+    /// Yaw rate (`+` CCW), rad/s.
+    fn yaw_rate<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.yaw_rate.clone().into_pyarray(py)
+    }
+
+    /// Body-frame longitudinal acceleration, m/s².
+    fn ax<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.ax.clone().into_pyarray(py)
+    }
+
+    /// Body-frame lateral acceleration (`+` left), m/s².
+    fn ay<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.ay.clone().into_pyarray(py)
+    }
+
+    /// Front road-wheel steer angle, rad.
+    fn steer<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.steer.clone().into_pyarray(py)
+    }
+
+    /// Throttle demand, 0..1.
+    fn throttle<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.throttle.clone().into_pyarray(py)
+    }
+
+    /// Brake demand, 0..1.
+    fn brake<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.brake.clone().into_pyarray(py)
+    }
+
+    /// World trajectory x, m.
+    fn x<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.x.clone().into_pyarray(py)
+    }
+
+    /// World trajectory y, m.
+    fn y<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.y.clone().into_pyarray(py)
+    }
+
+    /// World trajectory z, m.
+    fn z<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.z.clone().into_pyarray(py)
+    }
+
+    /// Engaged gear index (0-based).
+    fn gear<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.gear.clone().into_pyarray(py)
+    }
+
+    /// Drive-torque scale, 0..1 (`< 1` through a gear shift's torque cut/ramp).
+    fn torque_scale<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.torque_scale.clone().into_pyarray(py)
+    }
+
+    /// Torque-vectoring yaw moment actually realised, N·m (`+` CCW).
+    fn yaw_moment_nm<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.yaw_moment_nm.clone().into_pyarray(py)
+    }
+
+    /// Recovered electrical regen power, summed over the driven axles, W (≥ 0).
+    fn regen_power_w<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.regen_power_w.clone().into_pyarray(py)
+    }
+
+    /// Front-axle machine braking torque, N·m (≥ 0); the calipers supplied the rest.
+    fn regen_torque_front_nm<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.regen_torque_front_nm.clone().into_pyarray(py)
+    }
+
+    /// Rear-axle machine braking torque, N·m (≥ 0); the calipers supplied the rest.
+    fn regen_torque_rear_nm<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.regen_torque_rear_nm.clone().into_pyarray(py)
+    }
+
+    /// Per-wheel angular speed, rad/s (`time × wheel`).
+    fn omega<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        wheel_array_2d(py, &self.omega)
+    }
+
+    /// Per-wheel normal load `F_z`, N (`time × wheel`).
+    fn vertical_load_n<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        wheel_array_2d(py, &self.vertical_load_n)
+    }
+
+    /// Per-wheel lagged longitudinal slip `κ` (`time × wheel`).
+    fn slip_ratio<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        wheel_array_2d(py, &self.slip_ratio)
+    }
+
+    /// Per-wheel lagged slip angle `α`, rad (`time × wheel`).
+    fn slip_angle_rad<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        wheel_array_2d(py, &self.slip_angle_rad)
+    }
+
+    /// Per-wheel wheel-frame longitudinal force `F_x`, N (`time × wheel`).
+    fn force_long_n<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        wheel_array_2d(py, &self.force_long_n)
+    }
+
+    /// Per-wheel wheel-frame lateral force `F_y`, N (`time × wheel`).
+    fn force_lat_n<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        wheel_array_2d(py, &self.force_lat_n)
+    }
+
+    /// Pack state of charge, 0..1 — `None` when the car carries no battery.
+    fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.state_of_charge.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Pack temperature, °C — `None` when the car carries no battery.
+    fn pack_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.pack_temp_c.clone().map(|v| v.into_pyarray(py))
+    }
+    /// The number of recorded steps.
+    fn __len__(&self) -> usize {
+        self.t.len()
+    }
+}
+
+/// Solve a **transient (T2)** lap: the 7-DOF chassis + tyre relaxation closed loop, driven by the
+/// ideal driver along the QSS speed profile.
+///
+/// The T2 tier is a *closed-loop* simulation, so it needs a reference to follow: the point-mass QSS
+/// profile for this car on this line, scaled by `speed_margin`. The lap is seeded at the straightest
+/// station (a cold transient dropped into a corner is unphysical) and runs one full lap of arc length.
+///
+/// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
+#[pyfunction]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None))]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_transient_lap(
+    vehicle_dir: &str,
+    track: &Track,
+    ds_m: f64,
+    raceline_ds_m: Option<f64>,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+    speed_margin: f64,
+    initial_soc: Option<f64>,
+) -> PyResult<TransientLap> {
+    check_ds(ds_m)?;
+    if !(speed_margin > 0.0 && speed_margin <= 1.0) {
+        return Err(PyValueError::new_err(format!(
+            "speed_margin must lie in (0, 1]; got {speed_margin}"
+        )));
+    }
+    if let Some(soc) = initial_soc {
+        if !(0.0..=1.0).contains(&soc) {
+            return Err(PyValueError::new_err(format!(
+                "initial_soc must lie in [0, 1]; got {soc}"
+            )));
+        }
+    }
+    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
+    let sim_cfg = build_sim(&vl, sim, Some("t2"))?;
+    let base_conditions = match load_conditions("conditions.yaml", &vl) {
+        Ok(c) => c,
+        Err(e) if is_not_found(&e) => Conditions::default(),
+        Err(e) => return Err(schema_err(e)),
+    };
+    let conditions = match conditions {
+        Some(patch) => merge_conditions(base_conditions, &py_to_json(patch.as_any())?)?,
+        None => base_conditions,
+    };
+    let hash = resolved.report.resolved_hash.clone();
+    let mut notes = Vec::new();
+
+    // The transient tier is validated **flat only**. The 7-DOF chassis carries grade/banking/vertical
+    // curvature terms, but the closed loop through them has never been gated, and on a real elevated
+    // circuit it diverges. Rather than hand back a silently-exploded trace, run flat and say so — and
+    // refuse outright if the caller explicitly asked for a 3-D transient.
+    let asked_for_3d = sim
+        .and_then(|d| d.get_item("flat_track").ok().flatten())
+        .and_then(|v| v.extract::<bool>().ok())
+        == Some(false);
+    if asked_for_3d {
+        return Err(PyValueError::new_err(
+            "the transient tier (t2) runs flat-track only: the closed loop through the chassis \
+             grade/banking terms is not yet gated. Drop `flat_track` from `sim`, or use `tier=\"t1\"` \
+             for a 3-D quasi-steady lap",
+        ));
+    }
+    if !sim_cfg.flat_track {
+        notes.push(
+            "T2 runs flat-track: the chassis grade/banking/vertical-curvature terms exist but the              closed loop through them is not yet gated, so elevation is flattened for this lap"
+                .to_owned(),
+        );
+    }
+    let flat = true;
+
+    // --- The QSS reference: the same envelope + point-mass profile the T0/T1 tiers solve. ---------
+    let opts = T0Options {
+        ds_m,
+        allow_degraded: sim_cfg.allow_degraded,
+        ..T0Options::default()
+    };
+    let path = T0Path::from_track_flat(&track.inner, ds_m);
+    let line_descriptor = match raceline_ds_m {
+        Some(g) => LineDescriptor::MinCurvature {
+            ds_m: g,
+            iterations: 1,
+        },
+        None => LineDescriptor::Centerline,
+    };
+    let mut t1v =
+        T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
+    let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
+    let env = cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?;
+    let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
+    notes.extend(t0v.notes().iter().cloned());
+    notes.extend(t1v.notes().iter().cloned());
+    notes.extend(env.notes().iter().cloned());
+    let reference = solve_t0(
+        &t0v,
+        env,
+        None,
+        &path,
+        line_descriptor,
+        hash.clone(),
+        Vec::new(),
+        sim_cfg.resolved_fz_coupling(),
+        flat,
+    )
+    .map_err(err)?;
+
+    // --- The T2 block set, through the shared assembly pipeline. ----------------------------------
+    let pack = load_pack(&resolved, &vl, &mut notes)?;
+    let mut interner = outlap_transient::ChannelInterner::new();
+    let t2_opts = outlap_vehicle::T2Options {
+        battery_present: pack.is_some(),
+        ..outlap_vehicle::T2Options::default()
+    };
+    let blocks: outlap_transient::T2Blocks<f64> =
+        outlap_vehicle::assemble_t2(&t1v, &resolved.spec, &mut interner, &t2_opts, &mut notes)
+            .into();
+
+    let v_target: Vec<f64> = reference.lap.v.iter().map(|v| v * speed_margin).collect();
+    let line = line_from_track(&track.inner, &path, &v_target, flat)?;
+    let start_i = straightest_station(&path.kappa_l);
+    let start_s = path.s[start_i];
+    let length = reference.lap.s.last().copied().unwrap_or(0.0);
+
+    let cfg = outlap_transient::SimConfig {
+        fz_coupling: sim_cfg.resolved_fz_coupling(),
+        start_s,
+        ..outlap_transient::SimConfig::default()
+    };
+    let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
+    if let Some((pack, mut state)) = pack {
+        // A pack seeded at the top of its SoC window accepts no charge, so it would recover nothing
+        // however hard the car brakes. That is correct physics and a useless default for a lap, so a
+        // stint starts mid-window unless the caller says otherwise — and the choice is surfaced.
+        let [lo, hi] = pack.soc_window();
+        state.soc = initial_soc.unwrap_or_else(|| {
+            let mid = 0.5 * (lo + hi);
+            notes.push(format!(
+                "T2 pack seeded at {:.0}% state of charge, the middle of its usable window \
+                 [{lo:.2}, {hi:.2}] (estimated — pass `initial_soc` to pick a stint state); a \
+                 pack at the top of its window accepts no charge and recovers nothing",
+                mid * 100.0
+            ));
+            mid
+        });
+        if state.soc >= hi {
+            notes.push(format!(
+                "T2 pack starts at or above the top of its SoC window ({:.2} ≥ {hi:.2}): it can \
+                 accept no charge, so the friction brakes do all the braking and regen is 0",
+                state.soc
+            ));
+        }
+        notes.push(
+            "T2 slow stack: the pack Coulomb-counts recovered regen energy and publishes its \
+             charge-acceptance ceiling (SoC + temperature); the traction draw is not yet fed back, \
+             so the state of charge only rises over a lap"
+                .to_owned(),
+        );
+        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    notes.push(format!(
+        "T2 driver tracks {:.0}% of the QSS speed profile (the point-mass profile spends the whole \
+         grip envelope longitudinally); the lap is seeded at the straightest station, s = {start_s:.1} m",
+        speed_margin * 100.0
+    ));
+    notes.push(
+        "T2 gear-shift FSM not attached: the per-gear traction crossover speeds are not yet exposed \
+         by the QSS powertrain, so the lap runs the best-gear envelope with no torque interruption"
+            .to_owned(),
+    );
+
+    let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
+    let provenance = solver.provenance();
+    // `run` breaks the moment the recorded arc length passes the finish line, so the last sample
+    // tells us whether the car got there inside the step budget.
+    let completed = lap.s.last().copied().unwrap_or(0.0) >= start_s + length;
+    if !completed {
+        notes.push(format!(
+            "T2 lap did not reach the finish line within {MAX_TRANSIENT_STEPS} steps — the trace is \
+             truncated and `lap_time_s` is not a lap time"
+        ));
+    }
+
+    let has_slow = !lap.state_of_charge.is_empty();
+    Ok(TransientLap {
+        t: lap.t,
+        s: lap.s,
+        n: lap.n,
+        psi_rel: lap.psi_rel,
+        vx: lap.vx,
+        vy: lap.vy,
+        yaw_rate: lap.yaw_rate,
+        ax: lap.ax,
+        ay: lap.ay,
+        steer: lap.steer,
+        throttle: lap.throttle,
+        brake: lap.brake,
+        x: lap.x,
+        y: lap.y,
+        z: lap.z,
+        gear: lap.gear,
+        torque_scale: lap.torque_scale,
+        yaw_moment_nm: lap.yaw_moment_nm,
+        regen_power_w: lap.regen_power_w,
+        regen_torque_front_nm: lap.regen_torque_front_nm,
+        regen_torque_rear_nm: lap.regen_torque_rear_nm,
+        omega: flat4(&lap.omega),
+        vertical_load_n: flat4(&lap.fz),
+        slip_ratio: flat4(&lap.slip_kappa),
+        slip_angle_rad: flat4(&lap.slip_alpha),
+        force_long_n: flat4(&lap.fx),
+        force_lat_n: flat4(&lap.fy),
+        state_of_charge: has_slow.then(|| lap.state_of_charge.clone()),
+        pack_temp_c: has_slow.then(|| lap.pack_temp_c.clone()),
+        lap_time_s: lap.lap_time_s,
+        tier: "t2".to_owned(),
+        fz_coupling: fz_coupling_str(provenance.fz_coupling),
+        flat_track: flat,
+        dt_s: provenance.dt_s,
+        integrator_order: provenance.integrator_order,
+        speed_margin,
+        completed,
+        wheels: WHEEL_ORDER.iter().map(|s| (*s).to_owned()).collect(),
+        notes,
+        resolved_hash: hash,
+    })
+}
+
 /// The `outlap_core` extension module.
 #[pymodule]
 fn outlap_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1160,9 +1756,11 @@ fn outlap_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Track>()?;
     m.add_class::<Raceline>()?;
     m.add_class::<Lap>()?;
+    m.add_class::<TransientLap>()?;
     m.add_class::<Envelope>()?;
     m.add_function(wrap_pyfunction!(min_curvature, m)?)?;
     m.add_function(wrap_pyfunction!(solve_lap, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_transient_lap, m)?)?;
     m.add_function(wrap_pyfunction!(vehicle_report, m)?)?;
     m.add("DEFAULT_DS_M", DEFAULT_DS_M)?;
     Ok(())

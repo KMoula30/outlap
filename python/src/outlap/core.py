@@ -21,9 +21,11 @@ from outlap_core import (
     Lap,
     Raceline,
     Track,
+    TransientLap,
     Tyre,
     min_curvature,
     solve_lap,
+    solve_transient_lap,
     vehicle_report,
 )
 
@@ -33,13 +35,16 @@ __all__ = [
     "Lap",
     "Raceline",
     "Track",
-    "Tyre",
+    "TransientLap",
     "TyreForces",
+    "Tyre",
     "lap_dataset",
     "min_curvature",
     "solve_lap",
     "solve_lap_dataset",
+    "solve_transient_lap",
     "track_dataset",
+    "transient_lap_dataset",
     "tyre_forces",
     "vehicle_report",
 ]
@@ -214,29 +219,195 @@ def solve_lap_dataset(
     validation pipeline (e.g. ``{"chassis.mass_kg": 750.0}``), and ``conditions`` deep-merges
     onto the session conditions (e.g. ``{"air": {"temp_c": 35.0}}``) — invalid paths or types
     fail loudly, never silently.
+
+    ``tier="t2"`` runs the transient tier instead, returning the **time-indexed** dataset of
+    :func:`transient_lap_dataset` (dims ``time``/``wheel``) rather than the arc-length one. It takes
+    the same arguments; ``speed_margin`` is available on :func:`solve_transient_lap` directly.
     """
-    if isinstance(line, Raceline):
-        lap = solve_lap(
-            vehicle_dir,
-            line.line(),
-            ds_m=ds_m,
-            raceline_ds_m=line.ds_m,
-            overrides=overrides,
-            conditions=conditions,
-            tier=tier,
-            sim=sim,
+    track, raceline_ds_m = (
+        (line.line(), line.ds_m) if isinstance(line, Raceline) else (line, None)
+    )
+    if tier == "t2":
+        return transient_lap_dataset(
+            solve_transient_lap(
+                vehicle_dir,
+                track,
+                ds_m=ds_m,
+                raceline_ds_m=raceline_ds_m,
+                overrides=overrides,
+                conditions=conditions,
+                sim=sim,
+            )
         )
-    else:
-        lap = solve_lap(
-            vehicle_dir,
-            line,
-            ds_m=ds_m,
-            overrides=overrides,
-            conditions=conditions,
-            tier=tier,
-            sim=sim,
-        )
+    lap = solve_lap(
+        vehicle_dir,
+        track,
+        ds_m=ds_m,
+        raceline_ds_m=raceline_ds_m,
+        overrides=overrides,
+        conditions=conditions,
+        tier=tier,
+        sim=sim,
+    )
     return lap_dataset(lap)
+
+
+def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
+    """Convert a solved transient (T2) lap into a labelled :class:`xarray.Dataset`.
+
+    The primary dimension is ``time`` (a fixed ``dt`` grid), not arc length: a transient lap is
+    integrated in time, and ``s`` is a data variable that advances along it (and wraps past the
+    start/finish on a closed line). Per-wheel channels carry dims ``("time", "wheel")`` with
+    ``wheel = FL/FR/RL/RR``.
+
+    Rule-based control-layer telemetry rides along: the engaged ``gear`` and the shift
+    ``torque_scale``, the realised torque-vectoring ``yaw_moment_nm``, the recovered
+    ``regen_power_w`` and the per-axle machine braking torques (the friction brakes supplied the
+    rest of each axle's commanded torque), and — when the car carries a battery — the pack
+    ``state_of_charge`` and ``pack_temp_c``.
+    """
+    t = lap.t()
+    data: dict[str, object] = {
+        "s": ("time", lap.s(), {"units": "m", "long_name": "arc length"}),
+        "n": ("time", lap.n(), {"units": "m", "long_name": "lateral offset (+left)"}),
+        "psi_rel": (
+            "time",
+            lap.psi_rel(),
+            {"units": "rad", "long_name": "heading relative to the road tangent"},
+        ),
+        "vx": (
+            "time",
+            lap.vx(),
+            {"units": "m/s", "long_name": "longitudinal velocity"},
+        ),
+        "vy": (
+            "time",
+            lap.vy(),
+            {"units": "m/s", "long_name": "lateral velocity (+left)"},
+        ),
+        "yaw_rate": (
+            "time",
+            lap.yaw_rate(),
+            {"units": "rad/s", "long_name": "yaw rate (+CCW)"},
+        ),
+        "ax": (
+            "time",
+            lap.ax(),
+            {"units": "m/s²", "long_name": "longitudinal acceleration"},
+        ),
+        "ay": (
+            "time",
+            lap.ay(),
+            {"units": "m/s²", "long_name": "lateral acceleration (+left)"},
+        ),
+        "steer": (
+            "time",
+            lap.steer(),
+            {"units": "rad", "long_name": "road-wheel steer"},
+        ),
+        "throttle": ("time", lap.throttle(), {"units": "1"}),
+        "brake": ("time", lap.brake(), {"units": "1"}),
+        "x": ("time", lap.x(), {"units": "m"}),
+        "y": ("time", lap.y(), {"units": "m"}),
+        "z": ("time", lap.z(), {"units": "m", "long_name": "elevation"}),
+        "gear": ("time", lap.gear(), {"units": "1", "long_name": "engaged gear index"}),
+        "torque_scale": (
+            "time",
+            lap.torque_scale(),
+            {
+                "units": "1",
+                "long_name": "drive-torque scale (shift torque interruption)",
+            },
+        ),
+        "yaw_moment_nm": (
+            "time",
+            lap.yaw_moment_nm(),
+            {
+                "units": "N·m",
+                "long_name": "realised torque-vectoring yaw moment (+CCW)",
+            },
+        ),
+        "regen_power_w": (
+            "time",
+            lap.regen_power_w(),
+            {"units": "W", "long_name": "recovered electrical regen power"},
+        ),
+        "regen_torque_front_nm": (
+            "time",
+            lap.regen_torque_front_nm(),
+            {"units": "N·m", "long_name": "front-axle machine braking torque"},
+        ),
+        "regen_torque_rear_nm": (
+            "time",
+            lap.regen_torque_rear_nm(),
+            {"units": "N·m", "long_name": "rear-axle machine braking torque"},
+        ),
+        "omega": (
+            ("time", "wheel"),
+            lap.omega(),
+            {"units": "rad/s", "long_name": "wheel angular speed"},
+        ),
+        "vertical_load_n": (
+            ("time", "wheel"),
+            lap.vertical_load_n(),
+            {"units": "N", "long_name": "normal load"},
+        ),
+        "slip_ratio": (
+            ("time", "wheel"),
+            lap.slip_ratio(),
+            {"units": "1", "long_name": "longitudinal slip ratio κ (lagged)"},
+        ),
+        "slip_angle_rad": (
+            ("time", "wheel"),
+            lap.slip_angle_rad(),
+            {"units": "rad", "long_name": "slip angle α (lagged)"},
+        ),
+        "force_long_n": (
+            ("time", "wheel"),
+            lap.force_long_n(),
+            {"units": "N", "long_name": "longitudinal tyre force Fx"},
+        ),
+        "force_lat_n": (
+            ("time", "wheel"),
+            lap.force_lat_n(),
+            {"units": "N", "long_name": "lateral tyre force Fy"},
+        ),
+    }
+    coords: dict[str, object] = {
+        "time": ("time", t, {"units": "s", "long_name": "time since lap start"}),
+        "wheel": ("wheel", list(lap.wheels), {"long_name": "wheel (FL, FR, RL, RR)"}),
+    }
+
+    soc = lap.state_of_charge()
+    if soc is not None:
+        data["state_of_charge"] = (
+            "time",
+            soc,
+            {"units": "1", "long_name": "pack state of charge"},
+        )
+        data["pack_temp_c"] = (
+            "time",
+            lap.pack_temp_c(),
+            {"units": "°C", "long_name": "pack temperature"},
+        )
+
+    return xr.Dataset(
+        data,
+        coords=coords,
+        attrs={
+            "lap_time_s": lap.lap_time_s,
+            "resolved_hash": lap.resolved_hash,
+            "tier": lap.tier,
+            "fz_coupling": lap.fz_coupling,
+            "dt_s": lap.dt_s,
+            "integrator_order": lap.integrator_order,
+            "speed_margin": lap.speed_margin,
+            # int, not bool: netCDF attrs have no bool type.
+            "flat_track": int(lap.flat_track),
+            "completed": int(lap.completed),
+            "notes": tuple(lap.notes),
+        },
+    )
 
 
 def track_dataset(track: Track, ds_m: float = 10.0) -> xr.Dataset:
