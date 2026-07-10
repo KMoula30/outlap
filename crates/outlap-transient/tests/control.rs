@@ -45,8 +45,9 @@ fn braking_lap(regen: bool, attach_stack: bool) -> (TransientLap<f64>, f64) {
     let t1 = limebeer();
     let mut it = ChannelInterner::new();
     let mut blocks = build_blocks(&t1, &mut it);
+    // 0.6 blend authority, 0.9 machine+inverter recovery, from the vehicle's own regen envelope.
+    blocks.powertrain.regen = common::regen_params(&t1, 0.6, 0.9);
     blocks.powertrain.regen.enabled = regen;
-    blocks.powertrain.regen.max_regen_frac = 0.6;
 
     let len = 1500.0;
     let stations = 200;

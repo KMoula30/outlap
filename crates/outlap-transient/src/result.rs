@@ -65,8 +65,13 @@ pub struct TransientLap<T> {
     pub torque_scale: Vec<T>,
     /// Torque-vectoring yaw moment actually applied `ΔM_z`, N·m (+CCW).
     pub yaw_moment_nm: Vec<T>,
-    /// Recovered regen electrical power at the driven axle, W (≥ 0).
+    /// Recovered regen electrical power summed over the driven axles, W (≥ 0).
     pub regen_power_w: Vec<T>,
+    /// Front-axle machine braking torque, N·m (≥ 0) — the share of the front axle's commanded brake
+    /// torque the machine took. `front_axle_brake_torque − this` is what the front calipers supplied.
+    pub regen_torque_front_nm: Vec<T>,
+    /// Rear-axle machine braking torque, N·m (≥ 0) — the rear counterpart.
+    pub regen_torque_rear_nm: Vec<T>,
     /// Pack state of charge, 0..1 (empty when no slow-state stack was attached).
     pub state_of_charge: Vec<T>,
     /// Pack temperature, °C (empty when no slow-state stack was attached).
@@ -103,6 +108,8 @@ impl<T: Float> Default for TransientLap<T> {
             torque_scale: Vec::new(),
             yaw_moment_nm: Vec::new(),
             regen_power_w: Vec::new(),
+            regen_torque_front_nm: Vec::new(),
+            regen_torque_rear_nm: Vec::new(),
             state_of_charge: Vec::new(),
             pack_temp_c: Vec::new(),
             lap_time_s: T::zero(),

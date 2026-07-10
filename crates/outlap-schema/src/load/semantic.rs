@@ -419,6 +419,26 @@ pub fn check_ptm(
         ));
     }
     positive(ptm.mass_kg, "mass_kg", "/mass_kg", &s, sources)?;
+    // The optional regen envelope (ptm/1.2) is a *positive-magnitude* braking-torque curve; a signed
+    // (negative) curve is the most likely authoring mistake, so name it explicitly.
+    if let Some(regen) = &ptm.limits.max_regen_torque_nm_vs_speed {
+        if regen.speed_rpm.len() != regen.torque_nm.len() || regen.speed_rpm.is_empty() {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/limits/max_regen_torque_nm_vs_speed"),
+                "`max_regen_torque_nm_vs_speed` must have equal-length, non-empty `speed_rpm`/`torque_nm`",
+                None,
+            ));
+        }
+        if regen.torque_nm.iter().any(|&t| t < 0.0) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/limits/max_regen_torque_nm_vs_speed"),
+                "`max_regen_torque_nm_vs_speed` is a positive-magnitude braking envelope; drop the minus sign",
+                None,
+            ));
+        }
+    }
     // The optional Vdc axis (ptm/1.1) must be strictly ascending when present.
     if let Some(vdc) = &ptm.axes.vdc_v {
         if vdc.len() < 2 || !is_ascending(vdc) {
@@ -496,6 +516,26 @@ pub fn check_battery(
         &s,
         sources,
     )?;
+    // The optional charge-acceptance derate (battery/1.1): ascending temperature breakpoints and a
+    // factor in [0, 1]. A factor above 1 would *raise* the ceiling above the declared curve.
+    if let Some(d) = &b.limits.regen_derate_vs_temp {
+        if d.temp_c.len() != d.factor.len() || d.temp_c.len() < 2 || !is_ascending(&d.temp_c) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/limits/regen_derate_vs_temp"),
+                "`regen_derate_vs_temp` needs ≥ 2 paired points with strictly-ascending `temp_c`",
+                None,
+            ));
+        }
+        if d.factor.iter().any(|&f| !(0.0..=1.0).contains(&f)) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/limits/regen_derate_vs_temp"),
+                "`regen_derate_vs_temp.factor` must lie in [0, 1] (it scales the declared ceiling)",
+                None,
+            ));
+        }
+    }
     Ok(())
 }
 

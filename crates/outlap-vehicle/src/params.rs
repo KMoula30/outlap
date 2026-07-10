@@ -76,15 +76,21 @@ pub struct ActuationChannels {
     /// back to `1` over the clutch re-engagement. Multiplies the traction ceiling (the torque
     /// interruption of §8.2). Solver-published each step.
     pub torque_scale: ChannelId,
-    /// Battery regen (charge) power ceiling `P_regen,max`, W (from the pack's SoC-dependent limit on
-    /// the slow clock; `0` when no battery is present). Caps the regen brake blend. Solver-published.
+    /// Battery **charge-acceptance** ceiling `P_regen,max`, W — what the pack will take at its current
+    /// charge *and temperature* (a cold pack cannot accept a fast charge), refreshed on the slow clock;
+    /// `0` when no battery is present. Caps the regen brake blend. Solver-published.
     pub regen_limit_w: ChannelId,
     /// Commanded torque-vectoring yaw moment `ΔM_z`, N·m (+CCW) — the ellipse-feasible moment the
     /// allocator actually applied through the per-wheel force deltas. TV-published (telemetry).
     pub yaw_moment_cmd: ChannelId,
-    /// Recovered electrical regen power `P_regen`, W (≥ 0) at the driven axle this step —
+    /// Recovered electrical regen power `P_regen`, W (≥ 0) summed over the driven axles this step —
     /// powertrain-published; the slow-state stack Coulomb-counts it into the pack state of charge.
     pub regen_power_w: ChannelId,
+    /// Front-axle **machine** braking torque, N·m (≥ 0) — the share of the front axle's commanded
+    /// brake torque the front machine took. The calipers supplied the rest. Powertrain-published.
+    pub regen_torque_front_nm: ChannelId,
+    /// Rear-axle **machine** braking torque, N·m (≥ 0) — the rear counterpart. Powertrain-published.
+    pub regen_torque_rear_nm: ChannelId,
 }
 
 impl ActuationChannels {
@@ -97,6 +103,8 @@ impl ActuationChannels {
             regen_limit_w: interner.intern("ctrl.regen_limit_w"),
             yaw_moment_cmd: interner.intern("ctrl.yaw_moment_cmd"),
             regen_power_w: interner.intern("ctrl.regen_power_w"),
+            regen_torque_front_nm: interner.intern("ctrl.regen_torque_front_nm"),
+            regen_torque_rear_nm: interner.intern("ctrl.regen_torque_rear_nm"),
         }
     }
 }

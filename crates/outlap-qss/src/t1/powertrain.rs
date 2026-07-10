@@ -160,6 +160,12 @@ struct PtUnit {
     kind: PtmKind,
     /// Peak torque vs shaft speed [rad/s → N·m] (source shaft).
     peak_env: MonotoneCubic<f64>,
+    /// Peak **regenerative braking** torque vs shaft speed [rad/s → N·m, positive magnitude] on the
+    /// source shaft (`ptm/1.2` `max_regen_torque_nm_vs_speed`, or a copy of `peak_env` when the map
+    /// declares no regen envelope — the symmetric-machine assumption).
+    regen_env: MonotoneCubic<f64>,
+    /// Highest shaft speed the regen envelope covers, rad/s.
+    regen_omega_max: f64,
     /// Highest shaft speed the envelope covers, rad/s.
     omega_max: f64,
     /// Driven-wheel rolling radius, m.
@@ -168,6 +174,8 @@ struct PtUnit {
     gears: Vec<Gear>,
     /// The differential on this unit's axle.
     diff: DiffModel,
+    /// Which wheels this unit drives (and therefore can regen-brake) `[FL, FR, RL, RR]`.
+    driven: [bool; 4],
     /// Left/right driven-wheel indices when the unit drives exactly one axle's pair.
     axle_pair: Option<(usize, usize)>,
     /// Efficiency map η(rpm, τ[, vdc]) — installed from the sidecar (energy accounting only).
@@ -189,6 +197,28 @@ impl PtUnit {
             let omega = g.ratio / self.r_wheel * v;
             if omega <= self.omega_max {
                 let f = self.peak_env.eval(omega) * g.ratio * g.eff / self.r_wheel;
+                if f > best {
+                    best = f;
+                }
+            }
+        }
+        best
+    }
+
+    /// Best-gear maximum **regen braking** wheel force at vehicle speed `v` (m/s), N (positive
+    /// magnitude). Zero-allocation.
+    ///
+    /// Driveline efficiency is deliberately *not* applied here. In the drive direction a loss shrinks
+    /// the force reaching the wheel (`τ·ratio·η/r`); under regen the power flows the other way, so a
+    /// loss would *add* braking at the wheel while shrinking what the machine recovers. Taking
+    /// `F = τ_regen·ratio/r` and charging the efficiency once, against the recovered *power*, keeps
+    /// the ledger honest and understates rather than overstates the machine's braking authority.
+    fn max_regen_wheel_force(&self, v: f64) -> f64 {
+        let mut best = 0.0;
+        for g in &self.gears {
+            let omega = g.ratio / self.r_wheel * v;
+            if omega <= self.regen_omega_max {
+                let f = self.regen_env.eval(omega) * g.ratio / self.r_wheel;
                 if f > best {
                     best = f;
                 }
@@ -275,14 +305,44 @@ impl T1Powertrain {
             let gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
             let peak_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
             let omega_max = peak_env.domain().1;
+            // The regen (negative-quadrant) envelope.
+            //
+            // An internal-combustion engine cannot regenerate: it has no negative quadrant to
+            // command. Its overrun braking is parasitic drag (`drag_torque_nm_vs_speed`), not
+            // recoverable energy, so its regen envelope is identically zero.
+            //
+            // An electric machine that declares no envelope is assumed **symmetric** with its drive
+            // envelope — the usual first-order truth when inverter current sets the limit. That is an
+            // estimate, so it is surfaced, never silent (#41).
+            let regen_env = match (&ptm.kind, &ptm.limits.max_regen_torque_nm_vs_speed) {
+                (PtmKind::Ice, _) => {
+                    notes.push(format!(
+                        "drive unit {i} is an internal-combustion engine: it recovers no braking \
+                         energy (regen envelope zero; overrun drag is not commandable regen)"
+                    ));
+                    zero_env(&peak_env)?
+                }
+                (_, Some(curve)) => torque_env(curve)?,
+                (_, None) => {
+                    notes.push(format!(
+                        "drive unit {i} declares no `max_regen_torque_nm_vs_speed`; its regen \
+                         braking envelope is assumed symmetric with the drive envelope (estimated)"
+                    ));
+                    peak_env.clone()
+                }
+            };
+            let regen_omega_max = regen_env.domain().1;
             let diff = diff_model(&unit.path);
             units.push(PtUnit {
                 kind: ptm.kind,
                 peak_env,
+                regen_env,
+                regen_omega_max,
                 omega_max,
                 r_wheel,
                 gears,
                 diff,
+                driven,
                 axle_pair: axle_pair(driven),
                 eff_map: None,
                 loss_map: None,
@@ -406,6 +466,32 @@ impl T1Powertrain {
     #[must_use]
     pub fn max_drive_force(&self, v: f64) -> f64 {
         self.units.iter().map(|u| u.max_wheel_force(v)).sum()
+    }
+
+    /// The peak **regen braking** wheel force each axle's machines can produce at vehicle speed `v`,
+    /// N (positive magnitude), as `[front, rear]`.
+    ///
+    /// Each machine can only ever brake the wheels it drives, so a unit's capability is attributed to
+    /// the axle(s) in its driven set — split by driven-wheel count when one unit spans both axles
+    /// (a single motor through a centre differential contributes half to each). An axle with no
+    /// machine returns `0` and is braked by friction alone.
+    #[must_use]
+    pub fn max_regen_force_by_axle(&self, v: f64) -> [f64; 2] {
+        let mut axle = [0.0, 0.0];
+        for u in &self.units {
+            let force = u.max_regen_wheel_force(v);
+            let front = u64::from(u.driven[0]) + u64::from(u.driven[1]);
+            let rear = u64::from(u.driven[2]) + u64::from(u.driven[3]);
+            let total = front + rear;
+            if total == 0 {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)] // ≤ 4 driven wheels
+            let (fw, rw, tw) = (front as f64, rear as f64, total as f64);
+            axle[0] += force * fw / tw;
+            axle[1] += force * rw / tw;
+        }
+        axle
     }
 
     /// The primary driven axle's differential + geometry for the trim's diff residual: the first
@@ -787,4 +873,11 @@ fn torque_env(curve: &TorqueCurve) -> Result<MonotoneCubic<f64>, T1Error> {
         .map(|r| r * RPM_TO_RAD_PER_S)
         .collect();
     MonotoneCubic::new(omega, curve.torque_nm.clone()).map_err(T1Error::Envelope)
+}
+
+/// An identically-zero torque envelope spanning the same shaft-speed domain as `like` — the regen
+/// capability of a unit that has no negative quadrant to command (an ICE).
+fn zero_env(like: &MonotoneCubic<f64>) -> Result<MonotoneCubic<f64>, T1Error> {
+    let (lo, hi) = like.domain();
+    MonotoneCubic::new(vec![lo, hi], vec![0.0, 0.0]).map_err(T1Error::Envelope)
 }

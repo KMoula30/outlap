@@ -395,6 +395,14 @@ impl T1Vehicle {
         self.max_tractive_force(v) / self.mass_kg
     }
 
+    /// The peak **regen braking** wheel force available on each axle at vehicle speed `v` (m/s), N
+    /// (positive magnitude), as `[front, rear]` — a machine can only brake the wheels it drives. The
+    /// transient tier samples this into a speed-indexed curve at assembly, so the hot loop never
+    /// touches a `.ptm` map. Allocation-free.
+    pub fn max_regen_force_by_axle(&self, v: f64) -> [f64; 2] {
+        self.powertrain.max_regen_force_by_axle(v)
+    }
+
     /// Front-axle static weight fraction `b_r / L` (share of vertical load carried by the front axle
     /// with no aero and no acceleration).
     pub fn front_weight_fraction(&self) -> f64 {

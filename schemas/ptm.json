@@ -181,7 +181,7 @@
       ]
     },
     "PtmLimits": {
-      "description": "Limit envelopes.\n\nOnly `max_torque_nm_vs_speed` (the peak envelope) is required. The others, when present, serve\nas **validation references**, not the derating mechanism — thermal capability is computed by the\n`.emotor` model from the loss tables (Decision #25).",
+      "description": "Limit envelopes.\n\nOnly `max_torque_nm_vs_speed` (the peak envelope) is required. `cont_torque_nm_vs_speed` and\n`overload`, when present, serve as **validation references**, not the derating mechanism —\nthermal capability is computed by the `.emotor` model from the loss tables (Decision #25).",
       "type": "object",
       "properties": {
         "cont_torque_nm_vs_speed": {
@@ -196,7 +196,18 @@
           ]
         },
         "drag_torque_nm_vs_speed": {
-          "description": "Drag/braking torque vs speed, N·m (optional).",
+          "description": "Drag/braking torque vs speed, N·m (optional). This is *parasitic* drag (engine pumping,\nspin losses) — not the commandable regen envelope, which is `max_regen_torque_nm_vs_speed`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TorqueCurve"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_regen_torque_nm_vs_speed": {
+          "description": "Peak **regenerative braking** torque vs speed, N·m as a **positive magnitude** (`ptm/1.2`).\nThis is the machine's negative-quadrant capability, the ceiling a regen brake blend may draw\non before the friction brakes fill the deficit.\n\nWhen absent, the machine is assumed **symmetric** — the regen envelope equals\n`max_torque_nm_vs_speed`. That is the usual first-order truth for a PMSM/IM whose limit is set\nby inverter current and flux weakening rather than by quadrant, and it is surfaced as an\n*estimated* value in the loaded-model report. Declare this curve whenever the real machine is\nasymmetric (many road drive units are, to protect the DC link).",
           "anyOf": [
             {
               "$ref": "#/$defs/TorqueCurve"

@@ -85,6 +85,7 @@ fn constant_pack() -> (Pack, PackState) {
                 soc: vec![0.0, 1.0],
                 power_w: vec![1.0e12, 1.0e12],
             },
+            regen_derate_vs_temp: None,
             cell_v_min: 0.0,
             cell_v_max: 1000.0,
             max_c_rate: 100.0,

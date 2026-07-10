@@ -354,3 +354,138 @@ fn gearbox_map_efficiency_assembles_for_t1() {
     );
     assert!(car.max_tractive_force(30.0) > 0.0);
 }
+
+// --- Regen braking envelope, per axle (series regen blend, §7.6) ---------------------------------
+
+/// The EV fixtures are aero-map-only (no `aero.constant`), so they assemble only under
+/// `allow_degraded` — which is exactly what the flag is for, and it marks the result.
+fn assemble_degraded(name: &str) -> T1Vehicle {
+    let loader = fixtures();
+    let rv = load_vehicle(name, &loader, &LoadOptions::default()).unwrap();
+    T1Vehicle::assemble(&rv, &Conditions::default(), &loader, true).unwrap()
+}
+
+/// Each machine brakes only the wheels it drives: a rear-drive EV offers regen on the rear axle and
+/// none at all on the front, which is braked by friction alone.
+#[test]
+fn rear_drive_ev_regens_only_on_the_rear_axle() {
+    let car = assemble_degraded("ev_1du_rwd/vehicle.yaml");
+    let [front, rear] = car.max_regen_force_by_axle(30.0);
+    assert_eq!(
+        front, 0.0,
+        "the undriven front axle has no machine to regen with"
+    );
+    assert!(rear > 0.0, "the driven rear axle regens: {rear}");
+}
+
+/// A front-drive car is the mirror image — and a two-motor AWD car regens on both axles, each from
+/// its own machine.
+#[test]
+fn each_machine_regens_its_own_axle() {
+    let awd = assemble_degraded("ev_2du_awd/vehicle.yaml");
+    let [front, rear] = awd.max_regen_force_by_axle(30.0);
+    assert!(
+        front > 0.0 && rear > 0.0,
+        "both axles regen: {front}, {rear}"
+    );
+    // The rear drive unit is the bigger one (420 vs 320 N·m peak), so it brakes harder.
+    assert!(
+        rear > front,
+        "the larger rear machine regens harder: {rear} vs {front}"
+    );
+}
+
+/// An internal-combustion engine has no negative quadrant to command: it recovers nothing. Its
+/// overrun drag is parasitic, not regen, and the loaded-model report says so out loud.
+#[test]
+fn an_ice_recovers_no_braking_energy() {
+    let car = assemble("fwd_hatch/vehicle.yaml");
+    let [front, rear] = car.max_regen_force_by_axle(30.0);
+    assert_eq!((front, rear), (0.0, 0.0), "an ICE cannot regenerate");
+    assert!(
+        car.notes()
+            .iter()
+            .any(|n| n.contains("recovers no braking energy")),
+        "the ICE regen exclusion is surfaced, not silent: {:?}",
+        car.notes()
+    );
+}
+
+/// With no declared regen envelope an electric machine is assumed symmetric with its drive envelope —
+/// and that assumption is surfaced as estimated, never applied silently (#41).
+#[test]
+fn absent_regen_envelope_is_symmetric_and_surfaced() {
+    let car = assemble_degraded("ev_1du_rwd/vehicle.yaml");
+    assert!(
+        car.notes().iter().any(|n| n.contains("assumed symmetric")),
+        "the symmetric-envelope assumption is surfaced: {:?}",
+        car.notes()
+    );
+    // Symmetric ⇒ the regen braking force tracks the drive force, up to the driveline efficiency the
+    // drive path pays and the regen path does not.
+    let v = 30.0;
+    let [_, rear] = car.max_regen_force_by_axle(v);
+    let drive = car.max_tractive_force(v);
+    assert!(
+        rear >= drive,
+        "regen force is not reduced by driveline η: {rear} vs {drive}"
+    );
+    assert!(
+        rear < drive * 1.2,
+        "…but it is the same envelope: {rear} vs {drive}"
+    );
+}
+
+/// Regen capability falls away as the machine runs out of shaft speed, and is finite everywhere.
+#[test]
+fn regen_envelope_is_finite_and_non_negative_across_the_speed_range() {
+    let car = assemble_degraded("ev_2du_awd/vehicle.yaml");
+    for i in 0..=120 {
+        let v = f64::from(i);
+        let [f, r] = car.max_regen_force_by_axle(v);
+        assert!(f >= 0.0 && f.is_finite(), "front regen at {v} m/s: {f}");
+        assert!(r >= 0.0 && r.is_finite(), "rear regen at {v} m/s: {r}");
+    }
+}
+
+/// A machine that declares an **asymmetric** regen envelope uses it verbatim: many road drive units
+/// hold back regen torque relative to drive torque to protect the DC link. The declared curve wins,
+/// and no "assumed symmetric" estimate is reported.
+#[test]
+fn a_declared_regen_envelope_is_used_verbatim() {
+    // Drive envelope 300 N·m, regen envelope 120 N·m, straight through to the wheel (ratio 1, r=0.33).
+    let ptm = "schema: ptm/1.2\nkind: electric_machine\n\
+        axes: {speed_rpm: [0.0, 8000.0], load_axis: {torque_nm: [-300.0, 300.0]}, torque_nm: [-300.0, 300.0]}\n\
+        tables: {file: x.parquet}\n\
+        limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}, max_regen_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [120.0, 120.0]}}\n\
+        inertia_kgm2: 0.1\nmass_kg: 80.0\n";
+    let veh = "schema: vehicle/1.0\nname: t\n\
+        chassis: {mass_kg: 1200.0, cg: [1.2, 0.0, 0.4], inertia: [120.0, 500.0, 550.0], wheelbase_m: 2.6, track_m: [1.5, 1.5]}\n\
+        aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
+        suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
+        tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
+        drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{fixed_ratio: 1.0}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
+        brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
+    let loader = MemLoader::new()
+        .with("vehicle.yaml", veh)
+        .with("ptm/u.ptm.yaml", ptm)
+        .with("tyr/slick.tyr.yaml", SLICK);
+    let rv = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
+    let car = T1Vehicle::assemble(&rv, &Conditions::default(), &loader, false).unwrap();
+
+    let [front, rear] = car.max_regen_force_by_axle(30.0);
+    assert_eq!(front, 0.0, "front axle is undriven");
+    // ratio 1, so wheel force = τ / r. The regen envelope (120), not the drive envelope (300).
+    let r_wheel = car.max_tractive_force(30.0) / 300.0; // = ratio·η/r from the drive path
+    assert!(r_wheel > 0.0);
+    let expected = 120.0 / 0.33;
+    assert!(
+        (rear - expected).abs() < 1e-6 * expected,
+        "declared regen envelope used verbatim: {rear} vs {expected}"
+    );
+    assert!(
+        !car.notes().iter().any(|n| n.contains("assumed symmetric")),
+        "a declared envelope is not an estimate: {:?}",
+        car.notes()
+    );
+}

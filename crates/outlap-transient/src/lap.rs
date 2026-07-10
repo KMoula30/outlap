@@ -499,6 +499,12 @@ impl<T: Float> TransientSolver<T> {
             .push(self.bus.get_channel(self.actuation.yaw_moment_cmd, 0));
         lap.regen_power_w
             .push(self.bus.get_channel(self.actuation.regen_power_w, 0));
+        lap.regen_torque_front_nm.push(
+            self.bus
+                .get_channel(self.actuation.regen_torque_front_nm, 0),
+        );
+        lap.regen_torque_rear_nm
+            .push(self.bus.get_channel(self.actuation.regen_torque_rear_nm, 0));
         if let Some(slow) = self.slow.as_ref() {
             lap.state_of_charge
                 .push(T::from(slow.soc()).unwrap_or_else(T::zero));
