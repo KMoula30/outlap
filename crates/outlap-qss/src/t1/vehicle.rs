@@ -403,6 +403,27 @@ impl T1Vehicle {
         self.powertrain.max_regen_force_by_axle(v)
     }
 
+    /// Ascending up-shift speeds (m/s) for the primary geared drive unit — the crossover speeds where
+    /// the best gear changes. The transient shift FSM consumes these as its up-shift thresholds;
+    /// empty for a single-speed (direct-drive) car, which never shifts.
+    #[must_use]
+    pub fn upshift_speeds(&self) -> Vec<f64> {
+        self.powertrain.upshift_speeds()
+    }
+
+    /// The number of selectable gears on the primary geared drive unit (`1` for direct drive).
+    #[must_use]
+    pub fn gear_count(&self) -> usize {
+        self.powertrain.primary_gear_count()
+    }
+
+    /// The gearbox shift duration of the primary geared drive unit, s (`0` for direct drive — a
+    /// single-speed car has no shift and the FSM is a no-op).
+    #[must_use]
+    pub fn shift_time_s(&self) -> f64 {
+        self.powertrain.primary_shift_time_s()
+    }
+
     /// Front-axle static weight fraction `b_r / L` (share of vertical load carried by the front axle
     /// with no aero and no acceleration).
     pub fn front_weight_fraction(&self) -> f64 {

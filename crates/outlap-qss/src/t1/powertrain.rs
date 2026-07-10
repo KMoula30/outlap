@@ -172,6 +172,9 @@ struct PtUnit {
     r_wheel: f64,
     /// Selectable gears (one per gearbox ratio, or a single direct gear).
     gears: Vec<Gear>,
+    /// Gearbox shift duration, s (`0` for a direct-drive / single-speed unit) — the transient shift
+    /// FSM charges this per gear change.
+    shift_time_s: f64,
     /// The differential on this unit's axle.
     diff: DiffModel,
     /// Which wheels this unit drives (and therefore can regen-brake) `[FL, FR, RL, RR]`.
@@ -190,6 +193,67 @@ struct PtUnit {
 }
 
 impl PtUnit {
+    /// Wheel drive force in a specific `gear` at vehicle speed `v` (m/s), N — `0` above the gear's
+    /// rev limit. The gears are the source-shaft ratios folded to the wheel.
+    fn gear_force(&self, gear: usize, v: f64) -> f64 {
+        let g = self.gears[gear];
+        let omega = g.ratio / self.r_wheel * v;
+        if omega <= self.omega_max {
+            self.peak_env.eval(omega) * g.ratio * g.eff / self.r_wheel
+        } else {
+            0.0
+        }
+    }
+
+    /// Ascending up-shift speeds (m/s), one per adjacent gear pair — the speeds at which the *next*
+    /// gear's wheel-force curve overtakes the current one (or the current gear reaches its rev limit).
+    /// Empty for a single-speed unit. These are exactly the crossover speeds baked into the best-gear
+    /// [`Self::max_wheel_force`] envelope, so the shift FSM's torque interruption lands where the
+    /// traction ceiling already switches gears — no change to the delivered force, only the shift cut.
+    fn upshift_speeds(&self) -> Vec<f64> {
+        let n = self.gears.len();
+        if n < 2 {
+            return Vec::new();
+        }
+        // Gears sorted by descending ratio (low gear first): the best gear rises with speed.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            self.gears[b]
+                .ratio
+                .partial_cmp(&self.gears[a].ratio)
+                .unwrap()
+        });
+        // The unit's top speed: the highest gear (lowest ratio) at the rev limit.
+        let min_ratio = self
+            .gears
+            .iter()
+            .map(|g| g.ratio)
+            .fold(f64::INFINITY, f64::min);
+        let v_top = self.omega_max * self.r_wheel / min_ratio;
+        let steps = 2000;
+        let mut speeds = Vec::with_capacity(n - 1);
+        for pair in 0..n - 1 {
+            let (lo, hi) = (order[pair], order[pair + 1]);
+            // Smallest speed where the higher gear's force meets or beats the lower gear's.
+            let mut cross = v_top; // fall back to the top speed if they never cross
+            for i in 1..=steps {
+                let v = v_top * f64::from(i) / f64::from(steps);
+                if self.gear_force(hi, v) >= self.gear_force(lo, v) {
+                    cross = v;
+                    break;
+                }
+            }
+            speeds.push(cross);
+        }
+        // Enforce strict ascension (a degenerate ratio set could produce ties); nudge duplicates up.
+        for i in 1..speeds.len() {
+            if speeds[i] <= speeds[i - 1] {
+                speeds[i] = speeds[i - 1] + 1e-3;
+            }
+        }
+        speeds
+    }
+
     /// Best-gear maximum wheel drive force at vehicle speed `v` (m/s), N. Zero-allocation.
     fn max_wheel_force(&self, v: f64) -> f64 {
         let mut best = 0.0;
@@ -303,6 +367,7 @@ impl T1Powertrain {
                 ));
             }
             let gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
+            let shift_time_s = gearbox.map_or(0.0, |g| g.shift_time_s);
             let peak_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
             let omega_max = peak_env.domain().1;
             // The regen (negative-quadrant) envelope.
@@ -341,6 +406,7 @@ impl T1Powertrain {
                 omega_max,
                 r_wheel,
                 gears,
+                shift_time_s,
                 diff,
                 driven,
                 axle_pair: axle_pair(driven),
@@ -466,6 +532,38 @@ impl T1Powertrain {
     #[must_use]
     pub fn max_drive_force(&self, v: f64) -> f64 {
         self.units.iter().map(|u| u.max_wheel_force(v)).sum()
+    }
+
+    /// Ascending up-shift speeds (m/s) for the **primary geared unit** — the drive unit with the most
+    /// selectable gears (the gearbox the transient shift FSM models). Empty when every unit is
+    /// single-speed (a direct-drive EV never shifts). See [`PtUnit::upshift_speeds`].
+    #[must_use]
+    pub fn upshift_speeds(&self) -> Vec<f64> {
+        self.units
+            .iter()
+            .max_by_key(|u| u.gears.len())
+            .map(PtUnit::upshift_speeds)
+            .unwrap_or_default()
+    }
+
+    /// The number of selectable gears on the primary geared unit (`1` for direct drive).
+    #[must_use]
+    pub fn primary_gear_count(&self) -> usize {
+        self.units
+            .iter()
+            .map(|u| u.gears.len())
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// The gearbox shift duration of the primary geared unit, s (`0` for a direct-drive car).
+    #[must_use]
+    pub fn primary_shift_time_s(&self) -> f64 {
+        self.units
+            .iter()
+            .max_by_key(|u| u.gears.len())
+            .map_or(0.0, |u| u.shift_time_s)
     }
 
     /// The peak **regen braking** wheel force each axle's machines can produce at vehicle speed `v`,

@@ -323,6 +323,7 @@ impl<T: Float> Block<T> for Powertrain<T> {
         let ch = |sig: WheelSignal, w: usize| base + (sig as usize) * WHEELS + w;
         let mut writes = vec![
             self.actuation.regen_power_w.index(),
+            self.actuation.traction_power_w.index(),
             self.actuation.regen_torque_front_nm.index(),
             self.actuation.regen_torque_rear_nm.index(),
         ];
@@ -379,6 +380,11 @@ impl<T: Float> Block<T> for Powertrain<T> {
         let (regen_power, axle_regen_torque) = self.blend_regen(vx, axle_brake_force, bus, lane);
         bus.set_channel(self.actuation.regen_power_w, lane, regen_power);
         bus.set_channel(
+            self.actuation.traction_power_w,
+            lane,
+            self.traction_draw(vx, f_avail),
+        );
+        bus.set_channel(
             self.actuation.regen_torque_front_nm,
             lane,
             axle_regen_torque[0],
@@ -396,6 +402,34 @@ impl<T: Float> Powertrain<T> {
     fn axle_radius(&self, a: usize) -> T {
         let two = T::one() + T::one();
         (self.radius[2 * a] + self.radius[2 * a + 1]) / two
+    }
+
+    /// The electrical **traction** power drawn from the pack this step, W (≥ 0) — the mechanical drive
+    /// power an electric machine puts down (`F_drive,axle · v_x`), divided by its motoring efficiency.
+    ///
+    /// Only axles carrying a machine ([`RegenParams`] `front`/`rear`) draw from the pack; an undriven
+    /// or engine-driven axle draws nothing (an ICE burns fuel, not charge). For a pure EV this is the
+    /// whole drive power; for a hybrid the engine's share is not split out at this tier, so the pack
+    /// draw is an upper bound (a documented T2 simplification — the `.ptm` split lands with the QP
+    /// powertrain). Netted against [`Self::blend_regen`]'s recovery by the slow stack, so the pack
+    /// state of charge falls under power and rises under braking, as a real stint does.
+    fn traction_draw(&self, vx: T, f_avail: T) -> T {
+        let zero = T::zero();
+        if !self.regen.enabled {
+            return zero;
+        }
+        let machines = [self.regen.front.as_ref(), self.regen.rear.as_ref()];
+        let mut elec = zero;
+        for (a, machine) in machines.iter().enumerate() {
+            let Some(m) = machine else { continue };
+            if m.efficiency <= zero {
+                continue;
+            }
+            let axle_weight = self.drive_weight[2 * a] + self.drive_weight[2 * a + 1];
+            let mech = (f_avail * axle_weight * vx).max(zero); // mechanical drive power on this axle
+            elec = elec + mech / m.efficiency;
+        }
+        elec
     }
 
     /// **Series (blended) braking.** Each axle's machine takes as much of *its own* commanded braking

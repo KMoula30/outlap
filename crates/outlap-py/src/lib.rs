@@ -1195,21 +1195,21 @@ const MAX_TRANSIENT_STEPS: usize = 2_000_000;
 /// **charge-acceptance ceiling** at the current SoC *and temperature*, which caps the series regen
 /// blend. Held here at the native edge, so the wasm-clean transient crate keeps no QSS dependency.
 ///
-/// The pack only *charges* on a T2 lap: the traction ceiling is a wheel-force envelope, not an
-/// electrical power draw, so the drive-side discharge is not fed back to the pack this milestone. The
-/// SoC therefore rises monotonically over a lap, and a note says so.
+/// The pack sees the **net** electrical power (regen recovered − traction drawn): it charges under
+/// braking and discharges under power, so the SoC moves both ways over a lap.
 struct PackSlowStack {
     pack: Pack,
     state: PackState,
 }
 
 impl outlap_transient::SlowStack for PackSlowStack {
-    fn on_slow_step(&mut self, dt_s: f64, regen_power_w: f64) {
-        // `Pack::step_power` takes discharge-positive terminal power, so charging is negative. The
-        // step advances SoC (Coulomb count), the RC overpotential, and the lumped temperature.
+    fn on_slow_step(&mut self, dt_s: f64, net_charge_power_w: f64) {
+        // `Pack::step_power` takes discharge-positive terminal power, so charging is negative and
+        // discharging is positive: pass `-net` and both directions fall out. The step advances SoC
+        // (Coulomb count), the RC overpotential, and the lumped temperature.
         let _ = self
             .pack
-            .step_power(&mut self.state, -regen_power_w.max(0.0), dt_s);
+            .step_power(&mut self.state, -net_charge_power_w, dt_s);
     }
     fn regen_power_limit_w(&self) -> f64 {
         self.pack.regen_power_limit_w(&self.state)
@@ -1315,6 +1315,7 @@ pub struct TransientLap {
     torque_scale: Vec<f64>,
     yaw_moment_nm: Vec<f64>,
     regen_power_w: Vec<f64>,
+    traction_power_w: Vec<f64>,
     regen_torque_front_nm: Vec<f64>,
     regen_torque_rear_nm: Vec<f64>,
     // Per-wheel channels, row-major `n × 4` (FL/FR/RL/RR).
@@ -1465,6 +1466,12 @@ impl TransientLap {
     /// Recovered electrical regen power, summed over the driven axles, W (≥ 0).
     fn regen_power_w<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         self.regen_power_w.clone().into_pyarray(py)
+    }
+
+    /// Electrical traction power drawn from the pack, W (≥ 0). `regen_power_w − this` is the net pack
+    /// charge power (negative under drive, positive under braking).
+    fn traction_power_w<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.traction_power_w.clone().into_pyarray(py)
     }
 
     /// Front-axle machine braking torque, N·m (≥ 0); the calipers supplied the rest.
@@ -1674,9 +1681,11 @@ fn solve_transient_lap(
             ));
         }
         notes.push(
-            "T2 slow stack: the pack Coulomb-counts recovered regen energy and publishes its \
-             charge-acceptance ceiling (SoC + temperature); the traction draw is not yet fed back, \
-             so the state of charge only rises over a lap"
+            "T2 slow stack: the pack Coulomb-counts the net electrical energy (regen recovered minus \
+             traction drawn) and publishes its charge-acceptance ceiling (SoC + temperature), so the \
+             state of charge falls under power and rises under braking. The traction draw is not \
+             capped by the pack's discharge ceiling at this tier (the envelope, not the pack, limits \
+             drive power)"
                 .to_owned(),
         );
         solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
@@ -1686,11 +1695,36 @@ fn solve_transient_lap(
          grip envelope longitudinally); the lap is seeded at the straightest station, s = {start_s:.1} m",
         speed_margin * 100.0
     ));
-    notes.push(
-        "T2 gear-shift FSM not attached: the per-gear traction crossover speeds are not yet exposed \
-         by the QSS powertrain, so the lap runs the best-gear envelope with no torque interruption"
-            .to_owned(),
-    );
+    // Attach the gear-shift FSM: the crossover speeds where the best gear changes, and the gearbox's
+    // own shift time. A single-speed (direct-drive) car has no up-shift speeds, so the FSM is a no-op
+    // and the lap runs the best-gear envelope uninterrupted. The traction ceiling stays the best-gear
+    // envelope either way; the FSM only adds the torque-cut interruption at each shift.
+    let upshift_speeds = t1v.upshift_speeds();
+    let gear_count = t1v.gear_count();
+    let shift_time_s = t1v.shift_time_s();
+    if upshift_speeds.is_empty() || shift_time_s <= 0.0 {
+        notes.push(
+            "T2 gear-shift FSM inert: the car is single-speed (direct drive) or declares no shift \
+             time, so the lap runs the best-gear envelope with no torque interruption"
+                .to_owned(),
+        );
+    } else {
+        notes.push(format!(
+            "T2 gear-shift FSM: {gear_count} gears, {shift_time_s:.3} s shift, up-shift speeds \
+             {}; each shift costs the §8.2 torque interruption (the best-gear traction ceiling is \
+             unchanged — the gear indexes no force in v1)",
+            upshift_speeds
+                .iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join("/")
+        ));
+        solver = solver.with_shifter(outlap_transient::Shifter::new(
+            gear_count,
+            upshift_speeds,
+            shift_time_s,
+        ));
+    }
 
     let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
     let provenance = solver.provenance();
@@ -1725,6 +1759,7 @@ fn solve_transient_lap(
         torque_scale: lap.torque_scale,
         yaw_moment_nm: lap.yaw_moment_nm,
         regen_power_w: lap.regen_power_w,
+        traction_power_w: lap.traction_power_w,
         regen_torque_front_nm: lap.regen_torque_front_nm,
         regen_torque_rear_nm: lap.regen_torque_rear_nm,
         omega: flat4(&lap.omega),

@@ -183,9 +183,11 @@ impl<T: Float> Shifter<T> {
 /// It is touched only once every `slow_decimation` fast steps (never the hot RK path), so the single
 /// dynamic dispatch is off the hot loop; implementations must still be allocation-free per call.
 pub trait SlowStack {
-    /// Advance the slow states by `dt_s`, Coulomb-counting `regen_power_w` (≥ 0) of recovered
-    /// electrical power into the pack over the interval and self-discharging under any base draw.
-    fn on_slow_step(&mut self, dt_s: f64, regen_power_w: f64);
+    /// Advance the slow states by `dt_s`, Coulomb-counting `net_charge_power_w` into the pack over the
+    /// interval — the recovered regen power **minus** the electrical traction draw. Positive charges
+    /// the pack (braking dominates the window), negative discharges it (drive dominates), so the state
+    /// of charge moves both ways over a lap.
+    fn on_slow_step(&mut self, dt_s: f64, net_charge_power_w: f64);
     /// The current battery regen (charge) power ceiling, W (0 at full charge / no battery).
     fn regen_power_limit_w(&self) -> f64;
     /// The current pack state of charge, 0..1.

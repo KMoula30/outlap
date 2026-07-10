@@ -489,3 +489,57 @@ fn a_declared_regen_envelope_is_used_verbatim() {
         car.notes()
     );
 }
+
+// --- Gear-shift crossover speeds (transient shift FSM input) --------------------------------------
+
+/// A geared unit exposes ascending up-shift speeds, one per adjacent gear pair, and a single-speed
+/// (direct-drive) unit exposes none. The crossover speeds are where the best gear changes, so they
+/// are strictly inside the traction envelope's speed range and monotone.
+#[test]
+fn geared_unit_exposes_ascending_upshift_speeds() {
+    // The inline 2-ratio gearbox car (from `gearbox_map_efficiency_assembles_for_t1`) has 2 gears.
+    let ptm = "schema: ptm/1.0\nkind: electric_machine\n\
+        axes: {speed_rpm: [0.0, 12000.0], load_axis: {torque_nm: [0.0, 300.0]}, torque_nm: [0.0, 300.0]}\n\
+        tables: {file: x.parquet}\n\
+        limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 6000.0, 12000.0], torque_nm: [300.0, 300.0, 150.0]}}\n\
+        inertia_kgm2: 0.1\nmass_kg: 80.0\n";
+    let veh = "schema: vehicle/1.0\nname: t\n\
+        chassis: {mass_kg: 1200.0, cg: [1.2, 0.0, 0.4], inertia: [120.0, 500.0, 550.0], wheelbase_m: 2.6, track_m: [1.5, 1.5]}\n\
+        aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
+        suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
+        tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
+        drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.5, 1.4], final_drive: 3.0, shift_time_s: 0.05, efficiency: 0.97}}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
+        brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
+    let loader = MemLoader::new()
+        .with("vehicle.yaml", veh)
+        .with("ptm/u.ptm.yaml", ptm)
+        .with("tyr/slick.tyr.yaml", SLICK);
+    let rv = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
+    let car = T1Vehicle::assemble(&rv, &Conditions::default(), &loader, false).unwrap();
+
+    assert_eq!(car.gear_count(), 2, "two gearbox ratios");
+    assert_eq!(car.shift_time_s(), 0.05, "gearbox shift time surfaced");
+    let ups = car.upshift_speeds();
+    assert_eq!(ups.len(), 1, "one crossover for a 2-speed box");
+    assert!(
+        ups[0] > 0.0 && ups[0].is_finite(),
+        "crossover speed is a real speed: {}",
+        ups[0]
+    );
+    // At the crossover, the high gear's wheel force meets/beats the low gear's; below it the low gear
+    // wins. The best-gear envelope is continuous through the crossover (the shift indexes no force).
+    let v = ups[0];
+    assert!(car.max_tractive_force(v * 0.5) > 0.0 && car.max_tractive_force(v * 1.5) > 0.0);
+}
+
+/// A direct-drive (single-speed) car never shifts: no up-shift speeds, one gear.
+#[test]
+fn single_speed_car_exposes_no_upshift_speeds() {
+    let car = assemble_degraded("ev_1du_rwd/vehicle.yaml");
+    assert_eq!(car.gear_count(), 1, "the rear DU is single-speed");
+    assert!(
+        car.upshift_speeds().is_empty(),
+        "a direct-drive EV never shifts"
+    );
+    assert_eq!(car.shift_time_s(), 0.0);
+}
