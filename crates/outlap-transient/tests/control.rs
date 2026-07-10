@@ -42,9 +42,9 @@ impl SlowStack for EnergyDouble {
 /// A decelerating straight: the driver tracks a `v_ref` that ramps 70 → 25 m/s, so it brakes hard —
 /// the regen window.
 fn braking_lap(regen: bool, attach_stack: bool) -> (TransientLap<f64>, f64) {
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = ChannelInterner::new();
-    let mut blocks = build_blocks(&t1, &mut it);
+    let mut blocks = build_blocks(&t1, &spec, &mut it);
     // 0.6 blend authority, 0.9 machine+inverter recovery, from the vehicle's own regen envelope.
     blocks.powertrain.regen = common::regen_params(&t1, 0.6, 0.9);
     blocks.powertrain.regen.enabled = regen;
@@ -145,7 +145,7 @@ fn slow_stack_soc_rises_and_closes_with_recovered_energy() {
 fn torque_vectoring_reduces_steady_state_yaw_tracking_error() {
     // Constant-radius skidpad: enabling the yaw-moment allocator drives the steady yaw rate closer to
     // the reference r_target = v·κ than the driver's steer alone.
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let radius = 80.0;
     let v = 30.0;
     let len = 2.0 * std::f64::consts::PI * radius;
@@ -155,7 +155,7 @@ fn torque_vectoring_reduces_steady_state_yaw_tracking_error() {
     };
     let steady_err = |k_yaw: f64| -> f64 {
         let mut it = ChannelInterner::new();
-        let mut blocks = build_blocks(&t1, &mut it);
+        let mut blocks = build_blocks(&t1, &spec, &mut it);
         blocks.tv.enabled = k_yaw > 0.0;
         blocks.tv.k_yaw = k_yaw;
         let table = line(len, 600, true, 1.0 / radius, 1.0 / radius, v, Some(radius));

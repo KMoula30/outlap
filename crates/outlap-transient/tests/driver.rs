@@ -28,9 +28,9 @@ fn cfg() -> SimConfig<f64> {
 fn line_tracking_error_stays_bounded_on_a_smooth_corner() {
     // A gentle constant-radius corner (R = 150 m, v = 40 m/s ≈ 1.1 g — comfortably inside grip): the
     // preview steer + curvature feed-forward should hold the car on the reference line (n_ref = 0).
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it);
+    let blocks = build_blocks(&t1, &spec, &mut it);
     let radius = 150.0;
     let v = 40.0;
     let len = 2.0 * std::f64::consts::PI * radius;
@@ -50,9 +50,9 @@ fn line_tracking_error_stays_bounded_on_a_smooth_corner() {
 fn tracks_a_ramping_speed_profile() {
     // Straight road, no steer; v_ref accelerates 35 → 60 then decelerates back to 35 over 3 km. The
     // preview feed-forward + PI should track it within a few m/s once past the initial lag.
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let mut it = ChannelInterner::new();
-    let blocks = build_blocks(&t1, &mut it);
+    let blocks = build_blocks(&t1, &spec, &mut it);
 
     let len = 3000.0;
     let stations = 300;
@@ -118,10 +118,10 @@ fn tracks_a_ramping_speed_profile() {
 fn full_lap_is_bit_reproducible_with_the_pi_integral() {
     // A closed lap with a non-trivial speed profile exercises the augmented-ODE speed integral; two
     // runs must be bit-identical (determinism, HANDOFF §11.2).
-    let t1 = limebeer();
+    let (t1, spec) = limebeer();
     let run = || {
         let mut it = ChannelInterner::new();
-        let blocks = build_blocks(&t1, &mut it);
+        let blocks = build_blocks(&t1, &spec, &mut it);
         let radius = 120.0;
         let len = 2.0 * std::f64::consts::PI * radius;
         // Speed varies around the loop (v_ref dips mid-lap) to keep the PI integral working.

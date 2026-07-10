@@ -149,7 +149,7 @@ fn qss_t2_parity_report_limebeer_catalunya() {
 
     // --- T2 transient lap: seeded at the straightest station, tracking SPEED_MARGIN × the profile. ---
     let mut it = ChannelInterner::new();
-    let blocks = common::build_blocks(&t1, &mut it);
+    let blocks = common::build_blocks(&t1, &resolved.spec, &mut it);
     let v_target: Vec<f64> = t0r.v.iter().map(|v| v * SPEED_MARGIN).collect();
     let line = line_from_track(&rl.line, &path, &v_target);
     let start_i = straightest(&path.kappa_l);

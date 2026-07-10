@@ -270,6 +270,13 @@ impl Pack {
         &self.notes
     }
 
+    /// The usable state-of-charge window `[min, max]`. At or above the top the pack accepts no
+    /// charge, so a lap seeded there recovers nothing however hard the car brakes.
+    #[must_use]
+    pub fn soc_window(&self) -> [f64; 2] {
+        self.soc_window
+    }
+
     /// Whether the pack declared a `regen_derate_vs_temp` curve. When `false`, charge acceptance is
     /// temperature-independent and [`Self::notes`] says so.
     #[must_use]

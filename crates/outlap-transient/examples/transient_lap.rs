@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_or_else(|| data("../debug_plots/t2"), PathBuf::from);
     std::fs::create_dir_all(&out_dir)?;
 
-    let t1 = common::limebeer();
+    let (t1, spec) = common::limebeer();
     let cfg = SimConfig {
         fz_coupling: FzCoupling::OneStepLag,
         ..SimConfig::default()
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let v = 30.0;
         let length = 2.0 * std::f64::consts::PI * radius;
         let mut it = ChannelInterner::new();
-        let blocks = common::build_blocks(&t1, &mut it);
+        let blocks = common::build_blocks(&t1, &spec, &mut it);
         let line = common::line(
             length,
             400,
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         let v0 = 80.0;
         let mut it = ChannelInterner::new();
-        let mut blocks = common::build_blocks(&t1, &mut it);
+        let mut blocks = common::build_blocks(&t1, &spec, &mut it);
         blocks.driver.speed_kp = 0.0;
         blocks.driver.speed_ki = 0.0;
         blocks.driver.ff_accel_scale = f64::INFINITY; // no throttle / brake
@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let v = 40.0;
         let kappa = 0.006;
         let mut it = ChannelInterner::new();
-        let mut blocks = common::build_blocks(&t1, &mut it);
+        let mut blocks = common::build_blocks(&t1, &spec, &mut it);
         blocks.driver.preview_gain = 0.0;
         blocks.driver.heading_gain = 0.0;
         blocks.driver.yaw_damping = 0.0;
@@ -214,7 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             closed: false,
         })?;
         let mut it = ChannelInterner::new();
-        let blocks = common::build_blocks(&t1, &mut it);
+        let blocks = common::build_blocks(&t1, &spec, &mut it);
         let mut solver = TransientSolver::new(blocks, line, &it, cfg);
         let lap = solver.run(len - 50.0, 200_000);
         println!(

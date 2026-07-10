@@ -13,6 +13,9 @@ outlap-tire = { path = "../outlap-tire" }
 # description, four derived views"). outlap-qss is wasm-clean, so this keeps the vehicle crate
 # wasm-clean too.
 outlap-qss = { path = "../outlap-qss" }
+# The assembly module reads the vehicle document's own `driver`/`brakes`/`drivetrain.control`
+# sections to build the blocks (all config logic at assembly, never in the loop).
+outlap-schema = { path = "../outlap-schema" }
 
 [dev-dependencies]
 serde_json.workspace = true
