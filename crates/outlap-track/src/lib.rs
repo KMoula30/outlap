@@ -47,6 +47,17 @@ const CLOSURE_COINCIDENT_TOL_M: f64 = 1e-6;
 /// positive even when the reference line is pushed to the track edge.
 const MIN_RESIDUAL_WIDTH_M: f64 = 0.1;
 
+/// Arc-length baseline (metres) over which road grade and vertical curvature are estimated by central
+/// finite difference, rather than from the elevation spline's analytic derivatives. Set just above a
+/// typical DEM ground resolution (`eudem25m` is 25 m): the elevation cannot resolve vertical features
+/// finer than this, so differencing below it amplifies DEM noise into a phantom curvature. See
+/// [`Track::elevation_derivs`].
+const VERTICAL_BASELINE_M: f64 = 30.0;
+
+/// Physical backstop on `|κ_v|` (1/m): a 20 m vertical radius. No real circuit crest or dip is tighter
+/// than this, so a larger value is a data error; clamping guards a solver's `κ_v·v²` normal-load term.
+const KAPPA_V_MAX: f64 = 0.05;
+
 /// An error building or loading a [`Track`].
 #[derive(Debug, thiserror::Error)]
 pub enum TrackError {
@@ -301,11 +312,45 @@ impl Track {
         }
     }
 
+    /// Elevation `z(s)` at arc length `s` (wrapped/clamped), m.
+    fn z_at(&self, s: f64) -> f64 {
+        self.gz.eval(self.norm_s(s))
+    }
+
+    /// The first and second derivatives of the elevation w.r.t. arc length, `(z', z'')`, estimated by
+    /// **central finite differences over a physical baseline** rather than the spline's own analytic
+    /// derivatives.
+    ///
+    /// This is deliberate. The elevation comes from a DEM (e.g. `eudem25m`, 25 m ground resolution),
+    /// and an *interpolating* cubic spline forced through those samples reproduces `z` faithfully but
+    /// its **second derivative rings violently** — on `catalunya_osm` the analytic `z''` implies a
+    /// vertical radius of ~3 m (a 34° grade and a `κ_v·v²` normal-load term of ~250 g at speed), which
+    /// is DEM noise, not road geometry. Differencing over [`VERTICAL_BASELINE_M`] — just above the DEM
+    /// resolution — averages that ringing out and recovers the physical profile (radius ~200 m, grade
+    /// ~7°). Finer detail than the baseline is not resolvable from the DEM and is not road curvature.
+    ///
+    /// Exact for polynomial elevation (a central difference reproduces a quadratic's derivatives
+    /// exactly), so the closed-form geometry tests are unaffected.
+    fn elevation_derivs(&self, s: f64) -> (f64, f64) {
+        let h = 0.5 * VERTICAL_BASELINE_M;
+        let (zm, z0, zp) = (self.z_at(s - h), self.z_at(s), self.z_at(s + h));
+        let zt = (zp - zm) / (2.0 * h);
+        let ztt = (zp - 2.0 * z0 + zm) / (h * h);
+        (zt, ztt)
+    }
+
     /// Vertical curvature of the elevation profile at `s`, signed (crest `< 0`), 1/m.
+    ///
+    /// The elevation derivatives are baseline finite differences (see [`Self::elevation_derivs`]); the
+    /// horizontal derivatives stay analytic (the plan-view geometry is clean OSM data). A physical
+    /// backstop clamps the result to [`KAPPA_V_MAX`]: no real circuit curves vertically tighter than
+    /// that, so a larger value is a data error, and this guards a solver's `κ_v·v²` normal-load term
+    /// from a pathological (e.g. un-baselined) elevation source.
     pub fn curvature_v(&self, s: f64) -> f64 {
         let s = self.norm_s(s);
-        let (xt, yt, zt) = (self.gx.deriv(s), self.gy.deriv(s), self.gz.deriv(s));
-        let (xtt, ytt, ztt) = (self.gx.deriv2(s), self.gy.deriv2(s), self.gz.deriv2(s));
+        let (xt, yt) = (self.gx.deriv(s), self.gy.deriv(s));
+        let (xtt, ytt) = (self.gx.deriv2(s), self.gy.deriv2(s));
+        let (zt, ztt) = self.elevation_derivs(s);
         let horiz = (xt * xt + yt * yt).sqrt();
         if horiz == 0.0 {
             return 0.0;
@@ -313,13 +358,15 @@ impl Track {
         // Curvature of the vertical-plane curve (H(t), z(t)), H = horizontal arc length.
         let h_tt = (xt * xtt + yt * ytt) / horiz;
         let denom = (horiz * horiz + zt * zt).powf(1.5);
-        (horiz * ztt - zt * h_tt) / denom
+        ((horiz * ztt - zt * h_tt) / denom).clamp(-KAPPA_V_MAX, KAPPA_V_MAX)
     }
 
-    /// Road grade (tangent pitch above horizontal) at `s`, radians.
+    /// Road grade (tangent pitch above horizontal) at `s`, radians. The elevation slope is a baseline
+    /// finite difference (see [`Self::elevation_derivs`]); the horizontal tangent stays analytic.
     pub fn grade(&self, s: f64) -> f64 {
         let s = self.norm_s(s);
-        let (xt, yt, zt) = (self.gx.deriv(s), self.gy.deriv(s), self.gz.deriv(s));
+        let (xt, yt) = (self.gx.deriv(s), self.gy.deriv(s));
+        let (zt, _) = self.elevation_derivs(s);
         zt.atan2((xt * xt + yt * yt).sqrt())
     }
 
