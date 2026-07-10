@@ -70,6 +70,15 @@ the up-shift threshold of the gear below. Without it, a car cruising exactly at 
 chatter between gears every step — a classic relay-with-noise limit cycle that the hysteresis band
 removes.
 
+**Where the thresholds come from.** The up-shift speeds are the QSS powertrain's own best-gear
+crossover speeds (`T1Vehicle::upshift_speeds`) — the speeds at which the next gear's wheel-force curve
+overtakes the current one, already baked into the best-gear traction envelope the lap uses. So the
+torque interruption lands exactly where the ceiling switches gears and the delivered force is
+unchanged. A geared car steps through its ratios as it accelerates, each shift a torque cut; a
+single-speed (direct-drive) car has no crossover speeds and the FSM is inert.
+
+![Gear-shift FSM on the 8-speed f1_2026](img/t2_gear_shift.png)
+
 ## 3. Regen blending: series (blended) braking
 
 Production EVs and full hybrids use **series regenerative braking**. The pedal demands a *total* brake
@@ -227,14 +236,27 @@ byte-identical to the pre-PR6 lap.
 instantaneous friction estimate; a QP allocator with the real per-wheel combined-slip surface is the
 post-v1 replacement (Decision #2).
 
-## 5. The slow-state stack
+## 5. The slow-state stack: the state of charge moves both ways
 
-`SlowStack` is the interface the orchestrator advances on the decimated slow clock: it Coulomb-counts
-`regen_power_w` into the pack over the slow interval, self-discharges under any base draw, and
-publishes back the charge-power ceiling `P_limit(SoC)` that caps §3 and the pack SoC/temperature for
-telemetry. It is *received* as a boxed artifact — the concrete implementation wraps the QSS `Pack`
+`SlowStack` is the interface the orchestrator advances on the decimated slow clock. It Coulomb-counts
+the **net** electrical power into the pack over the slow interval — the recovered regen (§3) *minus*
+the electrical traction draw — and publishes back the charge-power ceiling `P_limit(SoC, T)` that caps
+§3, plus the pack SoC and temperature for telemetry. The traction draw is the mechanical drive power
+each machine-equipped axle puts down, `F_drive,axle · v_x`, over its motoring efficiency; only an
+electric axle draws from the pack (an engine burns fuel). So the state of charge **falls under power
+and rises under braking**, as a real stint does — and a pack seeded full discharges to open headroom,
+rather than sitting on a dead cell with regen refused:
+
+![Traction discharge on a full pack](img/t2_traction_discharge.png)
+
+`SlowStack` is *received* as a boxed artifact — the concrete implementation wraps the QSS `Pack`
 primitive at the Python boundary — so the wasm-clean transient crate never depends on the QSS
 trim/envelope machinery, mirroring how the line table and traction envelope are handed in (§11.1).
+
+Two simplifications this tier carries, both surfaced in the lap notes: the whole drive power on a
+machine-equipped axle is drawn from the pack (a pure-EV assumption; a hybrid's engine share is not
+split out until the QP powertrain), and the draw is not capped by the pack's *discharge* ceiling (the
+traction envelope, not the pack, limits drive power at T2 — a depleted pack does not yet fade the car).
 
 ## 6. Parameters and defaults
 
