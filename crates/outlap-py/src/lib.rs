@@ -1577,28 +1577,29 @@ fn solve_transient_lap(
     let hash = resolved.report.resolved_hash.clone();
     let mut notes = Vec::new();
 
-    // The transient tier is validated **flat only**. The 7-DOF chassis carries grade/banking/vertical
-    // curvature terms, but the closed loop through them has never been gated, and on a real elevated
-    // circuit it diverges. Rather than hand back a silently-exploded trace, run flat and say so — and
-    // refuse outright if the caller explicitly asked for a 3-D transient.
-    let asked_for_3d = sim
-        .and_then(|d| d.get_item("flat_track").ok().flatten())
-        .and_then(|v| v.extract::<bool>().ok())
-        == Some(false);
-    if asked_for_3d {
-        return Err(PyValueError::new_err(
-            "the transient tier (t2) runs flat-track only: the closed loop through the chassis \
-             grade/banking terms is not yet gated. Drop `flat_track` from `sim`, or use `tier=\"t1\"` \
-             for a 3-D quasi-steady lap",
-        ));
-    }
-    if !sim_cfg.flat_track {
+    // The transient tier honours `flat_track` like the QSS tiers (PR7.5): the 7-DOF chassis carries
+    // grade/banking/vertical-curvature terms and the driver is stabilised against the grade
+    // disturbance (grade-aware speed reference + grade-scaled yaw recovery, `outlap-vehicle`), so a
+    // real elevated circuit no longer spins the car out. The default stays 3-D (`flat_track` unset ⇒
+    // full geometry); pass `flat_track: true` for a flat-plane analysis lap.
+    let flat = sim_cfg.flat_track;
+    if flat {
         notes.push(
-            "T2 runs flat-track: the chassis grade/banking/vertical-curvature terms exist but the              closed loop through them is not yet gated, so elevation is flattened for this lap"
+            "T2 flat-track analysis mode: the chassis grade/banking/vertical-curvature terms are \
+             held at zero (the world trajectory is still reconstructed from the line)"
+                .to_owned(),
+        );
+    } else {
+        notes.push(
+            "T2 3-D road frame: grade, banking and the full elevated trajectory are live. The \
+             vertical-curvature normal-load term (κ_v·v²) is transmitted in full when it loads the \
+             tyres (dips/compressions) but its *unloading* over a crest is floored at 0.15 g below \
+             the static load (estimated) — a rigid T2 chassis has no suspension travel (T3) to \
+             absorb a sharp crest, so the raw term would over-unload the tyres and spin the car \
+             where a sprung car stays planted; full vertical-load fidelity awaits the T3 suspension"
                 .to_owned(),
         );
     }
-    let flat = true;
 
     // --- The QSS reference: the same envelope + point-mass profile the T0/T1 tiers solve. ---------
     let opts = T0Options {
@@ -1606,7 +1607,11 @@ fn solve_transient_lap(
         allow_degraded: sim_cfg.allow_degraded,
         ..T0Options::default()
     };
-    let path = T0Path::from_track_flat(&track.inner, ds_m);
+    let path = if flat {
+        T0Path::from_track_flat(&track.inner, ds_m)
+    } else {
+        T0Path::from_track(&track.inner, ds_m)
+    };
     let line_descriptor = match raceline_ds_m {
         Some(g) => LineDescriptor::MinCurvature {
             ds_m: g,
@@ -1727,11 +1732,19 @@ fn solve_transient_lap(
     }
 
     let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
+    let diverged = solver.diverged();
     let provenance = solver.provenance();
     // `run` breaks the moment the recorded arc length passes the finish line, so the last sample
     // tells us whether the car got there inside the step budget.
     let completed = lap.s.last().copied().unwrap_or(0.0) >= start_s + length;
-    if !completed {
+    if diverged {
+        notes.push(
+            "T2 lap diverged: the closed loop left the physical envelope (a spin the driver could \
+             not catch) and the run stopped early. The trace is truncated and `lap_time_s` is not a \
+             lap time. Try a lower `speed_margin`"
+                .to_owned(),
+        );
+    } else if !completed {
         notes.push(format!(
             "T2 lap did not reach the finish line within {MAX_TRANSIENT_STEPS} steps — the trace is \
              truncated and `lap_time_s` is not a lap time"

@@ -186,7 +186,41 @@ pub struct TransientSolver<T> {
     ax_prev: T,
     ay_prev: T,
     t: T,
+    /// Set once the fast state leaves the finite/physical envelope (a spin the driver could not
+    /// catch). The run stops cleanly at that point rather than integrating — or panicking on — a
+    /// non-finite state, so a diverged lap surfaces as a truncated, finite trace with
+    /// `completed == false`, never a `1e120` "lap time" or an interpolation panic.
+    diverged: bool,
 }
+
+/// Ceiling on `|v_x|` (m/s) past which the closed loop is treated as diverged: ~4× the fastest
+/// modelled car's top speed, so a real lap never trips it but a spin's runaway `v_x` does before it
+/// can reach the non-finite range that would panic the road-geometry interpolation.
+const VX_DIVERGENCE_CEILING: f64 = 500.0;
+
+/// Ceiling on `|r|` (rad/s) past which the state is treated as a spin: ~6× any lapping car's yaw
+/// rate (the reference cars peak near 0.9 rad/s), so a clean lap never trips it but a spin — whose
+/// yaw rate runs away long before `v_x` does — stops promptly rather than recording 10⁵ junk steps.
+const YAW_DIVERGENCE_CEILING: f64 = 6.0;
+
+/// The largest normal-load *unloading* (as a fraction of `g`) the vertical-curvature term `κ_v·v²`
+/// may apply over a crest at the T2 tier — the road-normal load may drop at most `CREST_UNLOADING_
+/// FLOOR_G · g` below its static (grade/banking) value. Loading (dips / compressions) is unbounded.
+///
+/// **Why a floor at all.** A T2 chassis is *rigid* — the sprung mass is modelled as following the
+/// road's vertical curvature exactly (the suspension DOF that would let the wheels drop into a crest
+/// while the body carries on is T3, deferred to M6, Decision #3). That rigidity makes `κ_v·v²`
+/// over-predict the contact-patch *unloading* over a crest: on `catalunya_osm` a sharp crest drives
+/// the raw `g_normal` to zero (flight) mid-corner at racing speed, collapsing grip and spinning the
+/// otherwise-planted closed loop — while the QSS reference the driver tracks was built with the
+/// envelope's own `g_normal` clamped to `[0.5 g, 2 g]` and a flight guard, so the two tiers disagree
+/// on the available grip exactly there. Flooring the *unloading* keeps the rigid tier from driving
+/// the tyres lighter than a sprung car would over the same crest; the *loading* side is left in full
+/// so Eau-Rouge-type compression downforce is preserved. This is a documented T2 model closure, the
+/// transient analogue of the QSS clamp + flight guard; full vertical-load fidelity awaits the T3
+/// suspension. `0.15` clears the observed stability edge (~0.22) with margin and holds the
+/// three reference cars' `catalunya_osm` laps to flat pace (≤0.2 %). Inert on a flat track (`κ_v ≡ 0`).
+const CREST_UNLOADING_FLOOR_G: f64 = 0.15;
 
 impl<T: Float> TransientSolver<T> {
     /// Build a solver from the assembled blocks, the line table, the interner (bus width), and the
@@ -231,6 +265,7 @@ impl<T: Float> TransientSolver<T> {
             ax_prev: T::zero(),
             ay_prev: T::zero(),
             t: T::zero(),
+            diverged: false,
         };
         solver.seed_initial_state();
         solver
@@ -328,7 +363,13 @@ impl<T: Float> TransientSolver<T> {
         let vx = self.get_fast(ChassisState::Vx).max(T::zero());
         let g = self.blocks.chassis.params.gravity;
         let (grade, bank) = (self.line.grade(s), self.line.banking(s));
-        let g_normal = g * grade.cos() * bank.cos() + self.line.kappa_v(s) * vx * vx;
+        let g_static = g * grade.cos() * bank.cos();
+        // Vertical-curvature normal-load term `κ_v·v²`: dips (κ_v > 0) load the tyres, crests
+        // (κ_v < 0) unload them. Its *unloading* is floored (see `CREST_UNLOADING_FLOOR_G`); the
+        // loading (compression / Eau-Rouge downforce) side is transmitted in full.
+        let kv_term = self.line.kappa_v(s) * vx * vx;
+        let unload_floor = -T::from(CREST_UNLOADING_FLOOR_G).unwrap_or_else(T::zero) * g;
+        let g_normal = g_static + kv_term.max(unload_floor);
         self.blocks.load.set_operating_point(vx, g_normal, ax, ay);
     }
 
@@ -423,6 +464,15 @@ impl<T: Float> TransientSolver<T> {
         let xi_slot = StateLayout::controller_slot(ControllerState::SpeedIntegral);
         let xi_lim = self.blocks.driver.integral_limit;
         self.fast[xi_slot] = self.fast[xi_slot].max(-xi_lim).min(xi_lim);
+
+        // Divergence guard: a non-finite or runaway fast state means the closed loop has diverged
+        // (a spin the driver could not catch). Flag it and stop *before* the road-geometry
+        // interpolation below is handed a non-finite `s` (which would panic), so the caller gets a
+        // finite, truncated trace with `completed == false` instead of a crash or a `1e120` lap.
+        if !self.state_is_finite() {
+            self.diverged = true;
+            return;
+        }
 
         // (3) refresh one-step-lag accelerations at the new state. Re-point the load-transfer block
         // at the post-step speed first (using the lagged accel), so the recorded per-wheel F_z and
@@ -550,6 +600,9 @@ impl<T: Float> TransientSolver<T> {
         self.record(&mut lap);
         for _ in 0..max_steps {
             self.step();
+            if self.diverged {
+                break;
+            }
             self.record(&mut lap);
             if self.get_fast(ChassisState::S) >= s_end {
                 break;
@@ -575,6 +628,30 @@ impl<T: Float> TransientSolver<T> {
     #[must_use]
     pub fn fast_state(&self) -> &[T] {
         &self.fast
+    }
+
+    /// Whether the lap diverged (the closed loop left the finite/physical envelope and the run
+    /// stopped early). A diverged lap's recorded trace is truncated and `lap_time_s` is not a lap
+    /// time; the Python boundary already reports non-completion via the finish-line check.
+    #[must_use]
+    pub fn diverged(&self) -> bool {
+        self.diverged
+    }
+
+    /// Whether the integrated fast state is finite and within the physical envelope. Guards the
+    /// road-geometry interpolation (a non-finite `s` panics `MonotoneCubic`) and turns a runaway
+    /// spin into a clean early stop.
+    fn state_is_finite(&self) -> bool {
+        let vx_ceiling = T::from(VX_DIVERGENCE_CEILING).unwrap_or_else(T::max_value);
+        let yaw_ceiling = T::from(YAW_DIVERGENCE_CEILING).unwrap_or_else(T::max_value);
+        for &slot in &self.integrated {
+            let v = self.fast[slot];
+            if !v.is_finite() {
+                return false;
+            }
+        }
+        self.get_fast(ChassisState::Vx).abs() <= vx_ceiling
+            && self.get_fast(ChassisState::YawRate).abs() <= yaw_ceiling
     }
 }
 

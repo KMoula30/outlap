@@ -18,6 +18,13 @@ use crate::params::WheelGeometry;
 /// Minimum contact-patch speed used in the slip denominators, m/s (avoids the standstill 0/0).
 const VX_LOW: f64 = 1.0;
 
+/// Floor on per-wheel normal load `F_z`, N. A car that goes light over a crest at speed can drive
+/// `F_z` to exactly zero, at which the tyre relaxation length `σ(F_z) → 0` and the exact-exponential
+/// slip update becomes ill-posed (a zero-length filter has infinite bandwidth). Flooring `F_z` at a
+/// small positive value keeps `σ` finite; the force it produces (≈ `μ·F_z_floor`) is negligible on
+/// the ground — a few newtons against a multi-kN wheel load — so it never perturbs a planted lap.
+pub const FZ_FLOOR_N: f64 = 10.0;
+
 // ---------------------------------------------------------------------------------------------
 // Aero
 // ---------------------------------------------------------------------------------------------
@@ -137,13 +144,12 @@ impl<T: Float> Block<T> for LoadTransfer<T> {
             to_f(self.qz_f),
             to_f(self.qz_r),
         );
+        let floor = T::from(FZ_FLOOR_N).unwrap_or_else(T::zero);
         for (w, &fz_w) in fz.iter().enumerate() {
-            bus.set_wheel(
-                WheelSignal::TireFz,
-                w,
-                lane,
-                T::from(fz_w).unwrap_or_else(T::zero),
-            );
+            // Floor at a small positive load so a wheel that goes light over a crest keeps a finite
+            // relaxation length `σ(F_z)` (the exact-exponential slip update needs `σ > 0`).
+            let fz_floored = T::from(fz_w).unwrap_or_else(T::zero).max(floor);
+            bus.set_wheel(WheelSignal::TireFz, w, lane, fz_floored);
         }
     }
 }
@@ -352,5 +358,91 @@ fn omega_slot(wheel: usize) -> ChassisState {
         1 => ChassisState::OmegaFr,
         2 => ChassisState::OmegaRl,
         _ => ChassisState::OmegaRr,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use outlap_core::bus::ChannelInterner;
+    use outlap_core::state::fast_slot_count;
+    use outlap_qss::t1::LoadTransferGeometry;
+
+    /// A symmetric test geometry for the shared load-transfer algebra (values are representative,
+    /// not a specific car — the property under test is the floor, not the exact split).
+    fn geom() -> LoadTransferGeometry {
+        LoadTransferGeometry {
+            mass_kg: 800.0,
+            wheelbase_m: 3.0,
+            a_f: 1.5,
+            b_r: 1.5,
+            t_f: 1.6,
+            t_r: 1.6,
+            h_cg: 0.3,
+            h_ra: 0.1,
+            rc_f: 0.5,
+            rc_r: 0.5,
+            roll_share_f: 0.5,
+            roll_share_r: 0.5,
+        }
+    }
+
+    fn load_block(g_normal: f64, ax: f64, ay: f64, speed: f64) -> LoadTransfer<f64> {
+        LoadTransfer {
+            geom: geom(),
+            g_normal,
+            speed,
+            ax,
+            ay,
+            qz_f: 0.0,
+            qz_r: 0.0,
+        }
+    }
+
+    fn eval_fz(block: &LoadTransfer<f64>) -> [f64; WHEELS] {
+        let mut it = ChannelInterner::new();
+        let mut bus = Bus::<f64>::with_interner(&it, 1);
+        // `LoadTransfer` writes into the fixed per-wheel `TireFz` region, so no channels to intern;
+        // touch the interner to keep the width correct.
+        let _ = &mut it;
+        let fast = vec![0.0; fast_slot_count()];
+        let sv = StateView::new(&fast, 1, 0);
+        let mut dfast = vec![0.0; fast_slot_count()];
+        let mut dv = outlap_core::state::DerivView::new(&mut dfast, 1, 0);
+        block.derivatives(&sv, &mut bus, &mut dv, 0);
+        let mut fz = [0.0; WHEELS];
+        for (w, slot) in fz.iter_mut().enumerate() {
+            *slot = bus.get_wheel(WheelSignal::TireFz, w, 0);
+        }
+        fz
+    }
+
+    #[test]
+    fn a_light_crest_floors_fz_at_a_small_positive_value() {
+        // A negative road-normal specific gravity (a crest unloading beyond any downforce) drives the
+        // raw load-transfer output to zero on every wheel. The block must still publish `≥ FZ_FLOOR_N`
+        // so the relaxation length `σ(F_z)` stays finite downstream.
+        let block = load_block(-5.0, 0.0, 0.0, 0.0);
+        for fz in eval_fz(&block) {
+            assert!(
+                fz >= FZ_FLOOR_N,
+                "a light wheel must floor at {FZ_FLOOR_N} N, got {fz}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_never_perturbs_a_planted_lap() {
+        // Under a normal 1 g load with a little combined accel, every wheel carries kN-scale load, far
+        // above the floor — so the floor is inert (it only ever lifts a would-be-zero wheel).
+        let block = load_block(9.806_65, 3.0, 5.0, 60.0);
+        let fz = eval_fz(&block);
+        assert!(
+            fz.iter().all(|&f| f > 50.0 * FZ_FLOOR_N),
+            "planted loads {fz:?} should dwarf the floor"
+        );
+        // ΣF_z == m·g_normal to the newton: no wheel was floored, so the floor added nothing.
+        let sum: f64 = fz.iter().sum();
+        assert!((sum - 800.0 * 9.806_65).abs() < 1.0, "sum {sum}");
     }
 }
