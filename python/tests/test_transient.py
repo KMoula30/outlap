@@ -240,20 +240,39 @@ def test_speed_margin_is_validated(catalunya: Track) -> None:
         solve_transient_lap(LIMEBEER, catalunya, sim=COARSE_SIM, speed_margin=0.0)
 
 
-def test_a_three_dimensional_transient_is_refused_not_diverged(
+def test_a_three_dimensional_transient_completes_without_diverging(
     catalunya: Track,
 ) -> None:
-    """The chassis carries grade/banking terms but the closed loop through them is not gated, so a
-    3-D transient is refused outright rather than handed back as a diverged trace."""
-    with pytest.raises(ValueError, match="flat-track only"):
-        solve_transient_lap(
-            LIMEBEER, catalunya, sim={"flat_track": False, **COARSE_SIM}
-        )
+    """The 3-D road frame is live (grade, banking, the elevated trajectory): a lap on the real
+    elevated `catalunya_osm` completes, stays finite, and stays planted — no spin, no runaway."""
+    lap = solve_transient_lap(
+        LIMEBEER, catalunya, sim={"flat_track": False, **COARSE_SIM}
+    )
+    ds = transient_lap_dataset(lap)
+    assert ds.attrs["flat_track"] == 0, "the lap ran the 3-D road frame"
+    assert ds.attrs["completed"] == 1, "the car reached the finish line"
+    vx = ds["vx"].values
+    assert (vx > 0.0).all() and float(vx.max()) < 120.0, (
+        "never stops, reverses, or runs away"
+    )
+    assert float(np.abs(ds["yaw_rate"].values).max()) < 5.0, "no spin"
 
 
-def test_a_transient_lap_runs_flat_and_records_it(f1_lap: xr.Dataset) -> None:
-    assert f1_lap.attrs["flat_track"] == 1
-    assert any("flat-track" in n for n in f1_lap.attrs["notes"])
+def test_the_default_transient_lap_is_three_dimensional(f1_lap: xr.Dataset) -> None:
+    """`flat_track` defaults to false, like the QSS tiers — the default T2 lap is the full 3-D road
+    frame, and the crest-unloading closure is surfaced."""
+    assert f1_lap.attrs["flat_track"] == 0
+    assert any("3-D road frame" in n for n in f1_lap.attrs["notes"])
+
+
+def test_a_flat_track_transient_lap_runs_flat_and_records_it(
+    catalunya: Track,
+) -> None:
+    lap = transient_lap_dataset(
+        solve_transient_lap(LIMEBEER, catalunya, sim={"flat_track": True, **COARSE_SIM})
+    )
+    assert lap.attrs["flat_track"] == 1
+    assert any("flat-track" in n for n in lap.attrs["notes"])
 
 
 def test_solve_lap_points_at_the_transient_entry_point(catalunya: Track) -> None:

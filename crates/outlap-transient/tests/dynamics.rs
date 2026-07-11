@@ -22,7 +22,45 @@ use outlap_core::block::Phase;
 use outlap_core::bus::WHEELS;
 use outlap_core::state::{ChassisState, RelaxState, StateLayout};
 use outlap_schema::sim::FzCoupling;
-use outlap_transient::{SimConfig, TransientSolver};
+use outlap_transient::{LineSamples, LineTable, SimConfig, TransientSolver};
+
+/// A closed circular line (radius `r`) carrying a vertical-curvature **crest** (`kappa_v < 0`) over
+/// its whole length: a sustained road-normal unloading while the car corners at `v_ref` — the exact
+/// 3-D condition that spun the driver before the crest-unloading floor landed (PR7.5).
+fn crest_circle(r: f64, kappa_v: f64, v_ref: f64) -> LineTable<f64> {
+    let len = 2.0 * std::f64::consts::PI * r;
+    let stations = 400;
+    let s: Vec<f64> = (0..stations)
+        .map(|i| i as f64 * len / (stations as f64 - 1.0))
+        .collect();
+    let (mut xr, mut yr, mut lx, mut ly) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for &si in &s {
+        let th = si / r;
+        xr.push(r * th.sin());
+        yr.push(r * (1.0 - th.cos()));
+        lx.push(-th.sin());
+        ly.push(th.cos());
+    }
+    let mk = |v: f64| vec![v; stations];
+    LineTable::new(&LineSamples {
+        s,
+        kappa_h: mk(1.0 / r),
+        grade: mk(0.0),
+        banking: mk(0.0),
+        kappa_v: mk(kappa_v),
+        n_ref: mk(0.0),
+        kappa_ref: mk(1.0 / r),
+        v_ref: mk(v_ref),
+        x_ref: xr,
+        y_ref: yr,
+        z_ref: mk(0.0),
+        lat_x: lx,
+        lat_y: ly,
+        lat_z: mk(0.0),
+        closed: true,
+    })
+    .unwrap()
+}
 
 fn cfg() -> SimConfig<f64> {
     SimConfig {
@@ -250,5 +288,72 @@ fn skidpad_stays_within_the_friction_circle() {
                 mu * fz
             );
         }
+    }
+}
+
+#[test]
+fn a_cornering_crest_stays_finite_and_planted() {
+    // A 60 m-radius corner taken at 30 m/s over a sustained crest (kappa_v = −0.02, a 50 m vertical
+    // radius). The raw `κ_v·v²` unloading here is ~1.8 g — enough to drive the road-normal load
+    // airborne and spin the closed loop. The crest-unloading floor keeps the tyres planted; the lap
+    // must stay finite and never spin.
+    let (t1, spec) = limebeer();
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks(&t1, &spec, &mut it);
+    let mut solver = TransientSolver::new(blocks, crest_circle(60.0, -0.02, 30.0), &it, cfg());
+    let len = 2.0 * std::f64::consts::PI * 60.0;
+    let lap = solver.run(len, 60_000);
+    assert!(
+        !solver.diverged(),
+        "the crest floor should keep the car planted"
+    );
+    for i in 0..lap.len() {
+        assert!(
+            lap.vx[i].is_finite() && lap.yaw_rate[i].is_finite(),
+            "step {i} non-finite"
+        );
+        for w in 0..WHEELS {
+            // The per-wheel load never collapses to zero (the F_z floor holds it positive).
+            assert!(lap.fz[i][w] > 0.0, "step {i} wheel {w} lost all load");
+        }
+    }
+}
+
+#[test]
+fn the_divergence_guard_stops_cleanly_on_an_unholdable_line() {
+    // A 10 m-radius corner demanded at 90 m/s is a physically impossible operating point (the
+    // curvature-consistent seed yaw rate alone, v·κ = 9 rad/s, is already past the spin ceiling and
+    // ~90 g of lateral demand is far outside any tyre's grip). The driver cannot hold it and the
+    // closed loop spins. The guard must stop the run cleanly — a finite, truncated trace with
+    // `diverged() == true` — never a panic or a `1e120` state.
+    let (t1, spec) = limebeer();
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks(&t1, &spec, &mut it);
+    let l = line(
+        2.0 * std::f64::consts::PI * 10.0,
+        400,
+        true,
+        1.0 / 10.0,
+        1.0 / 10.0,
+        90.0,
+        Some(10.0),
+    );
+    let mut solver = TransientSolver::new(blocks, l, &it, cfg());
+    let lap = solver.run(2.0 * std::f64::consts::PI * 10.0, 60_000);
+    assert!(
+        solver.diverged(),
+        "an unholdable corner must trip the guard"
+    );
+    // Every recorded sample is finite (the guard stops before the non-finite state is recorded).
+    for i in 0..lap.len() {
+        assert!(
+            lap.vx[i].is_finite() && lap.vy[i].is_finite() && lap.yaw_rate[i].is_finite(),
+            "recorded step {i} is non-finite"
+        );
+        assert!(
+            lap.vx[i].abs() <= 500.0,
+            "recorded vx {} exceeds the ceiling",
+            lap.vx[i]
+        );
     }
 }

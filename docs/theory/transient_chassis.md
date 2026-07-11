@@ -90,6 +90,40 @@ term. The world trajectory `x/y/z` is reconstructed from the **integrated** `(s,
 `fz_coupling` (Decision #29): `one_step_lag` reuses the previous step's `(a_x, a_y)`; `fixed_point`
 (the T2 auto-default) damps a few force→accel iterations at the step start.
 
+### 3-D stability on graded roads — two normal-load guards
+
+The 7-DOF chassis runs the full 3-D road frame (grade, banking, the elevated trajectory) on real
+DEM-sourced circuits such as `catalunya_osm`. Two small guards on the normal load keep the closed
+loop planted where a naïve rigid model would spin the car; both are **inert on a flat track**
+(`κ_v ≡ 0`, no light wheels) and neither changes a flat lap by a bit.
+
+- **A per-wheel `F_z` floor.** Over a crest at speed a wheel can go light enough that the
+  load-transfer algebra returns exactly zero. There the tyre relaxation length `σ(F_z) → 0` and the
+  exact-exponential slip update becomes ill-posed (a zero-length filter has infinite bandwidth). The
+  load block floors each wheel at a small positive load (`FZ_FLOOR_N`); the force it implies
+  (`≈ μ·F_z_floor`, a few newtons) is negligible against a kN-scale wheel load, so a planted lap is
+  untouched — it only ever lifts a would-be-zero wheel.
+
+- **A crest-unloading floor on `κ_v·v²`.** A T2 chassis is *rigid*: the sprung mass is modelled as
+  following the road's vertical curvature exactly (the suspension travel that would let the wheels
+  drop into a crest while the body carries on is the T3 tier, deferred to M6, Decision #3). That
+  rigidity makes the `κ_v·v²` term **over-predict the unloading** over a sharp crest — on
+  `catalunya_osm` the raw term drives the road-normal load through zero (flight) mid-corner at racing
+  speed, collapsing grip and spinning the otherwise-planted loop. Meanwhile the QSS point-mass profile
+  the driver tracks was built with the envelope's own `g_normal` clamped to `[0.5 g, 2 g]` plus a
+  flight guard, so the two tiers disagree on the available grip exactly there. The transient therefore
+  **floors the unloading** at a fraction of `g` below the static (grade/banking) load
+  (`CREST_UNLOADING_FLOOR_G = 0.15`) — the T2 analogue of the QSS clamp + flight guard. The **loading**
+  side (dips, Eau-Rouge-type compressions) is transmitted in full, so downforce-on-compression physics
+  is preserved. This is a documented T2 model closure; full vertical-load fidelity — a wheel load that
+  rides the suspension over the crest — arrives with the T3 suspension DOF. With both guards the three
+  reference cars lap `catalunya_osm` in 3-D within ≤0.2 % of their flat-plane time, i.e. the 3-D and
+  flat driver-stability envelopes now coincide.
+
+If the closed loop *does* leave the physical envelope (a spin the driver cannot catch — e.g. an
+over-aggressive `speed_margin`), the solver stops cleanly on a finite, truncated trace and records the
+divergence, rather than integrating a non-finite state or reporting a runaway `lap_time_s`.
+
 ### Step ordering (a recorded decision)
 
 The relaxation-lagged slip is advanced by the exact-exponential sub-step **before** the RK sweep and
@@ -141,15 +175,36 @@ recorded in the loaded-model report. Both lengths are floored at `SIGMA_FLOOR_M 
 Property tests (`outlap-vehicle`, `outlap-transient`): ISO 8855 sign conventions (leftward front
 force ⇒ +yaw; uphill grade decelerates), flat-track planar degeneration, wheel spin-up, frame-
 singularity flooring, relaxation convergence to steady state, coastdown drag deceleration, step-steer
-yaw sign/magnitude (`r → v·δ/L`), friction-circle containment on a skidpad, and bit-exact
-reproducibility. The `transient_lap` example emits the closed-loop skidpad / coastdown / step-steer
-traces below (regenerate with `docs/derivations/plot_t2_demo.py`).
+yaw sign/magnitude (`r → v·δ/L`), friction-circle containment on a skidpad, the `F_z` floor over a
+light crest, a cornering-crest lap staying planted, the divergence guard stopping an unholdable line
+cleanly, and bit-exact reproducibility. The `transient_lap` example emits the closed-loop skidpad /
+coastdown / step-steer traces below (regenerate with `docs/derivations/plot_t2_demo.py`).
 
 ![Closed-loop skidpad: trajectory, bounded tracking error, per-wheel lateral load transfer](img/t2_skidpad.png)
 
 ![Step-steer: yaw-rate response, sideslip, and the relaxation-lagged front slip angle](img/t2_step_steer.png)
 
 ![Coastdown under aero drag](img/t2_coastdown.png)
+
+### 3-D driver stability on `catalunya_osm`
+
+The full 3-D road frame runs on the real DEM-elevated `catalunya_osm`. Before the crest-unloading
+floor, the rigid `κ_v·v²` normal-load coupling drove the tyres over-light on the crests and spun the
+otherwise-planted closed loop mid-lap (left); with the floor the same lap completes and stays planted
+(right). Regenerate with `docs/derivations/plot_t2_3d_stability.py`.
+
+![Before/after: the 3-D lap spins on the raw vertical-curvature load, and completes with the crest-unloading floor](img/t2_3d_stability_trajectory.png)
+
+The mechanism: the raw road-normal load factor `g_normal/g` swings hard over the crests (and would go
+airborne at racing speed), collapsing grip until the yaw rate runs away; the floor bounds the
+*unloading* only where it bites, leaving normal running untouched, and the yaw rate stays bounded.
+
+![The road-normal load factor and yaw rate, before vs after](img/t2_3d_stability_mechanism.png)
+
+With both normal-load guards the three reference cars lap the elevated circuit within ≤0.2 % of their
+flat-plane time — the 3-D and flat driver-stability envelopes now coincide.
+
+![Flat vs 3-D lap time for the three reference cars](img/t2_3d_pace_parity.png)
 
 ## References
 
