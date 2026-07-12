@@ -79,6 +79,8 @@ the **two longest** paths — the short third path is the bypass/pit chord. The 
 closed loop (official GP layout 7004 m, i.e. within 0.13%). `spa` (flat TUMFTM, above) is the same
 circuit with zero elevation; `spa_osm` is the 3-D version.
 
+![Spa-Francorchamps 3-D import](../../docs/theory/img/spa_osm.png)
+
 ```sh
 cd python
 uv run --with requests python -m outlap.importers.osm_track --preset spa --out ../data/tracks/spa_osm
