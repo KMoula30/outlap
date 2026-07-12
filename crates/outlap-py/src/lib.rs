@@ -801,6 +801,11 @@ fn build_sim(
         r.entry("generator").or_insert(serde_json::Value::Null);
         r.entry("file").or_insert(serde_json::Value::Null);
     }
+    // `fz_coupling` is Option<FzCoupling> (None = tier-resolved auto), so the serialized base
+    // omits it too — inject a null so the documented `sim={"fz_coupling": "fixed_point"}` works.
+    if let Some(o) = value.as_object_mut() {
+        o.entry("fz_coupling").or_insert(serde_json::Value::Null);
+    }
     if let Some(patch) = sim_patch {
         merge_json(&mut value, &py_to_json(patch.as_any())?, "sim")?;
     }
