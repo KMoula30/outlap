@@ -6,6 +6,7 @@
 //! resolving the pit-bypass theta junction to the two-longest-path cycle (`osm_track._assemble_circuit`).
 //! This pins that the committed asset is the real circuit: closed, right length, with Spa's famous
 //! ~100 m of elevation change captured as *physical* grade and vertical curvature (not spline ringing).
+#![allow(clippy::similar_names)] // max_kv / max_kh are the paper's own symbols.
 
 use outlap_schema::io::FsLoader;
 use outlap_track::Track;
@@ -18,7 +19,10 @@ fn spa_osm() -> Track {
 #[test]
 fn spa_osm_is_a_sane_closed_circuit() {
     let t = spa_osm();
-    assert!(t.is_closed(), "the assembled Spa lap must be a closed circuit");
+    assert!(
+        t.is_closed(),
+        "the assembled Spa lap must be a closed circuit"
+    );
     // Official GP layout is 7004 m; the OSM centreline reproduces it to well within 1%.
     let len = t.length();
     assert!(

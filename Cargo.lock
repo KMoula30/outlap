@@ -1500,6 +1500,7 @@ dependencies = [
 name = "outlap-transient"
 version = "0.2.0"
 dependencies = [
+ "dhat",
  "num-traits",
  "outlap-core",
  "outlap-qss",

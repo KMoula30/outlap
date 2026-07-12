@@ -91,7 +91,9 @@ def main() -> None:
     fig.tight_layout()
     _OUT.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(_OUT, dpi=130)
-    print(f"wrote {_OUT}  (min-curv {t_mc:.3f} s, time-weighted {t_tw:.3f} s, {tw.iterations} iters)")
+    print(
+        f"wrote {_OUT}  (min-curv {t_mc:.3f} s, time-weighted {t_tw:.3f} s, {tw.iterations} iters)"
+    )
 
 
 if __name__ == "__main__":
