@@ -183,6 +183,9 @@ pub fn driver(t1: &T1Vehicle, spec: &Vehicle, road: RoadChannels, opts: &T2Optio
         ff_accel_scale: cfg.ff_accel_scale_mps2(),
         slip_limit: cfg.stability_slip_limit_rad(),
         slip_gain: cfg.stability_slip_gain(),
+        sideslip_damping: cfg.sideslip_damping(),
+        traction_slip_limit: cfg.traction_slip_limit(),
+        traction_slip_gain: cfg.traction_slip_gain(),
         integral_limit: opts.integral_limit,
         road,
     }

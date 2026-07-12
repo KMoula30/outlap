@@ -649,6 +649,14 @@
           ],
           "format": "double"
         },
+        "sideslip_damping": {
+          "description": "Sideslip-damping steer gain `k_β`, rad/rad — steers the heading back toward the velocity\nvector (`δ −= k_β·β`). This is the correction for a *translational* slide (the car crabbing\nwith near-zero yaw rate), which the yaw-rate damper cannot see.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "speed_ki": {
           "description": "Speed-loop integral gain `k_i`, pedal per (m/s·s).",
           "type": [
@@ -675,6 +683,22 @@
         },
         "stability_slip_limit_rad": {
           "description": "Sideslip magnitude at which the stability throttle-cut begins, rad.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "traction_slip_gain": {
+          "description": "Pedal-governor cut rate per unit of slip ratio past the limit.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "traction_slip_limit": {
+          "description": "Drive-wheel slip ratio at which the driver's pedal governor starts cutting throttle (the\nslip near the tire's force peak). With race gearing, low-gear torque is a multiple of the\ngrip limit; an ideal driver modulates the pedal against wheelspin.",
           "type": [
             "number",
             "null"

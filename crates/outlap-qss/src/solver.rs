@@ -314,7 +314,7 @@ impl GripModel for GgvGrip<'_> {
 /// The velocity-frame lateral demand `a_y` (signed; banking assists) and road-normal specific
 /// gravity `g_normal` (gravity's normal component + vertical-curvature `κ_n·v²`; aero load is already
 /// inside the envelope's speed dependence) at station `i`, speed `v`.
-fn demand_and_gn(p: &T0Path, i: usize, v: f64) -> (f64, f64) {
+pub(crate) fn demand_and_gn(p: &T0Path, i: usize, v: f64) -> (f64, f64) {
     let u = v * v;
     let ay_dem = p.kappa_l[i] * u + G * p.sin_b_cos_g[i];
     let gn = G * p.cos_b_cos_g[i] + p.kappa_n[i] * u;

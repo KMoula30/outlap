@@ -823,7 +823,7 @@ fn linspace(lo: f64, hi: f64, n: usize) -> Vec<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use outlap_schema::io::MemLoader;
     use outlap_schema::{load_vehicle, Conditions, LoadOptions};
@@ -832,7 +832,7 @@ mod tests {
 
     /// Assemble a rear-driven downforce car from an in-memory fixture (constant aero — the envelope
     /// generator does not need a ride-height map to exercise the trim boundary search).
-    fn sample_car() -> T1Vehicle {
+    pub(crate) fn sample_car() -> T1Vehicle {
         // Rev-limited at ≈12 000 rpm with a 9:1 ratio → a realistic ≈45 m/s top speed (so the v axis
         // does not span an implausible flat-torque range).
         let ptm = "schema: ptm/1.0\nkind: drive_unit\n\
@@ -855,7 +855,7 @@ mod tests {
         T1Vehicle::assemble(&rv, &Conditions::default(), &loader, false).unwrap()
     }
 
-    fn small_res() -> EnvelopeRes {
+    pub(crate) fn small_res() -> EnvelopeRes {
         EnvelopeRes {
             v_points: 6,
             ax_points: 7,
