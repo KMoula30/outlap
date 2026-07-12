@@ -1,13 +1,13 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # The outlap Guide
 
-**From zero to hero with the outlap vehicle simulator — v0.2.0**
+**From zero to hero with the outlap vehicle simulator — v0.2.5**
 
 outlap is an open-source, parametric vehicle simulator: you describe a car as data — an F1
 car, a GT car, or your daily driver — pick a real racetrack, and outlap computes how fast
 that car can physically get around it, wheel by wheel, watt by watt. This guide is the
 complete manual: it assumes almost no prior knowledge of vehicle dynamics or simulation and
-builds up, chapter by chapter, to everything the tool can do at version 0.2.0.
+builds up, chapter by chapter, to everything the tool can do at version 0.2.5.
 
 **How to read this guide.** The chapters are ordered as a course, but they also work as a
 reference:
@@ -23,14 +23,15 @@ reference:
   architecture, and the testing/validation machinery.
 - **Stuck?** Chapter 16 is a glossary of every term of art; Chapter 17 is the FAQ.
 
-The guide is a companion to — not a replacement for — three other resources in the repo: the
+The guide is a companion to — not a replacement for — two other resources in the repo: the
 executable notebooks in [`notebooks/`](../notebooks/README.md) (a guided tour in runnable
-form), the derivation-level theory pages in [`docs/theory/`](theory/), and the full
-architecture specification in [`docs/HANDOFF.md`](HANDOFF.md).
+form) and the derivation-level theory pages in [`docs/theory/`](theory/), which carry the
+equations and literature citations behind every model.
 
-This document describes **outlap v0.2.0** (milestone M3: the complete quasi-steady-state
-T0/T1 solver tier). Code is licensed AGPL-3.0-only, the published JSON Schemas in `schemas/`
-are Apache-2.0, and the vendored TUMFTM track centerlines are LGPL-3.0.
+This document describes **outlap v0.2.5**: the complete quasi-steady-state T0/T1 solver tier
+plus the first transient tier, T2 — a closed-loop, time-integrated lap with a driver model.
+Code is licensed AGPL-3.0-only, the published JSON Schemas in `schemas/` are Apache-2.0, and
+the vendored TUMFTM track centerlines are LGPL-3.0.
 
 ## Table of contents
 
@@ -41,14 +42,14 @@ are Apache-2.0, and the vendored TUMFTM track centerlines are LGPL-3.0.
 5. [Files and formats: schemas, maps, and tables](#5-files-and-formats-schemas-maps-and-tables)
 6. [Architecture: how the code is organized](#6-architecture-how-the-code-is-organized)
 7. [Physics I: tires and aerodynamics](#7-physics-i-tires-and-aerodynamics)
-8. [Physics II: solving a lap — T0, T1, and the g-g-g-v envelope](#8-physics-ii-solving-a-lap--t0-t1-and-the-g-g-g-v-envelope)
+8. [Physics II: solving a lap — T0, T1, T2, and the g-g-g-v envelope](#8-physics-ii-solving-a-lap--t0-t1-t2-and-the-g-g-g-v-envelope)
 9. [Physics III: powertrain, machine thermal, battery, and slow states](#9-physics-iii-powertrain-machine-thermal-battery-and-slow-states)
 10. [The Python API reference](#10-the-python-api-reference)
 11. [Importers and tooling](#11-importers-and-tooling)
 12. [The shipped data library](#12-the-shipped-data-library)
 13. [Validation, testing, and trust](#13-validation-testing-and-trust)
 14. [Recipes: worked examples](#14-recipes-worked-examples)
-15. [Limitations and roadmap](#15-limitations-and-roadmap)
+15. [Limitations, history, and roadmap](#15-limitations-history-and-roadmap)
 16. [Glossary](#16-glossary)
 17. [FAQ and troubleshooting](#17-faq-and-troubleshooting)
 
@@ -58,7 +59,7 @@ are Apache-2.0, and the vendored TUMFTM track centerlines are LGPL-3.0.
 
 *What you will learn: what outlap is and what problem it solves, the small set of design rules
 that shape everything in the codebase (one vehicle description, the input quartet, the powertrain
-firewall, clean-room physics, determinism), what actually ships in v0.2.0 — including its honest
+firewall, clean-room physics, determinism), what actually ships in v0.2.5 — including its honest
 gaps — and how the rest of this guide is organized so you can find your own path through it.*
 
 ### 1.1 A lap simulator where the car is data
@@ -98,17 +99,17 @@ the full Python API.
 
 Every number in this guide that looks like a measurement is computed by the shipped code from the
 shipped data. For example: on the 3D Catalunya import, the `f1_2026` reference car laps the
-centerline in 112.548 s and the generated racing line in 108.662 s — a 3.886 s gain from geometry
+centerline in 112.557 s and the generated racing line in 108.138 s — a 4.419 s gain from geometry
 alone (notebook `00_tour_of_outlap.ipynb`, committed outputs, re-executed in CI).
 
 ### 1.2 Design philosophy: one car, four tiers, nothing silent
 
-A handful of locked decisions (recorded in `docs/HANDOFF.md` §1, the log that overrides all other
-documentation) shape everything else you will meet in this guide:
+A handful of founding design rules shape everything else you will meet in this guide:
 
 **One vehicle description, every solver tier.** A lap solver can model a car at different levels
 of detail, called **tiers** in outlap: T0 treats the car as a single point of mass; T1 adds four
-wheels and load transfer; T2 and T3 (future) integrate the car's motion through time. All tiers
+wheels and load transfer; T2 integrates the car's motion through time with a driver model; T3
+(future) adds suspension degrees of freedom. All tiers
 read *the same* `vehicle.yaml` — there is no "T1 version" of a car, and no parameter that only
 one tier can see. That is what makes cross-tier validation meaningful (Chapter 8, Physics II).
 
@@ -128,7 +129,7 @@ decided while *loading* the files, never while *solving* the lap.
 parses the YAML, resolves inheritance (`extends:`), applies overrides, validates every field,
 checks the drivetrain topology, estimates missing derivable values, and hashes the resolved
 result. Anything estimated, inherited, or degraded is surfaced in a **loaded-model report** —
-"nothing silent" is a locked decision (#41), and `outlap.core.vehicle_report(...)` shows you the
+"nothing silent" is a founding rule, and `outlap.core.vehicle_report(...)` shows you the
 report for any car. The hot loop — the solver kernels that actually compute the lap — then runs
 with **zero heap allocations**, a property enforced in CI by an allocation-counting test harness
 (`crates/outlap-qss/tests/alloc.rs`), alongside a wall-clock gate that a full Catalunya lap
@@ -137,7 +138,7 @@ solves in under 50 ms in release builds.
 **Determinism.** The same inputs always produce the same lap. Fixed-step numerics, a fixed (not
 tolerance-driven) iteration count for the slow-state coupling, deterministic ordering even when
 the envelope generator runs in parallel — and settings that could change results, like the
-vertical-load coupling mode (`fz_coupling: one_step_lag | fixed_point`, Decision #29), are
+vertical-load coupling mode (`fz_coupling: one_step_lag | fixed_point`), are
 recorded on every result you get back (`lap.attrs["fz_coupling"]`).
 
 **Units and axes.** Internally everything is SI — meters, m/s, rad/s, newtons, newton-meters,
@@ -157,7 +158,7 @@ such toolchain (PDT) reads its raw HDF5 exports with `h5py` and writes `.ptm` fi
 are never committed to the repository (Chapter 11, Importers and tooling).
 
 There is exactly one documented exception, and it is worth knowing because you will see it cited
-in the code. **Decision #25 (as amended 2026-07-05)**: the machine *thermal* model — an N-node
+in the code: the machine *thermal* model — an N-node
 lumped-parameter thermal network (LPTN) that tracks winding, rotor, and housing temperatures and
 derates torque when they run hot — ports the PDT heat-transfer correlations (air-gap film,
 end-cavity and shaft convection, liquid-jacket channel) into `crates/outlap-thermal`. The crate's
@@ -188,70 +189,87 @@ Licensing is layered on purpose:
 | `data/` (reference vehicles, tires, tracks) | CC-BY-SA-4.0 |
 | Vendored TUMFTM track centerlines (`data/tracks/`) | LGPL-3.0 (upstream text shipped verbatim) |
 
-AGPL-3.0 was a deliberate choice (Decision #7): commercial use is fine, but always with open
+AGPL-3.0 was a deliberate choice: commercial use is fine, but always with open
 source code. Contributions require a DCO sign-off (`git commit -s`); see `CONTRIBUTING.md`.
 
-### 1.5 What ships in v0.2.0
+### 1.5 What ships in v0.2.5
 
-v0.2.0 is the milestone-M3 release. At a glance, working today:
+At a glance, working today:
 
-- **Two solver tiers.** T0, a point-mass forward/backward velocity-profile solver on the full 3D
-  road ribbon; and T1, a quasi-steady-state double-track solver with per-wheel loads that
+- **Three solver tiers.** T0, a point-mass forward/backward velocity-profile solver on the full
+  3D road ribbon; T1, a quasi-steady-state double-track solver with per-wheel loads that
   generates the **g-g-g-v envelope** — a precomputed map of the car's acceleration limits versus
-  speed — which T0 then consumes, giving near-T1 fidelity at T0 speed (Chapter 8).
+  speed — which T0 then consumes, giving near-T1 fidelity at T0 speed; and **T2, the transient
+  tier**: a 7-degree-of-freedom chassis integrated through time at 1 ms in a curvilinear 3D road
+  frame, with tire relaxation, an ideal preview driver, a gear-shift state machine, torque
+  vectoring, and regen blending — the car *driven* around the lap, not solved station by station
+  (Chapter 8).
 - **Tires.** A clean-room steady-state Magic Formula 6.1 implementation plus a simpler physical
-  brush model as the fallback tier, with a `.tir` file codec and a Python fitting pipeline
-  (Chapter 7).
+  brush model as the fallback tier, with a `.tir` file codec, a Python fitting pipeline, and
+  first-order slip relaxation (live in T2) (Chapter 7).
 - **Powertrain, thermal, battery.** The `.ptm`-map powertrain over a data-defined drivetrain
   topology graph; the N-node machine thermal network with torque derating; a battery
   equivalent-circuit model whose terminal voltage feeds back into the drive-unit maps (the
-  Vdc–SoC coupling), all marched as "slow states" along the lap (Chapter 9).
-- **Racing line.** A minimum-curvature quadratic-program line generator; the resulting line is a
-  first-class track you can lap.
+  Vdc–SoC coupling), all marched as "slow states" along the lap — and, at T2, charged and
+  discharged live through time (regen blending under braking, traction draw under power)
+  (Chapter 9).
+- **Racing lines.** Two quadratic-program line generators: the classic **minimum-curvature**
+  line, and the **time-weighted** line that re-weights the same QP by the time spent at each
+  station — the first step from "minimum curvature" toward "minimum time". Either result is a
+  first-class track you can lap (Chapters 8, 10).
 - **Data library.** 3 reference vehicles (`f1_2026`, `limebeer_2014_f1`, `tesla_model3_rwd` — an
   800 V "HV variant" study, deliberately not the ~360 V production car), 3 citation-backed tire
-  sets, and 26 track directories: 25 flat LGPL TUMFTM circuits plus `catalunya_osm`, the 3D
-  OSM+elevation reference Catalunya used by all notebooks and validation (Chapter 12).
+  sets, and 27 track directories: 25 flat LGPL TUMFTM circuits plus two 3D OSM+elevation
+  imports — `catalunya_osm`, the reference Catalunya used by the notebooks and validation, and
+  `spa_osm`, Spa-Francorchamps with its ~100 m of real elevation (Chapter 12).
 - **Importers.** OSM+DEM tracks, TUMFTM tracks, PDT HDF5 powertrains, `.tir` files (Chapter 11).
 - **Validation.** The Limebeer cross-check reproduces the published F1 top speed to −0.2%
   (87.8 vs ≈88 m/s) and corner apex speeds within 5%; the tire model matches an independent
   oracle to 0.289% worst-case — across every slip, load, camber and combined-slip sweep and
-  every force/moment channel — against a 0.5% CI gate (Chapter 13).
+  every force/moment channel — against a 0.5% CI gate; and the T2 tier's closed-loop operating
+  points are gated to stay inside the T1 grip envelope (hull containment, measured 0.0%
+  exceedance on all three reference cars) (Chapter 13).
 
 Representative numbers, all computed by the shipped code and reproduced elsewhere in this guide:
-the `f1_2026` reference car laps the 3D Catalunya in 112.548 s on the centerline and 108.662 s on
+the `f1_2026` reference car laps the 3D Catalunya in 112.557 s on the centerline and 108.138 s on
 the racing line (T0 and T1 agree — see §1.1 and Chapter 8), reaching about 2.5 g of lateral
 acceleration; the Model 3 HV-variant laps the same circuit's racing line in ≈149 s and the flat
 Nürburgring GP in ≈155 s (Chapter 3) at roughly 0.8 g, its lap time responding to drive-unit
 sizing, thermal derating, and pack-voltage sag.
 
-Just as important is what v0.2.0 does **not** contain — this guide will not pretend otherwise:
+Just as important is what v0.2.5 does **not** contain, or contains with honest caveats — this
+guide will not pretend otherwise:
 
-- **No transient tiers in v0.2.0.** Requesting `tier="t2"` or `"t3"` raises a typed "not implemented"
-  error. (On `main` since v0.2.0, `t2` has landed: a flat-track closed-loop transient lap through
-  `outlap.solve_transient_lap`. T3 arrives in M6.) The QSS-versus-transient parity gates are a
-  committed future check, not a current one.
+- **The T2 driver is stable, not competitive.** The transient tier's ideal driver tracks the
+  quasi-steady speed profile at a deliberate stability margin (~0.85 of the reference), so a T2
+  lap runs ~17% slower than the T0/T1 lap of the same car — and if pushed to the full profile it
+  spins. The T2 *physics* is validated (its operating points stay inside the T1 grip envelope);
+  its *pace* is limited by driver competence, not by the chassis or tires. An at-the-limit
+  driver is future work, and every T2 result records this margin (Chapters 8, 13).
+- **T3 does not exist.** Requesting `tier="t3"` (the 14-degree-of-freedom model with suspension)
+  raises a typed "not implemented" error.
 - **Tire thermal and wear are placeholders.** The `.tyr` files carry clearly-labelled synthetic
-  `thermal`/`wear` blocks; the real models are the M5 headline.
-- **ERS is a power cap.** The F1 car's deploy/harvest energy manager is M6; regenerated energy is
-  not yet fed back into the pack during a lap.
-- **`data/presets/` is empty** (class presets like `formula_base` are planned, Decision #41), and
-  the three plugin points (custom blocks, C-ABI tires, controllers) are a designed extension
-  mechanism, not shipped code.
-- Five of the thirteen crates (`outlap-powertrain`, `outlap-vehicle`, `outlap-batch`,
-  `outlap-transient`, `outlap-wasm`) are two-line placeholders reserving names for later
-  milestones.
+  `thermal`/`wear` blocks; the real models — a tire that heats, gains and loses grip, and wears —
+  are the next major physics addition (Chapter 15).
+- **ERS is a power cap plus regen.** Regenerated energy now flows back into the pack (blended
+  regen braking at T2, signed slow-state energy at T0/T1), but the F1-style deploy/harvest
+  *energy manager* — scheduling when to spend and when to save — is future work.
+- **`data/presets/` is empty** (class presets like `formula_base` are planned), and the three
+  plugin points (custom blocks, C-ABI tires, controllers) are a designed extension mechanism,
+  not shipped code.
+- Three of the thirteen crates (`outlap-powertrain`, `outlap-batch`, `outlap-wasm`) are two-line
+  placeholders reserving names for later work.
 
 ### 1.6 A map of the repository
 
 | Path | What lives there |
 |---|---|
-| `crates/` | The Rust workspace: 13 crates, 8 real (`outlap-core`, `-schema`, `-tire`, `-track`, `-thermal`, `-qss`, `-raceline`, `-py`) and 5 placeholders. Chapter 6 draws the full graph. |
+| `crates/` | The Rust workspace: 13 crates, 10 real (`outlap-core`, `-schema`, `-tire`, `-track`, `-thermal`, `-qss`, `-raceline`, `-vehicle`, `-transient`, `-py`) and 3 placeholders. Chapter 6 draws the full graph. |
 | `python/` | The Python package (`src/outlap/`), its tests, and `tools/` plotting/generation scripts. |
 | `schemas/` | The published JSON Schemas (Apache-2.0), generated from the Rust types and CI-checked. |
-| `data/` | The shipped library: `vehicles/`, `tires/`, `tracks/`, `presets/` (empty at v0.2.0). |
-| `notebooks/` | Companion notebooks `00`–`07`, committed with outputs and re-executed in CI. |
-| `docs/` | `HANDOFF.md` (the architecture spec and Locked Decisions log), `theory/` (7 cited physics pages), `validation/` (the Limebeer cross-check). |
+| `data/` | The shipped library: `vehicles/`, `tires/`, `tracks/`, `presets/` (empty at v0.2.5). |
+| `notebooks/` | Companion notebooks `00`–`09`, committed with outputs and re-executed in CI. |
+| `docs/` | `theory/` (the cited physics pages), `validation/` (the Limebeer cross-check and the QSS↔T2 parity evidence), `derivations/` (the symbolic chassis derivation CI checks against the Rust code). |
 | `tools/` | `goldens/` — provenance and regeneration rules for the external-oracle tire golden files. |
 | `CLAUDE.md`, `CONTRIBUTING.md`, `CHANGELOG.md` | The working agreement, contribution rules (DCO, clean-room), and the git-cliff changelog. |
 
@@ -381,11 +399,11 @@ One more real-world wrinkle: $\mu$ also depends on the road surface. Grip varies
 
 #### 2.2.4 What the tire model knows — and does not, yet
 
-Real tire grip also depends on inflation pressure, temperature, and wear. It is worth knowing exactly where outlap v0.2.0 stands on each, because the `.tyr` file format already has fields for all three:
+Real tire grip also depends on inflation pressure, temperature, and wear. It is worth knowing exactly where outlap v0.2.5 stands on each, because the `.tyr` file format already has fields for all three:
 
 - **Pressure** is live. MF6.1 includes the Besselink et al. (2010) inflation-pressure terms, and the QSS solvers evaluate every tire at its cold set pressure — the `thermal.p_cold` field of the `.tyr` file (in kPa there, converted to Pa at the boundary; 220 kPa for the Model 3 tire). Changing it genuinely changes grip *if* the coefficient set carries pressure terms — the Model 3's book tire is a 2006-era set without the `PP*` coefficients, so it is pressure-insensitive; its file header documents exactly that.
 - **Camber** is accepted by the tire kernels, but the T1 trim currently evaluates all four wheels at zero camber — a simplification recorded in the assembly notes ("camber maps land later").
-- **Temperature and wear** are future physics: the `.tyr` `thermal:` and `wear:` blocks are required by the schema and every shipped dataset carries clearly labelled synthetic placeholders, but no shipped solver consumes them yet (the thermal ring and wear/cliff models are milestone M5 — Chapter 15). Until then, outlap's tires are always "cold" and new.
+- **Temperature and wear** are future physics: the `.tyr` `thermal:` and `wear:` blocks are required by the schema and every shipped dataset carries clearly labelled synthetic placeholders, but no shipped solver consumes them yet (the thermal ring and wear/cliff models are the next major physics addition — Chapter 15). Until then, outlap's tires are always "cold" and new.
 
 ### 2.3 Why load transfer matters
 
@@ -500,19 +518,19 @@ The solver above never asks *how the car gets from one state to the next*. It as
 What QSS deliberately ignores is everything with its own settling time:
 
 - **Yaw, roll, and pitch dynamics.** A real car takes a few tenths of a second to take its "set" in a corner; QSS teleports between equilibria.
-- **Tire relaxation.** A tire's force lags its slip: it must roll a characteristic distance (the **relaxation length**, on the order of the tire radius) before the force builds. outlap ships the exact-exponential lag update in `crates/outlap-tire/src/relax.rs`, but nothing calls it in production yet — QSS uses steady-state forces by definition.
+- **Tire relaxation.** A tire's force lags its slip: it must roll a characteristic distance (the **relaxation length**, on the order of the tire radius) before the force builds. outlap ships the exact-exponential lag update in `crates/outlap-tire/src/relax.rs`; the QSS tiers use steady-state forces by definition, and the T2 tier integrates the lag live.
 - **Dampers and drivers.** Shock absorbers only matter when the suspension is moving; a driver model only matters when inputs evolve in time.
 
-A **transient** simulation integrates the equations of motion through time with a fixed-step integrator, capturing all of the above at much higher cost. (The plumbing is already visible in `sim.yaml`: the `dt_s` timestep, default 0.001 s, and the `integrator` choice, Heun by default or classical RK4, exist for the transient tiers — today they are recorded but unused.) Neither approach is "more correct" for every question:
+A **transient** simulation integrates the equations of motion through time with a fixed-step integrator, capturing all of the above at much higher cost. That is outlap's **T2 tier**: the `dt_s` timestep (default 0.001 s) and the `integrator` choice in `sim.yaml` (Heun by default or classical RK4) drive its fixed-step loop. Neither approach is "more correct" for every question:
 
-| | QSS (outlap today) | Transient (outlap T2/T3, future) |
+| | QSS (T0/T1) | Transient (T2) |
 |---|---|---|
-| Answers | lap time, speed profile, grip usage, balance trends | stability, curb strikes, damper tuning, driver-in-the-loop |
-| Assumes | equilibrium at every point | only the model equations |
-| Cost | milliseconds per lap | seconds-to-minutes per lap |
-| Great for | "what does 10 kg or 5% more downforce cost?" — errors largely cancel between variants | "is this setup drivable at the limit?" |
+| Answers | lap time, speed profile, grip usage, balance trends | steering, yaw, sideslip, shift events, transient wheel loads — the *traces* |
+| Assumes | equilibrium at every point | only the model equations (plus a driver to close the loop) |
+| Cost | milliseconds per lap | seconds per lap |
+| Great for | "what does 10 kg or 5% more downforce cost?" — errors largely cancel between variants | "what does the car *do* between the corners?" — the time-domain story |
 
-One honest caveat: outlap's QSS envelope boundary is not filtered for open-loop stability. A trim state can balance all forces yet be a knife-edge no driver could hold; that filtering is explicitly deferred to the transient tiers (`docs/theory/ggv-envelope.md`).
+One honest caveat: outlap's QSS envelope boundary is not filtered for open-loop stability. A trim state can balance all forces yet be a knife-edge no driver could hold; the T2 tier makes this concrete — its driver deliberately keeps a stability margin below the QSS profile, because tracking the raw profile spins the car (`docs/theory/ggv-envelope.md`; Chapter 8).
 
 Slowly evolving quantities sit in a middle ground. Over a lap, a battery's state of charge and a motor's winding temperature drift monotonically rather than oscillate, so outlap treats them as **slow states** marched along the QSS profile with a bounded outer iteration (solve the profile → march the slow states along it → re-solve). An overheating drive unit or a power-capped battery then feeds back on lap speed without a transient solver. Chapter 9, Physics III, covers this coupling.
 
@@ -532,19 +550,20 @@ Its `trim` solver answers one question: for a commanded operating point $(v, a_y
 
 outlap names its solver fidelity levels **tiers**, selected by a single field: `tier` in `sim.yaml`, or the `tier=` argument in Python. A hard project rule (Chapter 6, Architecture) is that **every tier evaluates the same vehicle description** — there is no "T0 config" versus "T1 config", only one `vehicle.yaml` read at different fidelity. The enum lives in `crates/outlap-schema/src/sim.rs`; the dispatch in `crates/outlap-qss/src/qss.rs`.
 
-| Tier | What it is | Model class | Status in v0.2.0 |
+| Tier | What it is | Model class | Status in v0.2.5 |
 |---|---|---|---|
 | `t0` | Point-mass velocity profile on the g-g-g-v envelope | point-mass | shipped |
 | `t1` | The *same* velocity profile, plus a per-station double-track re-trim | quasi-static double-track | shipped — **the default** |
-| `t2` | Transient double-track | transient | future (milestone M4) — typed error today |
-| `t3` | Full transient with a driver model | transient | future (M6) — typed error today |
+| `t2` | Closed-loop transient double-track with an ideal driver | transient | shipped — time-indexed, own entry point |
+| `t3` | 14-degree-of-freedom transient (suspension, unsprung mass) | transient | future — typed error today |
 
 Details worth knowing from day one:
 
-- **T0 and T1 produce the same lap time.** At v0.2.0 both run the identical velocity-profile solve on the envelope. `t1` then revisits every station and re-trims the double-track model at the solved operating point, emitting per-wheel channels — `vertical_load_n`, `slip_ratio`, `slip_angle_rad`, `force_long_n`, `force_lat_n` over a `wheel` dimension ordered `FL/FR/RL/RR` — plus the setup metrics `understeer_gradient` and `aero_front_share`. A `t0` lap gives you the point-mass channels only.
+- **T0 and T1 produce the same lap time.** Both run the identical velocity-profile solve on the envelope. `t1` then revisits every station and re-trims the double-track model at the solved operating point, emitting per-wheel channels — `vertical_load_n`, `slip_ratio`, `slip_angle_rad`, `force_long_n`, `force_lat_n` over a `wheel` dimension ordered `FL/FR/RL/RR` — plus the setup metrics `understeer_gradient` and `aero_front_share`. A `t0` lap gives you the point-mass channels only.
 - Because the envelope is *generated by* the T1 trim solver, even a `t0` lap assembles the double-track model once. Envelope generation is a seconds-scale cold step, cached per car and settings within a session; the sub-50 ms figure is the solve itself.
 - Internally there is also a degenerate constant-$\mu$ ellipse path — the closed-form T0 of Section 2.6's anchors — kept as the analytic and performance test target. The production `t0` you reach from Python always runs on the envelope.
-- Requesting `t3` fails loudly with a typed "not implemented yet (arrives in M6)" error rather than silently downgrading. Since v0.2.0, `t2` runs the transient tier: it is *time*-indexed rather than arc-length-indexed, so it has its own entry point (`solve_transient_lap`, or `solve_lap_dataset(..., tier="t2")`), and it runs flat-track only until the closed loop through the chassis grade/banking terms is gated.
+- **T2 is *time*-indexed rather than arc-length-indexed** — it integrates the car through time, so it has its own entry point (`solve_transient_lap`, or `solve_lap_dataset(..., tier="t2")`) and returns a dataset over `time` rather than `s`. It runs the full 3D road frame (grade, banking, vertical curvature) or flat-track analysis mode, like the QSS tiers. Its lap is deliberately slower than T0/T1: the driver tracks the QSS profile at a stability margin (§8.7).
+- Requesting `t3` fails loudly with a typed "not implemented" error rather than silently downgrading.
 
 Every result records the tier that produced it, alongside every simplification made during assembly — degraded aero, estimated parameters, brush-tire fallbacks — in its notes. "Nothing silent" is a design rule, not a slogan (Chapter 4).
 
@@ -552,7 +571,7 @@ Every result records the tier that produced it, alongside every simplification m
 
 Everything above took the path as given — but *which* path? A track file describes a corridor: a **centerline** plus left/right widths per station (`track.yaml` + `centerline.csv`; Chapter 5). Drivers do not follow the centerline. They use the full width to straighten each corner — out-in-out — because a larger radius at the same grip means a higher $v = \sqrt{a_y R}$. The chosen path is the **racing line**, and it changes lap time a lot.
 
-The true racing line is the *time-optimal* one — a genuinely hard optimal-control problem (the Perantoni & Limebeer 2014 study outlap validates against solves exactly that). outlap v0.2.0 ships the standard first approximation: the **minimum-curvature line**, a quadratic program over lateral offset within the corridor that minimizes $\int \kappa^2\, ds$ — geometrically, the "straightest possible" path. It is the default `sim.raceline` generator (`min_curvature`; you may instead supply your own line as a CSV file), and every result records which line it ran on in its `LineDescriptor` (`Centerline`, `MinCurvature`, or `File`).
+The true racing line is the *time-optimal* one — a genuinely hard optimal-control problem (the Perantoni & Limebeer 2014 study outlap validates against solves exactly that). outlap ships the standard first approximation — the **minimum-curvature line**, a quadratic program over lateral offset within the corridor that minimizes $\int \kappa^2\, ds$, geometrically the "straightest possible" path — plus its refinement, the **time-weighted line**, which re-weights the same QP by the time spent at each station and closes part of the min-curvature-versus-min-time gap (Chapters 8, 10; notebook 03 compares them). `min_curvature` is the default `sim.raceline` generator (`time_weighted` and a user-supplied CSV are the alternatives), and every result records which line it ran on in its `LineDescriptor` (`Centerline`, `MinCurvature`, `TimeWeighted`, or `File`).
 
 The centerline itself remains useful: it is deterministic, generator-free, and ideal for comparing tracks or cross-checking importers, so the Python API accepts either a plain `Track` (a lap of its centerline) or a generated `Raceline` as the `line` argument of `solve_lap_dataset` (Chapter 10).
 
@@ -1096,7 +1115,7 @@ This is outlap's versatility surface. There is no `layout: rwd` enum; instead th
 - Couplers are externally tagged YAML: `{gearbox: {...}}`, `{diff: {...}}`, or `{fixed_ratio: 2.4}`.
 - A `gearbox` has `ratios:` (index 0 = first gear), `final_drive`, `shift_time_s`, and an `efficiency` that defaults to a constant 0.985 (or can be a `{map: ...}` reference).
 - A `diff` (differential — the device that lets left and right wheels turn at different speeds) has `type:` one of `open | locked | lsd | solid`. For `lsd` (limited-slip) and `locked`, `preload_nm` is conditionally required; `ramp: [accel, decel]` is LSD-only.
-- A defaulted `control:` block carries static torque splits and a torque-vectoring flag (`ΔM_z = k_yaw · (r_target − r)` yaw-moment control, an M4 runtime feature — the schema accepts it today and topology-checks it).
+- A defaulted `control:` block carries static torque splits and a torque-vectoring flag (`ΔM_z = k_yaw · (r_target − r)` yaw-moment control, executed live by the T2 tier's control layer — Chapter 8).
 
 The Model 3 is the simplest real topology — one drive unit through an open diff to the rear wheels. The F1 car shows a fuller one (`data/vehicles/f1_2026/vehicle.yaml`):
 
@@ -1117,7 +1136,7 @@ Because a lumped `drive_unit` `.ptm` already includes its gearbox ratio, the loa
 
 #### 4.2.6 `ers` — the hybrid energy-recovery block (optional)
 
-The F1 car carries the full block: `mgu_k:` (a `.ptm` for the motor-generator unit), `es:` (energy store capacity in MJ plus an allowed state-of-charge window), `deployment:` (a power limit in kW with a taper-vs-speed table), an optional `override_mode:`, and `recovery:` limits. Two fields are estimable: `deployment.per_lap_deploy_mj` (defaults to the full usable capacity) and `override_mode.extra_energy_per_lap_mj` (defaults to 0). At v0.2 the ERS is enforced as a power cap; the per-lap energy manager is the M6 milestone (Chapter 9, Physics III, and Chapter 15, Limitations and roadmap).
+The F1 car carries the full block: `mgu_k:` (a `.ptm` for the motor-generator unit), `es:` (energy store capacity in MJ plus an allowed state-of-charge window), `deployment:` (a power limit in kW with a taper-vs-speed table), an optional `override_mode:`, and `recovery:` limits. Two fields are estimable: `deployment.per_lap_deploy_mj` (defaults to the full usable capacity) and `override_mode.extra_energy_per_lap_mj` (defaults to 0). At v0.2.5 the ERS is enforced as a power cap; the per-lap deploy/harvest energy manager is future work (Chapter 9, Physics III, and Chapter 15, Limitations and roadmap).
 
 #### 4.2.7 `battery` — a selector plus a reference
 
@@ -1161,7 +1180,7 @@ One caveat for v0.2: the mechanism is fully implemented and tested, but the ship
 
 #### Dotted-path overrides — the what-if API
 
-Programmatic overrides never edit files. You pass dotted paths (Decision #35), applied *after* the merge and *before* validation, so an overridden value goes through exactly the same checks as a hand-written one:
+Programmatic overrides never edit files. You pass dotted paths, applied *after* the merge and *before* validation, so an overridden value goes through exactly the same checks as a hand-written one:
 
 ```python
 lap = solve_lap(
@@ -1210,7 +1229,7 @@ estimated:
   ... (and the same five for /suspension/rear, at 50 mm)
 ```
 
-Two honest footnotes. First, `allow_degraded: true` in `sim.yaml` is the project's *single* documented fallback path — it permits documented-fallback combinations and marks the results (Decision #40); it is threaded from the sim settings into solver assembly. Second, at v0.2 the load-time `degraded` list is a contract-level placeholder: no degraded combination is populated during loading yet (`crates/outlap-schema/src/load/mod.rs` carries the literal note "`allow_degraded` recorded here once degraded combos exist"), so you will only see the flag's effects at assembly/solve time.
+Two honest footnotes. First, `allow_degraded: true` in `sim.yaml` is the project's *single* documented fallback path — it permits documented-fallback combinations and marks the results; it is threaded from the sim settings into solver assembly. Second, at v0.2 the load-time `degraded` list is a contract-level placeholder: no degraded combination is populated during loading yet (`crates/outlap-schema/src/load/mod.rs` carries the literal note "`allow_degraded` recorded here once degraded combos exist"), so you will only see the flag's effects at assembly/solve time.
 
 ### 4.5 Validation and the error experience
 
@@ -1264,11 +1283,11 @@ meta:
 
 The geometry lives in `centerline.csv`: eight required, header-named, order-independent columns — `s_m, x_m, y_m, z_m, banking_deg, width_left_m, width_right_m, grip_scale` — where `s_m` is arc length along the centerline, `x/y/z` are 3D coordinates, the widths give the drivable corridor either side, and `grip_scale` locally scales friction. `#` comment lines and blanks are skipped. Validation gives 1-based line numbers, a did-you-mean on missing columns, and checks strictly-increasing `s_m`, finite coordinates, and positive widths and grip (`crates/outlap-schema/src/centerline.rs`). The actual spline fit, curvature, grade, and road frame are built downstream by the `outlap-track` crate.
 
-The repository ships 26 circuits: 25 flat 2-D circuits vendored from the TUMFTM racetrack-database (LGPL-3.0 data, `accuracy_class: C`) plus `catalunya_osm`, the 3D OSM+DEM reference used by all notebooks and the validation cross-check. Careful: `catalunya` (flat TUMFTM) and `catalunya_osm` (3D reference) are the *same circuit from two sources* — the notebooks and validation all use `catalunya_osm`. Full inventory in Chapter 12; the importers in Chapter 11.
+The repository ships 27 circuits: 25 flat 2-D circuits vendored from the TUMFTM racetrack-database (LGPL-3.0 data, `accuracy_class: C`) plus two 3D OSM+DEM imports — `catalunya_osm`, the reference used by all notebooks and the validation cross-check, and `spa_osm`, the elevation showcase (~100 m of climb). Careful: `catalunya`/`catalunya_osm` and `spa`/`spa_osm` are the *same circuits from two sources* — flat TUMFTM versus 3D OSM+DEM. Full inventory in Chapter 12; the importers in Chapter 11.
 
 ### 4.7 `conditions.yaml` — same track, different day
 
-Conditions capture the session environment (Locked Decision #46). Every field has a full ISA default — ISA is the International Standard Atmosphere, 20 °C and 1013.25 hPa here, with still air — so the entire file is optional (`crates/outlap-schema/src/conditions.rs`). The fields (note the deliberate °C/hPa display-boundary units):
+Conditions capture the session environment — never car identity, never numerics. Every field has a full ISA default — ISA is the International Standard Atmosphere, 20 °C and 1013.25 hPa here, with still air — so the entire file is optional (`crates/outlap-schema/src/conditions.rs`). The fields (note the deliberate °C/hPa display-boundary units):
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1276,7 +1295,7 @@ Conditions capture the session environment (Locked Decision #46). Every field ha
 | `air.pressure_hpa` | 1013.25 | absolute pressure, hPa (> 0) |
 | `wind.speed_mps` | 0.0 | constant wind speed, m/s (≥ 0; a single vector in v1) |
 | `wind.direction_deg` | 0.0 | meteorological convention — the direction the wind blows *from*: 0 = North, 90 = East |
-| `track_surface_c` | 20.0 | track surface temperature, °C — the tire thermal boundary $T_\text{road}$ (consumed once the M5 tire thermal model lands; Chapter 15) |
+| `track_surface_c` | 20.0 | track surface temperature, °C — the tire thermal boundary $T_\text{road}$ (consumed once the tire thermal model lands; Chapter 15) |
 | `ambient_c` | 20.0 | thermal-model ambient, °C — consumed by the `.emotor` machine-thermal network unless the emotor's own `cooling.ambient_fixed_c` overrides it |
 
 A complete example from the test fixtures (`crates/outlap-schema/tests/fixtures/conditions/hot_dry.conditions.yaml`):
@@ -1299,7 +1318,7 @@ From Python you can patch conditions per call without a file — `solve_lap(...,
 
 ### 4.8 `sim.yaml` — numerics and solver settings
 
-The sim document configures *how* to solve, never *what* is being solved (Locked Decision #42). Every field is defaulted, and the **resolved** settings are embedded in every result artifact, so a result always records how it was produced. The full field set (`crates/outlap-schema/src/sim.rs`), shown here as the complete fixture `crates/outlap-schema/tests/fixtures/sim/qss.sim.yaml`, which spells out every default:
+The sim document configures *how* to solve, never *what* is being solved. Every field is defaulted, and the **resolved** settings are embedded in every result artifact, so a result always records how it was produced. The core field set (`crates/outlap-schema/src/sim.rs`), shown here as the committed fixture `crates/outlap-schema/tests/fixtures/sim/qss.sim.yaml` (the transient-tier numerics knobs `slow_decimation` and `fixed_point` take their defaults and are not repeated in it; §10.4.4 lists them):
 
 ```yaml
 schema: sim/1.1
@@ -1319,11 +1338,11 @@ flat_track: false
 
 Field by field:
 
-- **`tier`** — the solver fidelity: `t0` (point-mass with constant friction and a power cap), `t1` (the default: quasi-steady-state lap on the g-g-g-v envelope), `t2` (transient double-track), `t3` (full transient with a driver model). The same vehicle description drives all tiers — hard rule #4. At v0.2, `t2`/`t3` raise a typed "not implemented" error (they land in M4/M6); see Chapter 8, Physics II, for what T0 and T1 actually compute.
-- **`dt_s`** (default 0.001 s) and **`integrator`** (`heun`, explicit trapezoidal 2nd order, or `rk4`) — the fixed integration step and scheme for the *transient* tiers; recorded now, exercised when T2 lands. Fixed-step only, by the determinism rules.
-- **`fz_coupling`** (default `one_step_lag`) — the vertical-load algebraic loop mode (Decision #29). Tire forces depend on vertical loads, which depend on load transfer, which depends on the very accelerations the tire forces produce — an algebraic loop. `one_step_lag` breaks it by using the previous step's normal loads; `fixed_point` instead iterates a damped fixed-point to convergence within the step. Both are deterministic; the choice is a recorded simulation setting, and a property test pins that they agree at convergence. Physics details in Chapter 8.
+- **`tier`** — the solver fidelity: `t0` (point-mass with constant friction and a power cap), `t1` (the default: quasi-steady-state lap on the g-g-g-v envelope), `t2` (closed-loop transient double-track — time-indexed, so it returns through its own entry point), `t3` (the 14-DOF suspension model). The same vehicle description drives all tiers — hard rule #4. At v0.2.5, `t3` raises a typed "not implemented" error; see Chapter 8, Physics II, for what each shipped tier actually computes.
+- **`dt_s`** (default 0.001 s) and **`integrator`** (`heun`, explicit trapezoidal 2nd order, or `rk4`) — the fixed integration step and scheme for the transient T2 tier's split integrator. Fixed-step only, by the determinism rules.
+- **`fz_coupling`** (unset by default — resolved per tier: `one_step_lag` for T0/T1, `fixed_point` for T2; the resolved value is recorded on every result) — the vertical-load algebraic loop mode. Tire forces depend on vertical loads, which depend on load transfer, which depends on the very accelerations the tire forces produce — an algebraic loop. `one_step_lag` breaks it by using the previous step's normal loads; `fixed_point` instead iterates a damped fixed-point to convergence within the step. Both are deterministic; the choice is a recorded simulation setting, and a property test pins that they agree at convergence. Physics details in Chapter 8.
 - **`envelope`** — the sampling resolution of the g-g-g-v performance envelope the QSS tiers precompute: 40 speed × 25 longitudinal-acceleration × 7 normal-g points by default. Semantic floors: `v_points ≥ 2`, `ax_points ≥ 2`, `g_normal_points ≥ 1`. A coarse grid such as `{"v_points": 8, "ax_points": 7, "g_normal_points": 2}` is the shipped notebooks' idiom for cheap parameter sweeps.
-- **`raceline`** — exactly one of `generator:` (v1 ships only `min_curvature`, a quadratic program over lateral offset minimizing $\int \kappa^2\,\mathrm{d}s$ on the 3D ribbon) or `file:` (your own line as an s-based CSV). Setting both, or neither, is a semantic error.
+- **`raceline`** — exactly one of `generator:` (`min_curvature` or `time_weighted`, a quadratic program over lateral offset minimizing $\int \kappa^2\,\mathrm{d}s$ on the 3D ribbon) or `file:` (your own line as an s-based CSV). Setting both, or neither, is a semantic error.
 - **`allow_degraded`** (default `false`) — the single documented fallback escape hatch; degradations are recorded in the result metadata (§4.4).
 - **`flat_track`** (default `false`, added in `sim/1.1`) — zero the track's grade, banking, and vertical curvature so the 3D envelope collapses to a flat g-g diagram. This is the 2-D oracle-comparison mode used by the Limebeer validation cross-check (Chapter 13); the physical track file is left untouched, and the flag is recorded in the results.
 
@@ -1412,7 +1431,7 @@ Field by field:
 - **`kind`** is one of `electric_machine` (torque at the machine's own shaft; a downstream gear ratio may apply), `ice` (internal-combustion engine), or `drive_unit` (machine + inverter + gearbox lumped at the wheel-side shaft — the drivetrain topology must *not* apply another ratio unless `meta.upstream_ratio_applied: false`).
 - **`axes`** declares the grid. `speed_rpm` is the shaft-speed axis (rpm is a file-format boundary unit; internally everything is rad/s). `load_axis` is written as either `{torque_nm: [...]}` or `{load_fraction: [...]}` — a load fraction runs −1..1 where negative is the regeneration (braking-recovery) quadrant. `vdc_v` is the optional **DC-link voltage axis introduced by `ptm/1.1`**: when present, the sidecar tables become a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor and the solver evaluates them at the battery's state-of-charge-dependent terminal voltage (Chapter 9). It needs at least two strictly ascending breakpoints. When absent the map is single-voltage, measured at the scalar `meta.dc_voltage_v`.
 - **`tables`** points at the numeric sidecar (§5.8) and declares its columns: `efficiency` (default `true`; values 0..1 covering drive *and* regen quadrants) and `loss_w` (default `false`; a total power-loss column in watts, which must be consistent with efficiency if both are given). The shipped `du_medium.maps.parquet` is a long/tidy table of 210 rows = 7 speeds × 10 torques × 3 voltages with columns exactly `[speed_rpm, torque_nm, vdc_v, efficiency, loss_w]`. Per-component loss columns (winding loss vs iron loss, say) are a hook in the format — the `.emotor` loss routing can name a component column — but in v0.2 the lap loop only consumes total `loss_w`.
-- **`limits`**: only `max_torque_nm_vs_speed` (the peak torque envelope, paired equal-length arrays) is required — it is what caps traction. `cont_torque_nm_vs_speed`, `overload`, and `drag_torque_nm_vs_speed` are optional *validation references*, not the derating mechanism: sustained thermal capability is computed by the `.emotor` model from the loss tables (Locked Decision #25).
+- **`limits`**: only `max_torque_nm_vs_speed` (the peak torque envelope, paired equal-length arrays) is required — it is what caps traction. `cont_torque_nm_vs_speed`, `overload`, and `drag_torque_nm_vs_speed` are optional *validation references*, not the derating mechanism: sustained thermal capability is computed by the `.emotor` model from the loss tables.
 - **`inertia_kgm2` / `mass_kg`**: rotational inertia referred to this map's shaft, and the mass attributed to the unit (which also feeds the `.emotor` mass heuristics, §5.4).
 
 **The ICE variant** is supported from day one with the same schema. `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml` is a synthetic 1.6 L V6 (`kind: ice`, `schema: ptm/1.0`) with a torque-axis load and a negative `drag_torque_nm_vs_speed` curve for engine braking. For an ICE the sidecar `efficiency` column is brake thermal efficiency, and the runtime converts source power to a fuel-mass rate using a lower heating value of 43 MJ/kg (see Chapter 9).
@@ -1423,8 +1442,8 @@ A `.tyr` file (named `<name>.tyr.yaml`) describes one tire. Five blocks: `mf61`,
 
 - **`mf61`** is a flat map of Magic Formula 6.1 coefficients — the industry-standard empirical tire model (Pacejka 2012) — keyed by their standard `.tir` names (`FNOMIN`, `PCX1`, `PKY1`, ...). This is a deliberate design choice: the coefficient names are the interchange vocabulary of tire data, so outlap validates them as a keyed map rather than inventing ~150 renamed fields. Two structural keys are always required: `FNOMIN` (nominal load, N) and `UNLOADED_RADIUS` (m). The eight-coefficient pure-slip force core `PCX1, PDX1, PEX1, PKX1, PCY1, PDY1, PEY1, PKY1` is required *unless* a `brush:` block supplies the force model instead. Unknown coefficient names are **warnings** with a did-you-mean hint, carried through unvalidated — unlike unknown schema *fields*, which are hard errors. Absent optional coefficients fall back to documented defaults and absent whole families degrade gracefully (no `QSX*` → overturning moment ≡ 0, and so on), each degradation logged in the loaded-model report.
 - **`brush`** (requires `schema: tyr/1.1`) is the four-parameter physical fallback model: `c_kappa_n`, `c_alpha_n_per_rad`, `mu0`, `patch_half_length_m`, plus `pressure_profile: parabolic` (the only option). Declaring a brush block in a `tyr/1.0` file is a warning, not an error.
-- **`thermal`** has 15 named fields for the M5 tire-temperature model. In v0.2 all of them are inert placeholders *except one*: `p_cold`, the cold inflation pressure, which is the solve-time operating pressure. **Unit trap: `p_cold` is in kPa** (a `.tir`-lineage convention), converted to Pa at the code seam. `t_cold` is in °C.
-- **`wear`** (10 fields) is entirely reserved for the M5 wear/cliff model; shipped datasets carry clearly labelled synthetic placeholders.
+- **`thermal`** has 15 named fields for the planned tire-temperature model. In v0.2.5 all of them are inert placeholders *except one*: `p_cold`, the cold inflation pressure, which is the solve-time operating pressure. **Unit trap: `p_cold` is in kPa** (a `.tir`-lineage convention), converted to Pa at the code seam. `t_cold` is in °C.
+- **`wear`** (10 fields) is entirely reserved for the planned wear/cliff model; shipped datasets carry clearly labelled synthetic placeholders.
 - **`provenance`** is required and is how tire data stays honest: `citation` (the literature source of the coefficients), `source` (a human-readable note), and `synthetic: bool` (default `false`).
 
 The Model 3's road tire (`data/vehicles/tesla_model3_rwd/tyr/road.tyr.yaml`) is a nice worked example — it is a verbatim transcription of the published Pacejka (2006) 205/60R15 book tire:
@@ -1440,7 +1459,7 @@ mf61:
   PDX1: 1.210
   # ... ~50 more coefficients ...
 thermal:
-  # SYNTHETIC placeholder — the thermal ring model lands in M5.
+  # SYNTHETIC placeholder — the thermal ring model is a future physics addition.
   p_cold: 220.0        # kPa (load-bearing today: the solve-time pressure)
   t_cold: 20.0
   # ...
@@ -1609,7 +1628,7 @@ A *missing* sidecar is a skip-with-a-note (the constant-aero or peak-envelope fa
 
 ### 5.9 One interpolant for every map
 
-Tabulated data only becomes a continuous function through *interpolation* — estimating values between grid points. outlap has exactly **one** interpolation policy for every gridded map (Locked Decision #30): monotone cubic Hermite, in `crates/outlap-core/src/interp.rs` (1-D, `MonotoneCubic`) and `crates/outlap-core/src/gridmap.rs` (N-D tensor product, `GriddedMapN`, up to `MAX_DIMS = 6` axes). Powertrain efficiency, aero coefficients, battery ECM tables, torque envelopes, the track's per-station data channels — all of them go through this same code. Uniformity here is a correctness feature: no map behaves differently from another, and no solver needs to know which file its numbers came from.
+Tabulated data only becomes a continuous function through *interpolation* — estimating values between grid points. outlap has exactly **one** interpolation policy for every gridded map: monotone cubic Hermite, in `crates/outlap-core/src/interp.rs` (1-D, `MonotoneCubic`) and `crates/outlap-core/src/gridmap.rs` (N-D tensor product, `GriddedMapN`, up to `MAX_DIMS = 6` axes). Powertrain efficiency, aero coefficients, battery ECM tables, torque envelopes, the track's per-station data channels — all of them go through this same code. Uniformity here is a correctness feature: no map behaves differently from another, and no solver needs to know which file its numbers came from.
 
 A cubic Hermite interpolant fits, on each grid interval, a cubic polynomial through the two endpoint values $y_k$ and endpoint slopes $m_k$:
 
@@ -1656,7 +1675,7 @@ and installing a Vdc-stacked map records a note in the loaded-model notes — "e
 | `conditions.yaml` | `conditions/1.0` | Environment: air temperature/pressure, wind, track surface and ambient temperatures (all defaulted) | — |
 | `sim.yaml` | `sim/1.1` | Numerics: tier, dt, integrator, envelope grid, raceline source, `allow_degraded`, `flat_track` (all defaulted) | — |
 | `*.ptm.yaml` | `ptm/1.0` / `ptm/1.1` | Neutral powertrain map: kind, speed/load(/Vdc) axes, torque limits, inertia, mass | `*.maps.parquet` (`efficiency`, `loss_w`) |
-| `*.tyr.yaml` | `tyr/1.0` / `tyr/1.1` | Tire: MF6.1 coefficients (`.tir` names), optional brush block, thermal/wear (M5), provenance | — |
+| `*.tyr.yaml` | `tyr/1.0` / `tyr/1.1` | Tire: MF6.1 coefficients (`.tir` names), optional brush block, thermal/wear (placeholders), provenance | — |
 | `*.emotor.yaml` | `emotor/1.1` | N-node machine thermal network: nodes, edges, cooling, loss routing | — |
 | `*.battery.yaml` | `battery/1.0` | Thevenin pack: topology, capacity, SoC window, ECM axes, power limits, lumped thermal | `*.tables.parquet` (OCV/R0/R1/τ1/dU-dT) |
 | `*.parquet` | — | Long/tidy `f64` tables: powertrain maps, battery ECM tables, aero maps | is the sidecar |
@@ -1673,7 +1692,7 @@ Three conventions to keep in your head as you write files: units are SI except a
 
 ### 6.1 The workspace at a glance
 
-outlap's Rust code lives in a single Cargo *workspace* — a collection of packages (Rust calls each package a *crate*) that build together and share pinned dependency versions. The root `Cargo.toml` declares `members = ["crates/*"]`, giving thirteen crates, all `edition = "2021"` and `license = "AGPL-3.0-only"`. Eight of them do real work today; five are two-line placeholders reserved for later milestones (each contains only an SPDX header and the doc line "placeholder crate; implemented in a later milestone").
+outlap's Rust code lives in a single Cargo *workspace* — a collection of packages (Rust calls each package a *crate*) that build together and share pinned dependency versions. The root `Cargo.toml` declares `members = ["crates/*"]`, giving thirteen crates, all `edition = "2021"` and `license = "AGPL-3.0-only"`. Ten of them do real work today; three are two-line placeholders reserving names for later work (each contains only an SPDX header and the doc line "placeholder crate; implemented in a later milestone").
 
 | Crate | Status | Role |
 |---|---|---|
@@ -1686,9 +1705,9 @@ outlap's Rust code lives in a single Cargo *workspace* — a collection of packa
 | `outlap-raceline` | real | Minimum-curvature racing-line generator (convex QP via `clarabel`), returning the line as a first-class `Track` |
 | `outlap-py` | real | The `outlap_core` Python extension module (PyO3); the only crate allowed to contain `unsafe` glue |
 | `outlap-powertrain` | stub | Reserved; today's powertrain logic lives in `outlap-qss/src/t1/powertrain.rs` and the `.ptm` format in `outlap-schema/src/ptm.rs` |
-| `outlap-vehicle` | stub | Reserved; vehicle assembly today is `outlap-schema::load` plus `T0Vehicle`/`T1Vehicle` in `outlap-qss` |
-| `outlap-batch` | stub | Reserved for the batch/GPU rollout layer (`docs/HANDOFF.md` §11.3) |
-| `outlap-transient` | stub | Reserved for the T2/T3 transient tiers (milestones M4/M6); requesting them today raises a typed error |
+| `outlap-vehicle` | real | The T2 physics blocks: the 7-DOF chassis RHS in the curvilinear 3D road frame, load transfer, tires with relaxation, the MacAdam-preview driver, and the shared T2 assembly (Chapter 8) |
+| `outlap-batch` | stub | Reserved for the batch/GPU rollout layer (Chapter 15) |
+| `outlap-transient` | real | The T2 lap orchestration: the split integrator's step loop, the target-line table, the shift/TV/regen control layer, the time-indexed result (Chapter 8) |
 | `outlap-wasm` | stub | Reserved WebAssembly shell; currently empty but still the named target of the wasm CI gate (see §6.6) |
 
 The dependency graph is shallow and strictly layered — math at the bottom, the user surface at the top:
@@ -1710,19 +1729,23 @@ Two deliberate oddities are worth calling out. First, `outlap-thermal` sits *bel
 
 #### The working crates, one paragraph each
 
-**`outlap-core`** is the root of the graph and holds exactly the math every other layer shares. Its headline citizen is the project-wide interpolation rule made concrete: `MonotoneCubic` (`src/interp.rs:51`) is *the* one shared monotone cubic Hermite (C¹) interpolant — a curve that passes through every data point without inventing overshoots — used for every gridded lookup in the codebase (Decision #30, following Fritsch–Carlson-style monotone construction). `CubicSpline` (`src/spline.rs`) provides the C² splines track geometry needs, and `GriddedMapN`/`GriddedTable` (`src/gridmap.rs`) handle N-dimensional tables (up to `MAX_DIMS = 6`) such as powertrain efficiency maps and the g-g-g-v envelope.
+**`outlap-core`** is the root of the graph and holds exactly the math every other layer shares. Its headline citizen is the project-wide interpolation rule made concrete: `MonotoneCubic` (`src/interp.rs:51`) is *the* one shared monotone cubic Hermite (C¹) interpolant — a curve that passes through every data point without inventing overshoots — used for every gridded lookup in the codebase (following Fritsch–Carlson-style monotone construction). `CubicSpline` (`src/spline.rs`) provides the C² splines track geometry needs, and `GriddedMapN`/`GriddedTable` (`src/gridmap.rs`) handle N-dimensional tables (up to `MAX_DIMS = 6`) such as powertrain efficiency maps and the g-g-g-v envelope.
 
 **`outlap-schema`** is the wire contract: the serde/schemars types for all eight document kinds (`vehicle`, `ptm`, `tyr`, `emotor`, `battery`, `track`, `conditions`, `sim`), the staged load pipeline of §6.2, the miette-powered error types, and the `.tir` interchange codec. The committed JSON Schemas in `schemas/` (Apache-2.0) are *generated from* these Rust types by the `gen_schemas` binary, and CI fails if generated and committed drift apart. Chapter 5 covers the formats themselves.
 
-**`outlap-tire`** implements the tire force backbone clean-room from Pacejka 2012 (3rd ed.): steady-state MF6.1 pure and combined slip $F_x$, $F_y$, plus the moments $M_z$, $M_x$, $M_y$, with the Besselink inflation-pressure terms; turn-slip is omitted in v1. A physical brush model (`src/brush.rs`) serves tires whose `.tyr` file lacks a full MF6.1 core, and `src/relax.rs` holds first-order slip relaxation for the future transient tiers. Kernels are pure, panic-free, allocation-free, and generic over `f32`/`f64`.
+**`outlap-tire`** implements the tire force backbone clean-room from Pacejka 2012 (3rd ed.): steady-state MF6.1 pure and combined slip $F_x$, $F_y$, plus the moments $M_z$, $M_x$, $M_y$, with the Besselink inflation-pressure terms; turn-slip is omitted in v1. A physical brush model (`src/brush.rs`) serves tires whose `.tyr` file lacks a full MF6.1 core, and `src/relax.rs` holds the first-order slip relaxation the T2 tier integrates per step. Kernels are pure, panic-free, allocation-free, and generic over `f32`/`f64`.
 
-**`outlap-track`** turns `track.yaml` + `centerline.csv` into a queryable full-3D road ribbon (Decision #13): a C² spline for geometry (so curvature is continuous), monotone-cubic channels for banking, widths, and grip, and `road_frame(s)` queries the solvers consume. Its most architecturally interesting export is `offset_track` (`src/lib.rs:408`): any lateral offset profile becomes a *first-class* `Track` with its own curvature and frames — which is how a generated racing line is driven through the identical solver API.
+**`outlap-track`** turns `track.yaml` + `centerline.csv` into a queryable full-3D road ribbon: a C² spline for geometry (so curvature is continuous), monotone-cubic channels for banking, widths, and grip, and `road_frame(s)` queries the solvers consume. Its most architecturally interesting export is `offset_track` (`src/lib.rs:408`): any lateral offset profile becomes a *first-class* `Track` with its own curvature and frames — which is how a generated racing line is driven through the identical solver API.
 
-**`outlap-thermal`** is the machine lumped-parameter thermal network: published heat-transfer correlations (Churchill–Chu free convection, Gnielinski channel flow, Becker–Kaye air-gap, and others, each cited in `src/correlations.rs`) feeding a `Network` of up to `MAX_NODES = 24` temperature nodes advanced by an unconditionally stable Crank–Nicolson step. Its detailed authoring tier ports correlations from the author's own PDT work — the one documented, deliberate amendment of the powertrain firewall (Decision #25, as amended 2026-07-05; `src/lib.rs:17-19`). Chapter 9 covers the physics.
+**`outlap-thermal`** is the machine lumped-parameter thermal network: published heat-transfer correlations (Churchill–Chu free convection, Gnielinski channel flow, Becker–Kaye air-gap, and others, each cited in `src/correlations.rs`) feeding a `Network` of up to `MAX_NODES = 24` temperature nodes advanced by an unconditionally stable Crank–Nicolson step. Its detailed authoring tier ports correlations from the author's own PDT work — the one documented, deliberate amendment of the powertrain firewall (`src/lib.rs:17-19`). Chapter 9 covers the physics.
 
 **`outlap-qss`** is where laps get solved: the `T0Path` sampler, the `T0Vehicle`/`T1Vehicle` assemblies, the forward/backward velocity-profile solver (`src/solver.rs`, re-implemented from Heilmeier et al. 2020 on the 3D ribbon of Perantoni & Limebeer), the T1 damped-Newton trim (`src/t1/trim.rs`), the g-g-g-v envelope generator (`src/t1/envelope.rs`, after Werner et al. 2025), tier dispatch, and the slow-state coupling that marches battery and machine temperatures along the lap. Its optional `parallel` feature (rayon) accelerates envelope generation on native builds only.
 
-**`outlap-raceline`** generates the minimum-curvature racing line (Decision #14): minimising $\int \kappa^2\,ds$ over the lateral offset $n(s)$ within the track bounds is a convex quadratic program with box bounds, solved with `clarabel` and re-implemented from the published formulation (Braghin et al. 2008; Heilmeier et al. 2020 §3.1–3.2) — never from the LGPL TUM source.
+**`outlap-raceline`** generates the racing lines — minimum-curvature and its time-weighted refinement (Chapter 8): minimising $\int \kappa^2\,ds$ over the lateral offset $n(s)$ within the track bounds is a convex quadratic program with box bounds, solved with `clarabel` and re-implemented from the published formulation (Braghin et al. 2008; Heilmeier et al. 2020 §3.1–3.2) — never from the LGPL TUM source.
+
+**`outlap-vehicle`** holds the T2 physics blocks: the 7-DOF chassis right-hand side in the curvilinear 3D road frame (verified against a symbolic derivation to 1e-12 in CI), the load-transfer block (re-using the exported T1 algebra — one source of truth for $F_z$), the tire block with per-wheel relaxation states, the MacAdam-preview driver, and the shared `assemble_t2` pipeline both the tests and the Python boundary use. Chapter 8, §8.7 covers the physics.
+
+**`outlap-transient`** orchestrates the T2 lap: the split fixed-step integrator's step loop (`sense → control → actuate → integrate`), the sampled target-line table the driver reads per step, the rule-based control layer (shift state machine, torque vectoring, regen blending, the slow-state clock), and the time-indexed `TransientLap` result. It *receives* the QSS artifacts (envelope, T0 profile, line) — it never computes or caches them, which is what keeps it wasm-clean.
 
 **`outlap-py`** is the boundary crate, described in §6.9.
 
@@ -1744,16 +1767,16 @@ The **assembly pipeline** is the cold path: it runs once per model load, is allo
 8. **Estimation** — documented heuristics fill missing derivable values and report them.
 9. **Resolved-set hash** — a blake3 hash of the canonical resolved parameter set, recorded in every result.
 
-Downstream of the schema pipeline, but still cold: track spline fitting (`Track::from_doc`), path sampling (`T0Path::from_track`), solver-vehicle assembly (`T0Vehicle::assemble`, `T1Vehicle::assemble`), parquet sidecar decoding, and g-g-g-v envelope generation. The architectural promise (from `docs/HANDOFF.md` §6.2b) is that after assembly the hot loop touches *zero* strings, hashes, or config logic.
+Downstream of the schema pipeline, but still cold: track spline fitting (`Track::from_doc`), path sampling (`T0Path::from_track`), solver-vehicle assembly (`T0Vehicle::assemble`, `T1Vehicle::assemble`), parquet sidecar decoding, and g-g-g-v envelope generation. The architectural promise is that after assembly the hot loop touches *zero* strings, hashes, or config logic.
 
 The **hot loop** is the solve itself. Its rules are non-negotiable and CI-enforced:
 
 - **Zero heap allocations per step.** The solve kernels write into caller-owned, pre-allocated workspaces. A test using the `dhat` allocation profiler (`crates/outlap-qss/tests/alloc.rs`) asserts that `solve_into`, `solve_into_ggv`, `T1Vehicle::trim`, `MachineThermal::step`, `Pack::step_power`, and the envelope boundary queries allocate exactly zero heap blocks; CI runs it in release mode alongside the ≤ 50 ms lap wall-clock gate (`.github/workflows/ci.yml` lines 19–21).
-- **No Python inside a timestep, ever** — controllers included; they are Rust or C-ABI only (HANDOFF §6.2b, Decision #38).
+- **No Python inside a timestep, ever** — controllers included; they are Rust or C-ABI only.
 - **Enum dispatch, not dynamic dispatch.** Model choices are resolved at assembly time into plain Rust enums (like `TireModel::Mf61 | Brush`) or *monomorphised* generics — the compiler stamps out a specialized copy of the sweep for each grip model (`trait GripModel` in `crates/outlap-qss/src/solver.rs`), so there is no per-station virtual call.
 - **SoA state.** Data is stored as structure-of-arrays — one contiguous `Vec<f64>` per channel rather than an array of per-station structs — so the sweeps stream linearly through memory.
 
-For the transient tiers (T2/T3, future), each fixed timestep will run the four phases `sense → control → actuate → integrate` (HANDOFF §6.2b). At the QSS tiers shipped in v0.2 there is no timestep — see Chapter 8, Physics II — but the same cold/hot split applies to the arc-length sweeps.
+At the T2 tier each fixed timestep runs the four phases `sense → control → actuate → integrate` — the driver and controllers read the bus, decide, actuate, and only then does the integrator advance the state (Chapter 8, §8.7). At the QSS tiers there is no timestep, but the same cold/hot split applies to the arc-length sweeps.
 
 ### 6.3 Data flow: one lap, end to end
 
@@ -1875,11 +1898,11 @@ At the native edge only, `outlap-py` then installs binary parquet sidecars into 
 
 #### 6.3.5 Hop 5 — the g-g-g-v envelope
 
-Before the lap solve, `GgvEnvelope::generate(&t1_vehicle, &sim.envelope, fz_coupling)` sweeps the T1 trim over a grid (default 40 speed × 25 normalised-longitudinal-acceleration × 7 `g_normal` points) and stores the tire-grip boundary as `GriddedMapN` tables plus Decision #31 sensitivity fields, a reference `drag_accel(v)` curve, and `mass_ref` (`crates/outlap-qss/src/t1/envelope.rs:153`). This is a seconds-scale cold step, so `outlap-py` caches it per process, keyed by the resolved hash, a sidecar fingerprint, the conditions, the grid, and the coupling mode. The physics is Chapter 8's; here it is just one more immutable assembly product handed to the solver.
+Before the lap solve, `GgvEnvelope::generate(&t1_vehicle, &sim.envelope, fz_coupling)` sweeps the T1 trim over a grid (default 40 speed × 25 normalised-longitudinal-acceleration × 7 `g_normal` points) and stores the tire-grip boundary as `GriddedMapN` tables plus per-node sensitivity fields (§8.4.4), a reference `drag_accel(v)` curve, and `mass_ref` (`crates/outlap-qss/src/t1/envelope.rs:153`). This is a seconds-scale cold step, so `outlap-py` caches it per process, keyed by the resolved hash, a sidecar fingerprint, the conditions, the grid, and the coupling mode. The physics is Chapter 8's; here it is just one more immutable assembly product handed to the solver.
 
 #### 6.3.6 Hop 6 — the solve: what goes in, what comes out
 
-Tier dispatch happens once, at assembly time, in `solve_lap` (`crates/outlap-py/src/lib.rs:1011`): `Tier::T2 | T3` return a typed error; `t0`/`t1` both assemble the T1 vehicle (the envelope needs it), generate or fetch the envelope, assemble the T0 vehicle, and call `solve_t0` or `solve_t1` (`crates/outlap-qss/src/qss.rs`).
+Tier dispatch happens once, at assembly time, in `solve_lap` (`crates/outlap-py/src/lib.rs`): `Tier::T3` returns a typed error, and `Tier::T2` returns a pointer to its own time-indexed entry point (`solve_transient_lap` — §8.7); `t0`/`t1` both assemble the T1 vehicle (the envelope needs it), generate or fetch the envelope, assemble the T0 vehicle, and call `solve_t0` or `solve_t1` (`crates/outlap-qss/src/qss.rs`).
 
 The hot kernel is `solve_into_ggv(vehicle, envelope, path, workspace) -> Result<f64, T0Error>` (`crates/outlap-qss/src/solver.rs:423`). Its inputs per station `i` are precisely the `T0Path` slices above; its scratch state is the caller-owned, pre-allocated workspace (`crates/outlap-qss/src/result.rs:27`):
 
@@ -1912,7 +1935,7 @@ The tier-dispatch layer wraps that in `QssLap` (`crates/outlap-qss/src/qss.rs:11
 
 `qss_lap_to_py` (`crates/outlap-py/src/lib.rs:1069`) converts `QssLap` into the frozen Python `Lap` class: it reconstructs world positions `x, y, z` by querying the track at each station, flattens the per-wheel logs into row-major `n × 4` buffers, and stringifies the enums (`tier="t1"`, `fz_coupling="one_step_lag"`). Channel methods (`lap.v()`, `lap.vertical_load_n()`, …) return fresh numpy arrays; per-wheel and setup channels return `None` on a t0 lap.
 
-Finally the pure-Python veneer `outlap.core.lap_dataset` (`python/src/outlap/core.py:84`) assembles the result-boundary object the project commits to (Decision #17): an `xarray.Dataset` with dimension `s` (arc length, m) and — when per-wheel channels exist — `wheel` (`FL/FR/RL/RR`); up to 16 data variables (`v, ax, ay, t, x, y, z`, the five per-wheel channels, `understeer_gradient`, `aero_front_share`, `state_of_charge`, `machine_temp_c`); and attrs `lap_time_s`, `resolved_hash`, `tier`, `fz_coupling`, `flat_track` (an int — netCDF attrs have no bool type), and `notes` (a tuple). For the Model 3 on Catalunya this is a 2325-station, 595 kB dataset with `lap_time_s = 148.081…`. The full contract is Chapter 10's.
+Finally the pure-Python veneer `outlap.core.lap_dataset` (`python/src/outlap/core.py:84`) assembles the result-boundary object the project commits to: an `xarray.Dataset` with dimension `s` (arc length, m) and — when per-wheel channels exist — `wheel` (`FL/FR/RL/RR`); up to 16 data variables (`v, ax, ay, t, x, y, z`, the five per-wheel channels, `understeer_gradient`, `aero_front_share`, `state_of_charge`, `machine_temp_c`); and attrs `lap_time_s`, `resolved_hash`, `tier`, `fz_coupling`, `flat_track` (an int — netCDF attrs have no bool type), and `notes` (a tuple). For the Model 3 on Catalunya this is a 2325-station, 595 kB dataset with `lap_time_s = 148.081…`. The full contract is Chapter 10's.
 
 The whole journey in one picture:
 
@@ -1964,43 +1987,43 @@ Signs follow the ISO-W convention of modern `.tir` files (ISO 8855 axes): positi
 
 ### 6.5 The three plugin points (roadmap, not yet shipped)
 
-The project's extension policy is Locked Decision #37 (`docs/HANDOFF.md` §6.2b): **exactly three plugin points**, and everything else stays a curated core enum so the hot path never grows dynamic dispatch:
+The project's extension policy is deliberate and narrow: **exactly three plugin points**, and everything else stays a curated core enum so the hot path never grows dynamic dispatch:
 
 1. **Custom blocks** — a Rust trait with compile-time registration: a plugin crate depends on `outlap-core`, registers its blocks, and users build a custom binary (or upstream the block).
 2. **Tire models** — a stable C-ABI "Standard Tire Interface" (CPU-only by contract), so a closed or third-party tire model can be loaded as a shared library.
 3. **Controllers** — the same trait mechanism, running as `control`-phase blocks (Rust or C-ABI only; never Python in a timestep).
 
-Be aware of the status: **none of these exist in code at v0.2.0.** There is no plugin trait, no registration mechanism, and no C-ABI header anywhere in `crates/` yet; HANDOFF §12 schedules plugin traits and Python entry points for a later milestone. What ships today is the curated-enum half of the decision — e.g. `outlap_tire::TireModel`, "the static (no-`dyn`) choice" (`crates/outlap-tire/src/model.rs:2`), which picks MF6.1 when the full pure-slip force core is present and the brush model otherwise. If you want a custom model today, the path is a fork, not a plugin.
+Be aware of the status: **none of these exist in code at v0.2.5.** There is no plugin trait, no registration mechanism, and no C-ABI header anywhere in `crates/` yet; plugin traits and Python entry points are scheduled for later (Chapter 15). What ships today is the curated-enum half of the decision — e.g. `outlap_tire::TireModel`, "the static (no-`dyn`) choice" (`crates/outlap-tire/src/model.rs:2`), which picks MF6.1 when the full pure-slip force core is present and the brush model otherwise. If you want a custom model today, the path is a fork, not a plugin.
 
 ### 6.6 wasm-clean rules
 
 outlap's core is required to compile for `wasm32-unknown-unknown` — WebAssembly with no operating system — which forbids filesystem access, threads, and clocks. This is a forcing function for good layering: all source access goes through the `SourceLoader` trait (`crates/outlap-schema/src/io.rs:36`), with `FsLoader` behind `outlap-schema`'s `std` feature and the parquet decoder behind its `parquet` feature; wasm consumers use the in-memory `MemLoader` and depend on the schema crate with `default-features = false`.
 
-CI enforces four wasm builds (`.github/workflows/ci.yml` lines 23–26): `outlap-wasm` (release), `outlap-raceline` (the `clarabel` QP solver is wasm-clean), `outlap-tire`, and `outlap-qss` (with the rayon-backed `parallel` feature off, keeping the solver thread-free). `outlap-core`, `outlap-track`, and `outlap-thermal` are wasm-clean by construction and come along as dependencies. `outlap-py` is the deliberate exception — "this crate never builds for wasm" (`crates/outlap-py/Cargo.toml`), because PyO3 and numpy are native-only, and that is exactly why parquet decoding and envelope caching live there, on the native edge.
+CI enforces six wasm builds (`.github/workflows/ci.yml`): `outlap-wasm` (release), `outlap-raceline` (the `clarabel` QP solver is wasm-clean), `outlap-tire`, `outlap-qss` (with the rayon-backed `parallel` feature off, keeping the solver thread-free), `outlap-vehicle`, and `outlap-transient` — the whole transient tier stays wasm-clean. `outlap-core`, `outlap-track`, and `outlap-thermal` are wasm-clean by construction and come along as dependencies. `outlap-py` is the deliberate exception — "this crate never builds for wasm" (`crates/outlap-py/Cargo.toml`), because PyO3 and numpy are native-only, and that is exactly why parquet decoding and envelope caching live there, on the native edge.
 
-One honest caveat: `outlap-wasm` itself is an empty placeholder, so the CLAUDE.md gate `cargo build --target wasm32-unknown-unknown -p outlap-wasm` passes trivially; the builds that actually keep the core honest are the raceline/tire/qss ones.
+One honest caveat: `outlap-wasm` itself is an empty placeholder, so its build gate passes trivially; the builds that actually keep the core honest are the raceline/tire/qss/vehicle/transient ones.
 
 ### 6.7 Error-handling architecture
 
 Errors are treated as a product surface, with a different tool at each layer:
 
-- **Typed enums on every public API** (`thiserror`): `SchemaError` (one variant per pipeline stage), `TrackError`, `TireBuildError`, `T0Error`, `T1Error`, `QssError`, `ThermalError`, `RacelineError`. Each variant states what went wrong and, where useful, how to fix it — e.g. `T0Error::NoConstantAero` points at `allow_degraded`, and `QssError::TierNotImplemented` names the milestone that ships the missing tier.
+- **Typed enums on every public API** (`thiserror`): `SchemaError` (one variant per pipeline stage), `TrackError`, `TireBuildError`, `T0Error`, `T1Error`, `QssError`, `ThermalError`, `RacelineError`. Each variant states what went wrong and, where useful, how to fix it — e.g. `T0Error::NoConstantAero` points at `allow_degraded`, and `QssError::TierNotImplemented` (now only reachable for `t3`) names the alternatives.
 - **miette diagnostics at the config surface.** `SchemaError` variants carry the source file, byte-span labels, and `#[help]` hints, so a typo renders as an underlined snippet with "did you mean `mass_kg`?" (Levenshtein via `strsim`). A bare serde error reaching the user is considered a bug.
 - **Panic-free solver kernels.** Hot-path functions return `Result` (e.g. `solve_into_ggv -> Result<f64, T0Error>`); physics invariants are checked with `debug_assert!` so release builds pay nothing. Every working crate except `outlap-py` carries `#![forbid(unsafe_code)]`; `outlap-py` is the sanctioned FFI (foreign-function interface) crate because PyO3's macros generate `unsafe` glue.
-- **`anyhow` only at CLI edges** — the convention for future command-line binaries. As of v0.2.0 no shipped crate uses `anyhow` at all; every error is typed.
+- **`anyhow` only at CLI edges** — the convention for future command-line binaries. As of v0.2.5 no shipped crate uses `anyhow` at all; every error is typed.
 - **The Python boundary preserves the diagnostics.** `schema_err` (`crates/outlap-py/src/lib.rs:164`) maps a missing file to `FileNotFoundError` and everything else to `ValueError`, explicitly appending the miette help line ("Display alone drops them"). So the Python user sees ``ValueError: unknown field `masss_kg`\nhelp: did you mean `mass_kg`?``.
 
-The philosophy throughout is "nothing silent" (Decision #41): a *missing* optional file (`sim.yaml`, `conditions.yaml`, a sidecar, the battery doc) falls back to defaults with a recorded note; a *present but malformed* one is always a hard error.
+The philosophy throughout is "nothing silent": a *missing* optional file (`sim.yaml`, `conditions.yaml`, a sidecar, the battery doc) falls back to defaults with a recorded note; a *present but malformed* one is always a hard error.
 
 ### 6.8 Determinism rules
 
 The same inputs must produce bit-identical outputs, across runs and across thread counts. The rules, and where they live in v0.2:
 
-- **Fixed-step integrators only** in production paths: `sim.integrator` offers Heun or RK4 at a fixed `dt_s` for the future transient tiers; the shipped thermal march uses an unconditionally stable Crank–Nicolson step. No adaptive step-size control anywhere.
+- **Fixed-step integrators only** in production paths: `sim.integrator` offers Heun or RK4 at a fixed `dt_s` for the T2 tier; the shipped thermal march uses an unconditionally stable Crank–Nicolson step. No adaptive step-size control anywhere.
 - **Fixed iteration counts instead of tolerances where order matters:** the slow-state coupling runs exactly `OUTER_ITERS = 2` solve→march→re-solve passes — "fixed (not tolerance-driven) for determinism" (`crates/outlap-qss/src/qss.rs:43`).
 - **Fixed-order reductions:** sums like the lap-time accumulation run in a fixed order; the optional rayon parallelism in envelope generation splits work over independent `(v, g_normal)` fibres and merges them in fixed order (`crates/outlap-qss/Cargo.toml`), so parallel and serial builds agree bitwise.
 - **No fast-math:** no build flag anywhere relaxes IEEE 754 semantics.
-- **Counter-based RNG keyed by `(seed, rollout, stream, step)`** (Philox/ChaCha8-style): this rule governs the Monte Carlo strategy layer (HANDOFF §11.3, line 1081). No RNG exists in the v0.2 core — the QSS solvers are fully deterministic functions — but the key structure is locked in now so batch rollouts can be replayed and sliced later.
+- **Counter-based RNG keyed by `(seed, rollout, stream, step)`** (Philox/ChaCha8-style): this rule is locked in for the planned Monte Carlo strategy layer (Chapter 15). No RNG exists in the v0.2.5 core — the QSS solvers are fully deterministic functions — but the key structure is locked in now so batch rollouts can be replayed and sliced later.
 - **Recorded numerics:** settings that change results — the Fz-coupling mode (`one_step_lag` vs `fixed_point`), `flat_track`, the resolved tier — are embedded in every result artifact, alongside the blake3 `resolved_hash` of the exact parameter set.
 
 ### 6.9 Python packaging: where Rust ends and Python begins
@@ -2017,7 +2040,7 @@ The division of labour, in one sentence each:
 | `outlap-py` (extension) | Type conversion, error mapping, native-edge assembly (sidecars, envelope cache, slow stack) | Add physics or defaults |
 | `outlap.core` (Python) | Broadcasting, xarray labelling, ergonomics | Re-implement anything the core computes |
 
-Note that `solve_lap` currently holds Python's GIL (global interpreter lock) for its whole duration — releasing it is deferred to the batch/sweep milestone — so parallel laps from Python threads will not overlap yet. Chapter 10 covers the full Python surface; Chapter 11 covers the importers and tooling that feed it.
+Note that `solve_lap` currently holds Python's GIL (global interpreter lock) for its whole duration — releasing it is deferred to the batch/sweep API (Chapter 15) — so parallel laps from Python threads will not overlap yet. Chapter 10 covers the full Python surface; Chapter 11 covers the importers and tooling that feed it.
 
 
 ---
@@ -2032,7 +2055,7 @@ This chapter explains both models as they are actually implemented, with the rea
 
 ### 7.1 The tire crate and its contract
 
-The tire model lives in `crates/outlap-tire`. It implements the steady-state Magic Formula 6.1 (MF6.1) plus a physical brush model and a first-order relaxation module reserved for the future transient tiers. It is implemented clean-room from Pacejka's book (H. B. Pacejka, *Tire and Vehicle Dynamics*, 3rd ed., 2012, Chapter 4 §4.3.2, equations 4.E1–4.E78) with the inflation-pressure extensions of Besselink, Schmeitz & Pacejka (*Vehicle System Dynamics* 48(S1), 2010). The theory page `docs/theory/mf61-steady-state.md` carries the full equation map and citations.
+The tire model lives in `crates/outlap-tire`. It implements the steady-state Magic Formula 6.1 (MF6.1) plus a physical brush model and a first-order relaxation module the T2 tier integrates live. It is implemented clean-room from Pacejka's book (H. B. Pacejka, *Tire and Vehicle Dynamics*, 3rd ed., 2012, Chapter 4 §4.3.2, equations 4.E1–4.E78) with the inflation-pressure extensions of Besselink, Schmeitz & Pacejka (*Vehicle System Dynamics* 48(S1), 2010). The theory page `docs/theory/mf61-steady-state.md` carries the full equation map and citations.
 
 Every evaluation kernel in the crate is pure, panic-free, allocation-free (enforced in CI), and generic over `f32`/`f64`. The crate does no file IO — it consumes a `.tyr` document already loaded by `outlap-schema` — which is what keeps it buildable for `wasm32-unknown-unknown`.
 
@@ -2046,7 +2069,7 @@ pub struct SlipState<T> {
     pub fz: T,         // normal load, N (compressive-positive; <= 0 => all-zero output)
     pub p: T,          // inflation pressure, Pa
     pub vx: T,         // contact-center forward velocity, m/s (sign meaningful)
-    pub mu_scale_x: T, // runtime longitudinal friction multiplier (M5 thermal hook; 1.0 today)
+    pub mu_scale_x: T, // runtime longitudinal friction multiplier (thermal hook; 1.0 today)
     pub mu_scale_y: T, // runtime lateral friction multiplier
 }
 
@@ -2059,7 +2082,7 @@ pub struct TireForces<T> {
 }
 ```
 
-`SlipState::new(kappa, alpha, gamma, fz, p, vx)` fills both `mu_scale_*` fields with 1.0. The two multipliers are the hook through which the milestone-5 thermal model will one day modulate grip. Today their only production consumer is the T1 envelope generator, which perturbs them to measure grip sensitivity (Section 7.6 and Chapter 8, Physics II).
+`SlipState::new(kappa, alpha, gamma, fz, p, vx)` fills both `mu_scale_*` fields with 1.0. The two multipliers are the hook through which the planned tire thermal model will one day modulate grip. Today their only production consumer is the T1 envelope generator, which perturbs them to measure grip sensitivity (Section 7.6 and Chapter 8, Physics II).
 
 The five outputs, in words:
 
@@ -2185,10 +2208,10 @@ mf61:                       # MF6.1 coefficients, keyed by their standard .tir n
   PDX1: 1.210
   PKY1: -14.95
   # ... ~60-150 more, sparse files are fine
-thermal:                    # thermal-ring parameters — M5 stubs today, EXCEPT p_cold
+thermal:                    # thermal-ring parameters — inert stubs today, EXCEPT p_cold
   p_cold: 220.0             # cold inflation pressure, kPa (load-bearing NOW)
   t_opt: 75.0               # ...
-wear:                       # wear/cliff parameters — entirely M5-future
+wear:                       # wear/cliff parameters — entirely future
   k_w: 0.0006               # ...
 provenance:
   citation: "H. B. Pacejka, Tyre and Vehicle Dynamics, 2nd ed. (2006), Appendix 3, Table A3.1 ..."
@@ -2203,7 +2226,7 @@ Model selection happens once, at assembly, in `TireModel::from_tyr` (`crates/out
 2. Otherwise, if a `brush:` block is present, build the **brush** model (Section 7.7), with a loaded-model note that $M_x = M_y = 0$ and camber/pressure are ignored.
 3. Otherwise `TireBuildError::NoForceModel` (schema validation catches this earlier; the error is defensive).
 
-`FNOMIN` and `UNLOADED_RADIUS` are always required. Unknown *coefficient names* inside `mf61:` are non-fatal — you get a did-you-mean warning — unlike unknown schema *fields*, which are hard errors (Chapter 5, Files and formats). The thermal and wear blocks are required by the schema but, apart from `p_cold`, are consumed by nothing until milestone M5; every shipped dataset carries clearly-labelled synthetic placeholders there. `p_cold` is the exception: it is the operating inflation pressure at which every solver evaluates the tire today.
+`FNOMIN` and `UNLOADED_RADIUS` are always required. Unknown *coefficient names* inside `mf61:` are non-fatal — you get a did-you-mean warning — unlike unknown schema *fields*, which are hard errors (Chapter 5, Files and formats). The thermal and wear blocks are required by the schema but, apart from `p_cold`, are consumed by nothing until the tire thermal model lands; every shipped dataset carries clearly-labelled synthetic placeholders there. `p_cold` is the exception: it is the operating inflation pressure at which every solver evaluates the tire today.
 
 A vehicle references its tires per axle — both required, no default:
 
@@ -2253,7 +2276,7 @@ The lateral coefficient loses over 20% of its value as load quadruples — that 
 
 A slip-angle sweep with `outlap.core.tyre_forces` shows the sign contract and the trail collapse in action — at `FNOMIN`, $\alpha$ = 0°, 2°, 4°, 8° gives $F_y \approx$ +42, −1506, −2696, −3627 N (the +42 N at zero slip is the ply-steer/conicity shift) and $M_z \approx$ −11.3, +33.9, +51.1, +24.9 N·m: the aligning moment peaks *before* the lateral force and then collapses as the trail shortens — the "light steering past the limit" cue racing drivers rely on.
 
-For a brush tire the peak is simply its base friction $\mu_0$, load- and pressure-independent. The T1 tier, by contrast, keeps the full per-axle `TireModel<f64>` alive and evaluates it inside its trim solver with per-wheel $\kappa$, $\alpha$, $F_z$ — at $\gamma = 0$ (camber maps land in a later milestone; the assembly note says so out loud) and at the cold pressure. Its envelope generator perturbs `mu_scale` uniformly ($1 \pm 0.15$) to build the grip-sensitivity corrections of Chapter 8 — today's only production use of the `mu_scale_*` hooks.
+For a brush tire the peak is simply its base friction $\mu_0$, load- and pressure-independent. The T1 tier, by contrast, keeps the full per-axle `TireModel<f64>` alive and evaluates it inside its trim solver with per-wheel $\kappa$, $\alpha$, $F_z$ — at $\gamma = 0$ (camber maps are a planned addition; the assembly note says so out loud) and at the cold pressure. Its envelope generator perturbs `mu_scale` uniformly ($1 \pm 0.15$) to build the grip-sensitivity corrections of Chapter 8 — today's only production use of the `mu_scale_*` hooks.
 
 ### 7.7 The brush model
 
@@ -2398,8 +2421,8 @@ How these models are validated (details in Chapter 13, Validation, testing, and 
 And the honest limits of what you have just read:
 
 - **Turn-slip is omitted** (all $\zeta \equiv 1$), as is the velocity-digressive friction branch (`LMUV`) — v1 scope.
-- **Tire thermal and wear are stubs.** The `.tyr` thermal/wear blocks are schema-required but consumed by nothing until milestone M5, except `p_cold`. All shipped values there are labelled synthetic placeholders. Until then, every solve is a *cold-tire* solve at fixed pressure.
-- **Relaxation has no production caller yet.** The exact-exponential slip-lag stepper in `crates/outlap-tire/src/relax.rs` is implemented and property-tested, but the QSS tiers use steady-state forces directly; it lands with the transient tiers (T2/T3).
+- **Tire thermal and wear are stubs.** The `.tyr` thermal/wear blocks are schema-required but consumed by nothing until the tire thermal model lands, except `p_cold`. All shipped values there are labelled synthetic placeholders. Until then, every solve is a *cold-tire* solve at fixed pressure.
+- **Relaxation is live at T2 only.** The exact-exponential slip-lag stepper in `crates/outlap-tire/src/relax.rs` drives the T2 tier's per-wheel lagged slip (§8.7); the QSS tiers use steady-state forces by definition.
 - **Camber is zero in T1** ("camber maps land later" — the assembly note), and the trim always runs DRS-closed.
 - The **`f1_2026` aero map is synthetic** and its sensitivities are estimates; only the anchor point is reconciled against literature.
 - The Python `Tyre` class always builds an MF6.1 model: brush-only files work in the solvers (via the `TireModel::from_tyr` gate) but load through `Tyre` as a degenerate all-zero model rather than erroring.
@@ -2409,11 +2432,11 @@ With forces at the contact patch and downforce on the axles in hand, Chapter 8, 
 
 ---
 
-## 8. Physics II: solving a lap — T0, T1, and the g-g-g-v envelope
+## 8. Physics II: solving a lap — T0, T1, T2, and the g-g-g-v envelope
 
-*What you will learn: how outlap actually computes a lap time. You will follow the classic forward/backward velocity-profile method (T0) step by step, meet the nine-unknown equilibrium solve (the T1 "trim") that turns a full double-track car into a grip boundary, and see how that boundary is precomputed into the g-g-g-v envelope that connects the two. Along the way you will learn exactly what `tier="t0"` and `tier="t1"` return, and how flat-track mode collapses the whole machinery into the 2-D form used for validation.*
+*What you will learn: how outlap actually computes a lap time. You will follow the classic forward/backward velocity-profile method (T0) step by step, meet the nine-unknown equilibrium solve (the T1 "trim") that turns a full double-track car into a grip boundary, and see how that boundary is precomputed into the g-g-g-v envelope that connects the two. Along the way you will learn exactly what `tier="t0"` and `tier="t1"` return, and how flat-track mode collapses the whole machinery into the 2-D form used for validation. The chapter closes with the tier that stops assuming equilibrium: the transient T2 — the car integrated through time with a driver in the loop (§8.7).*
 
-### 8.1 The big picture: two tiers, one envelope
+### 8.1 The big picture: two QSS tiers, one envelope — then time
 
 Chapter 2 introduced the idea of a *quasi-steady-state* (QSS) lap solver: instead of integrating the car's equations of motion through time (an ODE solve), a QSS solver assumes the car is at its limit everywhere and asks, at each point along the track, "how fast can the car possibly be going here?" outlap's QSS machinery lives in the `outlap-qss` crate and is built from three cooperating pieces:
 
@@ -2421,9 +2444,9 @@ Chapter 2 introduced the idea of a *quasi-steady-state* (QSS) lap solver: instea
 2. **The g-g-g-v envelope** (`crates/outlap-qss/src/t1/envelope.rs`) — a precomputed table of the trim's answers: the maximum lateral acceleration as a function of speed, longitudinal acceleration, and how hard the road presses the car down. Generated once per car (a cold, seconds-scale step in a release build), queried millions of times for free.
 3. **The T0 velocity-profile solver** (`crates/outlap-qss/src/solver.rs`) — a point-mass sweep along the track that consumes the envelope and produces the speed trace and lap time. Not an ODE integration; three passes over an array.
 
-The names are solver *tiers* (Chapter 4): `t0` is the point-mass profile, `t1` is the same profile plus a per-station re-solve of the trim to report per-wheel channels. Both evaluate the **same** vehicle description — tiers select fidelity, never a different car (Hard rule #4; `crates/outlap-schema/src/sim.rs:64-65`). The transient tiers `t2`/`t3` are future milestones and raise a typed error today (§8.5).
+The names are solver *tiers* (Chapter 4): `t0` is the point-mass profile, `t1` is the same profile plus a per-station re-solve of the trim to report per-wheel channels. Both evaluate the **same** vehicle description — tiers select fidelity, never a different car (Hard rule #4; `crates/outlap-schema/src/sim.rs:64-65`). The transient T2 tier is §8.7's story; `t3` raises a typed error today (§8.5).
 
-A perhaps-surprising fact worth stating up front: **`t0` and `t1` produce the identical lap time and speed profile.** Both run the same envelope-based velocity profile (`solve_profile` in `crates/outlap-qss/src/qss.rs`); `t1` then *re-trims* each station of the already-solved profile to log wheel loads, slips, and forces. On the shipped `f1_2026` around the `catalunya_osm` centerline (2 m stations, 2339 of them), both tiers return `lap_time_s = 112.548` — the `t1` dataset just carries seven more channels.
+A perhaps-surprising fact worth stating up front: **`t0` and `t1` produce the identical lap time and speed profile.** Both run the same envelope-based velocity profile (`solve_profile` in `crates/outlap-qss/src/qss.rs`); `t1` then *re-trims* each station of the already-solved profile to log wheel loads, slips, and forces. On the shipped `f1_2026` around the `catalunya_osm` centerline (2 m stations, 2339 of them), both tiers return `lap_time_s = 112.557` — the `t1` dataset just carries seven more channels.
 
 ### 8.2 T0: the forward/backward velocity profile
 
@@ -2499,7 +2522,7 @@ Because both sides of $|F_y| \le \mu_y \gamma N$ are affine in $u = v^2$, the co
 
 Where do $\mu_x, \mu_y$ come from? Not from a hand-typed number: `T0Vehicle::assemble` (`crates/outlap-qss/src/vehicle.rs`) evaluates the real MF6.1 tire model (Chapter 7) and takes the **pure-slip force peaks** at the nominal load `FNOMIN` and the cold inflation pressure, averaging front and rear axles — so the tire's load- and pressure-shape factors are folded in rather than the raw `PDX1`/`PDY1` coefficients being trusted blindly. A note recording exactly this lands in every result (`notes` discipline: nothing silent). The same assembly reduces the powertrain to a per-unit peak-torque envelope over folded gear ratios and an ERS power cap — that is the *powertrain ceiling* `tractive_force(v)`, summarised in §8.2.5; the `.ptm` format and the energy accounting behind it belong to Chapter 9, Physics III.
 
-Be aware of the fine print: this constant-μ ellipse path (`solve_into` / `solve_lap`) is **not reachable from Python**. It is the analytic-reference and performance-gate path at the Rust level, and the theory page `docs/theory/t0-point-mass.md` documents it from that (M1) perspective. What `tier="t0"` actually runs in v0.2.0 is the next section.
+Be aware of the fine print: this constant-μ ellipse path (`solve_into` / `solve_lap`) is **not reachable from Python**. It is the analytic-reference and performance-gate path at the Rust level, and the theory page `docs/theory/t0-point-mass.md` documents it from that foundational perspective. What `tier="t0"` actually runs today is the next section.
 
 #### 8.2.4 The production path: T0 on the g-g-g-v envelope
 
@@ -2525,7 +2548,7 @@ The flight guard survives, generalised: a station is "planted" when the *total* 
 - Gearbox and differential ratios along each unit's coupler path are folded at assembly into per-gear constants: `omega_per_v = ratio / r_wheel` and `force_per_torque = ratio · efficiency / r_wheel`. At speed $v$, each unit contributes its **best gear** — the highest wheel force among gears whose shaft speed stays under the envelope's top speed (gears past it are rev-limited out).
 - An ERS (energy-recovery system, e.g. an F1 MGU-K) is reduced to a **power cap**: peak deployment power times a speed-dependent taper curve, capped by the machine's ratio-invariant mechanical ceiling $\max(\tau\omega)$ over its map, converted to force as $\eta P / \max(v, 1.0)$ (the 1 m/s floor avoids an infinite launch force; the friction limit caps launch anyway). Per-lap deployment budgets and override modes are *not* enforced at T0 — a permanent note in every result says so.
 
-Two typed errors guard the assembly: a vehicle with neither drive units nor ERS is `T0Error::NoDrive`, and a drive unit whose `.ptm` carries a gridded efficiency *map* (rather than a constant) is `T0Error::UnsupportedEfficiencyMap` — T0 has no map reader yet. Similarly, a vehicle with no `aero.constant` block is a hard `T0Error::NoConstantAero` unless `sim.allow_degraded: true`, in which case T0 runs with zero aero and a recorded note — the single documented fallback path (Decision #40; Chapter 4).
+Two typed errors guard the assembly: a vehicle with neither drive units nor ERS is `T0Error::NoDrive`, and a drive unit whose `.ptm` carries a gridded efficiency *map* (rather than a constant) is `T0Error::UnsupportedEfficiencyMap` — T0 has no map reader yet. Similarly, a vehicle with no `aero.constant` block is a hard `T0Error::NoConstantAero` unless `sim.allow_degraded: true`, in which case T0 runs with zero aero and a recorded note — the single documented fallback path (Chapter 4).
 
 #### 8.2.6 Entry points, workspaces, and the 50 ms budget
 
@@ -2607,7 +2630,7 @@ $$\Delta F_{z,f}^{y} = \frac{m a_y\,(b_r/L)\,h_{rc,f}}{t_f} + \frac{\xi_f\,M_\ph
 
 where $t$ is the track width, $h_{rc}$ the roll-centre height, and $\xi_f + \xi_r = 1$ the roll-stiffness shares. This is why an engineer stiffens the front anti-roll bar to add understeer: a larger $\xi_f$ moves lateral transfer to the front axle, and because tire grip grows sub-linearly with load (Chapter 7), a more unevenly loaded axle grips less. Two implementation details matter: at **wheel lift** the unloaded wheel floors at 0 N and the grounded wheel carries the whole axle — never more — so the boundary cannot become optimistic and $\Sigma F_z$ stays weight plus downforce (`split_axle`, `trim.rs:761-775`). And **anti-dive/anti-squat do not enter steady-state $F_z$** — they only modulate the aero-platform heave (ride height) when a ride-height aero map is installed, which changes downforce, which changes loads; the load-transfer totals themselves are geometry-independent in steady state. The aero map and its platform-equilibrium fixed point are Chapter 7's subject; from the trim's point of view the map is evaluated *inside* the residual at yaw = $\beta$ (in degrees at the map boundary, one of the deliberate display-unit seams) so the Jacobian feels $\partial(\text{downforce})/\partial\beta$.
 
-#### 8.3.4 `fz_coupling`: Decision #29
+#### 8.3.4 `fz_coupling`: the vertical-load algebraic loop
 
 The loads depend on the accelerations, and the accelerations depend on the tire forces, which depend on the loads — an algebraic loop. `sim.fz_coupling` selects how the loop closes (`crates/outlap-schema/src/sim.rs:80-89`), and the trim implements it as a one-line substitution (`trim.rs:546-549`):
 
@@ -2645,7 +2668,7 @@ pub enum TrimOutcome {
 }
 ```
 
-and `Infeasible` is *information* — it means "past the grip limit", and the envelope generator uses it as its boundary oracle. It is never a panic, and solver kernels stay `Result`-typed per the project's error rules. Because the boundary bisection makes roughly half its probes infeasible *by construction*, infeasible probes must also fail *fast*: an **infeasibility stall test** watches windows of `STALL_WINDOW = 6` LM iterations and cuts the solve if $\lVert R \rVert$ failed to shrink by factor `STALL_FACTOR = 0.7` while still far above tolerance (floor $10^{-7}$). A converging solve drops orders of magnitude per few iterations; an infeasible one parks at a nonzero least-squares minimum shaving microscopic amounts — the test tells them apart. The code documents the accepted residual risk (a pathologically stiff *feasible* point misclassified infeasible would pin an envelope node conservatively low, bounded by probe retries and the accuracy gates; a continuation-backed confirmation is an M4 candidate).
+and `Infeasible` is *information* — it means "past the grip limit", and the envelope generator uses it as its boundary oracle. It is never a panic, and solver kernels stay `Result`-typed per the project's error rules. Because the boundary bisection makes roughly half its probes infeasible *by construction*, infeasible probes must also fail *fast*: an **infeasibility stall test** watches windows of `STALL_WINDOW = 6` LM iterations and cuts the solve if $\lVert R \rVert$ failed to shrink by factor `STALL_FACTOR = 0.7` while still far above tolerance (floor $10^{-7}$). A converging solve drops orders of magnitude per few iterations; an infeasible one parks at a nonzero least-squares minimum shaving microscopic amounts — the test tells them apart. The code documents the accepted residual risk (a pathologically stiff *feasible* point misclassified infeasible would pin an envelope node conservatively low, bounded by probe retries and the accuracy gates; a continuation-backed confirmation is a candidate refinement).
 
 Speed guard: the QSS kinematics divide by $v$ (yaw rate $r = a_y/v$), so any commanded point at $v \le$ `V_MIN` $= 0.5$ m/s is immediately `Infeasible` — a crawling car has no well-posed g-g trim.
 
@@ -2697,9 +2720,9 @@ Fibres solve into owned outputs merged in fixed order, so the result is **bit-id
 
 The clean-room statement in the module header is worth knowing: the GPL-3.0 `TUM-AVS/GGGVDiagrams` repository (the reference implementation of Werner et al. 2025) was consulted for *approach only* and the code re-authored from the papers — a live application of the project's clean-room rule, with the repo and licence recorded beside the citations (`envelope.rs:70-84`; same statement in `docs/theory/ggv-envelope.md`).
 
-#### 8.4.4 Decision #31: separable multiplicative corrections
+#### 8.4.4 Separable multiplicative corrections
 
-A strategy sweep wants laps at perturbed car states — worn tires (lower μ), fuel load (mass), a different wing level ($C_L A$). Regenerating a full envelope per variant would erase the precomputation win. Locked Decision #31 (`docs/HANDOFF.md`): store, per node, three **relative sensitivities** and correct multiplicatively:
+A strategy sweep wants laps at perturbed car states — worn tires (lower μ), fuel load (mass), a different wing level ($C_L A$). Regenerating a full envelope per variant would erase the precomputation win. The design instead stores, per node, three **relative sensitivities** and corrects multiplicatively:
 
 $$S_\mu \approx \frac{\partial \ln a_{y,\text{corr}}}{\partial \ln \mu}, \quad S_m \approx \frac{\partial \ln a_{y,\text{corr}}}{\partial \ln m}, \quad S_{C_LA} \approx \frac{\partial \ln a_{y,\text{corr}}}{\partial \ln C_LA},$$
 
@@ -2709,7 +2732,7 @@ clamped at zero, **identity at the reference by construction**. The sensitivitie
 
 CI validates the correction against ground truth: at sampled near-peak grid nodes, the corrected envelope must match a **full T1 re-solve** of the perturbed car to within **2% of the local peak** at pure-lateral nodes (realised ≈ 0.6% on the reduced CI grid) and within **12%** at moderate $|\hat a_x| = 0.4$ — a documented degradation toward the shoulders, where the velocity-frame $-a_x\sin\beta$ term dominates and a multiplicative factor cannot move the shoulder itself (`envelope.rs` tests at 1016–1107; `docs/theory/ggv-envelope.md`). Further property tests pin node-exactness of the interpolant (< 2% of local peak), identity at reference to $10^{-12}$, correction signs (more grip ⇒ higher boundary, more mass ⇒ lower), monotonicity in $g_{\text{normal}}$, concavity of the $a_y(a_x)$ section (the feasible g-g region is convex), and zero-allocation queries.
 
-One honest caveat: in v0.2.0 the corrected query `ay_boundary_corrected` is built, gated, and public at the Rust level, but **no lap-level consumer uses it yet** — the batch/sweep API that composes off-reference corrections into a lap is future work. A Python `overrides={...}` what-if instead re-resolves the vehicle and generates (and caches) a fresh envelope keyed by the new resolved hash. The correction machinery is the enabling groundwork for the strategy layer, not a shortcut you can reach from Python today.
+One honest caveat: in v0.2.5 the corrected query `ay_boundary_corrected` is built, gated, and public at the Rust level, but **no lap-level consumer uses it yet** — the batch/sweep API that composes off-reference corrections into a lap is future work. A Python `overrides={...}` what-if instead re-resolves the vehicle and generates (and caches) a fresh envelope keyed by the new resolved hash. The correction machinery is the enabling groundwork for the strategy layer, not a shortcut you can reach from Python today.
 
 #### 8.4.5 Real numbers
 
@@ -2760,7 +2783,7 @@ The two solve paths (`crates/outlap-qss/src/qss.rs`):
 - **`solve_t0`** runs the (optionally slow-state-coupled) envelope velocity profile and returns point-mass channels only: `wheels: None`, `setup: None`.
 - **`solve_t1`** runs the *identical* profile, then walks the solved stations calling `t1.trim(&TrimInput { v, ay, ax, g_normal, coupling })` at each one to log per-wheel state, plus `understeer_gradient(v, g_normal)` and `aero_front_downforce_share_at(v)`. A station whose re-trim is infeasible (it can happen: the point-mass profile lives on an interpolated boundary, and the trim's exact boundary is a hair away — or the station speed is below the 0.5 m/s trim floor) gets a **NaN row** in the wheel channels rather than an error; the dispatch tests require only that a majority of stations converge on the reference cars.
 
-Both paths thread the slow-state coupling identically when a full electrified stack (battery + `.emotor` + Vdc-mapped drive units) is present: a fixed two-iteration solve → march → re-solve outer loop that fills the per-station traction scale, discharge-only SoC this milestone. That is Chapter 9's story; here it suffices that an absent stack leaves the scale at 1 and the result *bit-identical* to the uncoupled solve.
+Both paths thread the slow-state coupling identically when a full electrified stack (battery + `.emotor` + Vdc-mapped drive units) is present: a fixed two-iteration solve → march → re-solve outer loop that fills the per-station traction scale. That is Chapter 9's story; here it suffices that an absent stack leaves the scale at 1 and the result *bit-identical* to the uncoupled solve.
 
 Summary of the observable differences:
 
@@ -2790,35 +2813,73 @@ print(ds0.attrs["lap_time_s"], sorted(ds0.data_vars))
 print(ds1.attrs["lap_time_s"], sorted(ds1.data_vars))
 ```
 
-produces (v0.2.0, default 2 m stations on the centerline — a real run, not an illustration):
+produces (v0.2.5, default 2 m stations on the centerline — a real run, not an illustration):
 
 ```text
-112.54804243512962 ['ax', 'ay', 't', 'v', 'x', 'y', 'z']
-112.54804243512962 ['aero_front_share', 'ax', 'ay', 'force_lat_n', 'force_long_n',
+112.5572475646313 ['ax', 'ay', 't', 'v', 'x', 'y', 'z']
+112.5572475646313 ['aero_front_share', 'ax', 'ay', 'force_lat_n', 'force_long_n',
                     'slip_angle_rad', 'slip_ratio', 't', 'understeer_gradient', 'v',
                     'vertical_load_n', 'x', 'y', 'z']
 ```
 
 Identical lap time, as promised; the `t1` dataset has dims `{s: 2339, wheel: 4}` where `t0` has `{s: 2339}`. The first call pays the envelope generation (seconds in a release build — the CI wheel is built `--profile release` for exactly this reason; minutes in a debug build); the second reuses the process cache and costs only the profile plus, for `t1`, one trim and two understeer probes per station. Chapter 10 documents the full `Lap`/`Dataset` surface, and Chapter 14 builds recipes on top of it.
 
-#### 8.5.4 `t2` / `t3`: a clean, typed refusal
+#### 8.5.4 `t2` redirects; `t3` is a clean, typed refusal
 
-Requesting a transient tier produces `QssError::TierNotImplemented` with a message that names the milestone and the alternatives (`qss.rs:155-159`):
+The `t2` tier is real but *time*-indexed, so `solve_lap` refuses to shoehorn it into the arc-length result type — asking for it points you at the right door instead:
 
 ```text
-solver tier `t2` is not implemented yet (the transient tiers arrive in milestone M4);
-select tier `t0` (point-mass on the g-g-g-v envelope) or `t1` (full QSS with per-wheel outputs)
+the transient tier (t2) produces a time-indexed lap: call `outlap.solve_transient_lap(...)`,
+or `outlap.solve_lap_dataset(..., tier="t2")` for an xarray view
 ```
 
-At the Python boundary this becomes a `ValueError` (T2 → "M4", T3 → "M6"), and the tests assert the milestone appears in the message. No partial results, no silent downgrade.
+(`solve_lap_dataset(..., tier="t2")` handles the redirect for you and returns the time-indexed dataset of §8.7.) Requesting `t3` — the unimplemented 14-DOF suspension model — produces `QssError::TierNotImplemented`, a `ValueError` at the Python boundary. No partial results, no silent downgrade.
 
 ### 8.6 Flat-track mode: collapsing g-g-g-v to g-g
 
 Set `sim.flat_track: true` (or `sim={"flat_track": True}`) and the path sampler switches to `T0Path::from_track_flat` (`path.rs:52-58`): the plan-view curvature $\kappa_h(s)$ is kept, but grade, banking, and vertical curvature are all zeroed. Consequently $g_{\text{normal}} \equiv g$ at every station and speed — the four-dimensional g-g-g-v envelope is only ever queried on its flat-gravity slice, i.e. it *collapses to a classical g-g-v*. The physical track files are untouched; only this run's path is flattened, and the mode is recorded in the result (`flat_track` attr).
 
-This is the 2-D oracle-comparison mode, and it exists for one main customer: the **Limebeer cross-check** (Decision #48, `docs/validation/limebeer.md`). Perantoni & Limebeer (2014) is a 2-D study of an optimal-control F1 lap of Catalunya with a fully published car parameter set; outlap reruns the transcribed `limebeer_2014_f1` on the `catalunya_osm` min-curvature line with `flat_track: true` and the production 40×25×7 envelope. The CI-gated results: top speed 87.8 m/s vs the paper's ≈88 (−0.2%, gate ≤1%), slowest-corner apex 17.7 vs 17 m/s (+4.1%, gate ≤5%); the lap time (92.36 s vs the paper's 82.43 s) is recorded but deliberately *not* gated, because a QSS solver on a heuristic minimum-curvature line structurally cannot match a transient optimal-control lap that co-optimises its own driven line — the validation page decomposes the delta term by term. Chapter 13, Validation, testing, and trust, walks through the whole cross-check and the rest of the gate suite; Chapter 12 describes the vehicles and tracks involved.
+This is the 2-D oracle-comparison mode, and it exists for one main customer: the **Limebeer cross-check** (`docs/validation/limebeer.md`). Perantoni & Limebeer (2014) is a 2-D study of an optimal-control F1 lap of Catalunya with a fully published car parameter set; outlap reruns the transcribed `limebeer_2014_f1` on the `catalunya_osm` min-curvature line with `flat_track: true` and the production 40×25×7 envelope. The CI-gated results: top speed 87.8 m/s vs the paper's ≈88 (−0.2%, gate ≤1%), slowest-corner apex 17.7 vs 17 m/s (+4.1%, gate ≤5%); the lap time (92.36 s vs the paper's 82.43 s) is recorded but deliberately *not* gated, because a QSS solver on a heuristic minimum-curvature line structurally cannot match a transient optimal-control lap that co-optimises its own driven line — the validation page decomposes the delta term by term. Chapter 13, Validation, testing, and trust, walks through the whole cross-check and the rest of the gate suite; Chapter 12 describes the vehicles and tracks involved.
 
-That closes the QSS loop: a double-track trim distilled into a gridded grip surface, a point-mass sweep that consumes it in microseconds per station, and a re-trim that puts the four wheels back into the output. Chapter 9 adds the parts of the car that change *while* the lap runs — powertrain energy, machine heat, and battery state.
+That closes the QSS loop: a double-track trim distilled into a gridded grip surface, a point-mass sweep that consumes it in microseconds per station, and a re-trim that puts the four wheels back into the output. One tier remains — the one that stops assuming equilibrium altogether.
+
+### 8.7 The transient tier (T2): driving the car through time
+
+*Theory pages: [`transient_chassis.md`](theory/transient_chassis.md) (the equations of motion), [`transient_control.md`](theory/transient_control.md) (the rule-based control layer), [`driver.md`](theory/driver.md) (the preview driver), [`integrator.md`](theory/integrator.md) (the split fixed-step integrator), [`block-bus.md`](theory/block-bus.md) (the block/bus architecture). Notebooks [08](../notebooks/08_transient_t2.ipynb) and [09](../notebooks/09_race_engineering.ipynb) run everything in this section live.*
+
+Everything so far solved the lap *station by station*, assuming the car is in equilibrium at each one. The T2 tier drops that assumption: it **integrates the car's equations of motion through time** at a fixed 1 ms step, with a driver model closing the loop. The output is not a speed-per-station table but a *data logger's trace* — steering, yaw rate, sideslip, per-wheel loads and slips, gear engaged, regen power — sampled 1000 times a second around the lap.
+
+#### 8.7.1 The model: seven degrees of freedom in a road-following frame
+
+The chassis state is $[s, n, \psi_{\text{rel}}, v_x, v_y, r, \omega_1..\omega_4]$: progress along the track $s$, lateral offset from the reference line $n$, heading relative to the road $\psi_{\text{rel}}$, body-frame velocities $v_x, v_y$, yaw rate $r$, and four wheel spin speeds. This is the **curvilinear road-frame** formulation of the lap-simulation literature (Perantoni & Limebeer 2014; Rowold et al. 2023 for the 3D extension): instead of tracking world x/y and asking "where is the road?", the road *is* the coordinate system, and grade, banking, and vertical curvature enter the equations as known functions of $s$ that rotate gravity and modulate the normal load (a crest unloads the tires exactly as Chapter 2 promised). The world trajectory is reconstructed *from* the integrated $(s, n)$ — never re-derived by projecting onto the track.
+
+The equations of motion are not trusted to hand algebra: a symbolic derivation (Kane's method, in `docs/derivations/`) generates reference values that a CI test compares against the Rust implementation to $10^{-12}$. If anyone edits the chassis code and its physics drifts from the derivation, CI fails.
+
+Around the chassis sit the same physics blocks the QSS tiers use, now evaluated per-timestep: the T1 load-transfer algebra (the *same* expressions — one source of truth for $F_z$), the MF6.1 tire model — now fed **relaxation-lagged** slip, the first-order lag of §7's `relax.rs` integrated exactly per step — the aero platform, and the `.ptm` powertrain torques. The vertical-load algebraic loop is resolved by the same `fz_coupling` setting as T1, defaulting to `fixed_point` at this tier (the "previous step" of `one_step_lag` is now a real millisecond, so iterating within the step is the more faithful choice; both are recorded).
+
+#### 8.7.2 The closed loop: a driver and a rule-based control layer
+
+A transient car goes nowhere without inputs, so T2 ships a deterministic **ideal driver** (MacAdam-style preview steering plus curvature feedforward for the line; a PI speed controller tracking the T0 speed profile for the pedals — MacAdam 1981) and a rule-based control layer that runs in the `sense → control → actuate → integrate` phases of every step:
+
+- a **gear-shift state machine** — torque-cut, ratio swap, clutch ramp — consuming the gearbox's `shift_time_s` (watch `gear` and `torque_scale` in the result);
+- **torque vectoring** — a yaw-moment command $\Delta M_z = k_{\text{yaw}} (r_{\text{target}} - r)$ allocated across the driven wheels within their friction-ellipse budgets;
+- **regen blending** — under braking, recoverable torque goes to the electric machines (charging the pack) and only the remainder to friction brakes; under power, traction draw discharges the pack. The battery follows as a slow state on a decimated clock, exactly as in Chapter 9, but now *within* the time loop.
+
+The driver's one deliberate idiosyncrasy is the headline caveat of §1.5: it tracks the QSS speed profile at a **stability margin** (~0.85 of the reference). The margin is not laziness — pushed to the raw profile, the closed loop *spins the car*, which is Chapter 2's "the QSS envelope is not filtered for stability" caveat made concrete. The result is a lap ~17% slower than T0/T1 that is honest about why, in its provenance (`speed_margin` attr) and in `docs/validation/limebeer.md`'s decomposition.
+
+#### 8.7.3 The integrator, briefly
+
+A fixed-step **split** integrator advances the state (Heun by default, RK4 selectable — `sim.dt_s`, `sim.integrator`): the chassis and controller states go through the Runge–Kutta sweep; the tire relaxation states use their exact exponential update (unconditionally stable at any step size); the slow states (SoC, temperatures) advance on a decimated clock. Convergence of the production stepper is verified against a reference ODE suite in CI, the hot loop is zero-allocation (enforced by the same dhat harness as the QSS kernels), and the step is deterministic — the same T2 lap is bit-identical on re-run. Details and citations in `docs/theory/integrator.md`.
+
+#### 8.7.4 What comes back
+
+`solve_transient_lap(vehicle_dir, track, ...)` (or `solve_lap_dataset(..., tier="t2")`) returns a dataset over **`time`** (and `wheel`): the chassis states, `steer`/`throttle`/`brake`, per-wheel `vertical_load_n`/`slip_ratio`/`slip_angle_rad`/forces, `gear`, `torque_scale`, `yaw_moment_nm`, `regen_power_w`, `traction_power_w`, and — with a battery present — `state_of_charge` and `pack_temp_c`; x/y/z come from the integrated trajectory. Provenance attrs record the resolved `fz_coupling`, `dt_s`, `integrator_order`, `speed_margin`, `flat_track`, and whether the lap `completed`. Chapter 10 documents the full surface; notebook 09 reads these traces the way a race engineer would.
+
+#### 8.7.5 What T2 is validated to be — and honestly is not
+
+The T2 tier's physics-parity gate is **hull containment** (Chapter 13): every `(a_x, a_y)` operating point of the closed-loop lap must stay inside the T1 g-g-g-v envelope. Measured: **0.0% exceedance** on all three reference cars — the transient car never produces grip the quasi-steady physics says it cannot have. What T2 is *not*, at v0.2.5, is a lap-time oracle: the driver's stability margin dominates its pace (~+17% vs T0), and its throughput (~62k steps/s per core at the default coupling) is bound by evaluating four Magic Formula tires per step. Both numbers are recorded and tripwired against regression — the pace decomposition lives in `docs/validation/limebeer.md`, the throughput analysis in the perf test itself (`crates/outlap-transient/tests/perf_throughput.rs`) — not hidden behind a green checkmark.
+
+That completes the solver story. Chapter 9 adds the parts of the car that change *while* the lap runs — powertrain energy, machine heat, and battery state.
 
 
 ---
@@ -2976,15 +3037,15 @@ The per-segment aggregate the lap loop consumes is `T1Powertrain::traction_energ
 
 Per the project's "new physics ⇒ new property test" gate, this module ships with tests you can read as an executable spec (`crates/outlap-qss/tests/t1_powertrain.rs`, `properties.rs`; listed in the theory page): open ⇒ equal torque; locked/solid ⇒ grip-proportional; the LSD inside its bias band; coupler conservation $\sum\tau_\text{out} = \tau_\text{in}\cdot\text{ratio}\cdot\eta$; splits summing to one; energy closure at the drive nodes; the ICE fuel rate positive under load; the open diff splitting driven-wheel slip in the live trim; and a traction ceiling that is positive and falls with speed for a geared engine. The per-segment advance is also under the zero-allocation gate (`tests/alloc.rs`).
 
-A note for code readers: the `outlap-powertrain` crate in the workspace is an empty placeholder ("implemented in a later milestone"). Everything in this chapter lives in `outlap-qss::t1::powertrain`, `outlap-qss::t1::thermal`, `outlap-qss::t1::battery`, and `outlap-thermal`.
+A note for code readers: the `outlap-powertrain` crate in the workspace is an empty placeholder. Everything in this chapter lives in `outlap-qss::t1::powertrain`, `outlap-qss::t1::thermal`, `outlap-qss::t1::battery`, and `outlap-thermal`.
 
 ### 9.6 Machine thermal: the N-node LPTN
 
 A cold motor and a heat-soaked motor are different cars. outlap models this with a **lumped-parameter thermal network** (LPTN): the machine is divided into $N$ isothermal lumps ("nodes") — winding, stator iron, rotor, housing, coolant, ambient — each with a heat capacity $C_i$ (J/K), connected by thermal conductances $g_{ij} = 1/R_{ij}$ (W/K), with the `.ptm` losses injected as per-node heat sources $P_i$ (W). The result is a small linear ODE system that is cheap enough to advance every track segment.
 
-#### 9.6.1 The firewall amendment (Decision #25)
+#### 9.6.1 The firewall amendment
 
-Strictly read, the firewall of Section 9.1 forbids modelling machine internals — and a thermal network *is* a model of machine internals. This is the one deliberate, author-authorized exception, recorded in `docs/theory/machine-thermal.md`: Locked Decision #25 (originally a fixed 2-node model) was amended on 2026-07-05 to allow any-$N$ networks, and for the *detailed* path outlap even builds the conductance operator from machine geometry using ported heat-transfer correlations. "The amendment is narrow — it applies to the thermal model only; torque, efficiency and loss still cross the firewall as neutral `.ptm` maps." The correlations are implemented clean-room from the published literature cited below; the upstream tool's geometry-building code was not ported.
+Strictly read, the firewall of Section 9.1 forbids modelling machine internals — and a thermal network *is* a model of machine internals. This is the one deliberate, author-authorized exception, recorded in `docs/theory/machine-thermal.md`: the rule (originally a fixed 2-node model) was amended to allow any-$N$ networks, and for the *detailed* path outlap even builds the conductance operator from machine geometry using ported heat-transfer correlations. "The amendment is narrow — it applies to the thermal model only; torque, efficiency and loss still cross the firewall as neutral `.ptm` maps." The correlations are implemented clean-room from the published literature cited below; the upstream tool's geometry-building code was not ported.
 
 #### 9.6.2 The network and its integrator
 
@@ -3143,7 +3204,7 @@ Here is where the battery and the motor maps meet, and it is the reason `ptm/1.1
 
 When coupled, a low-SoC point shifts **both** the traction efficiency *and* the machine-heating loss injected into the thermal network — one lookup feeds two physics.
 
-The interesting numerical case is deliberate in the shipped data: the synthetic 220S pack swings ≈ 634–810 V open-circuit over its SoC grid, while the drive-unit maps are gridded 730–850 V — so under low-SoC load the terminal voltage sags *below* the map. On the Vdc axis (and only there — speed and torque clamp) the shared monotone Hermite interpolant uses **linear out-of-domain extrapolation** from the boundary slice (`OutOfDomain::Linear`, Decision #30), C¹-continuous with the interior, so the map stays usable instead of freezing at its edge. Extrapolated values are held to physical bounds — concretely, the efficiency is clamped to $[10^{-3}, 1]$ inside the energy math — and the fact that a unit's map is Vdc-coupled with linear extrapolation is recorded in the assembly notes / loaded-model report, so an extrapolating run is never silent. The decode contract puts the Vdc axis last in tensor order (`T1Powertrain::map_axis_names_vdc`, debug-asserted).
+The interesting numerical case is deliberate in the shipped data: the synthetic 220S pack swings ≈ 634–810 V open-circuit over its SoC grid, while the drive-unit maps are gridded 730–850 V — so under low-SoC load the terminal voltage sags *below* the map. On the Vdc axis (and only there — speed and torque clamp) the shared monotone Hermite interpolant uses **linear out-of-domain extrapolation** from the boundary slice (`OutOfDomain::Linear`), C¹-continuous with the interior, so the map stays usable instead of freezing at its edge. Extrapolated values are held to physical bounds — concretely, the efficiency is clamped to $[10^{-3}, 1]$ inside the energy math — and the fact that a unit's map is Vdc-coupled with linear extrapolation is recorded in the assembly notes / loaded-model report, so an extrapolating run is never silent. The decode contract puts the Vdc axis last in tensor order (`T1Powertrain::map_axis_names_vdc`, debug-asserted).
 
 The property tests (Chapter 13) pin this down: a Vdc-stacked map built from a field linear in $V_\text{dc}$ is reproduced *exactly* under extrapolation below and above the grid; the presence matrix behaves; and a draining pack drives a lower coupled efficiency.
 
@@ -3432,7 +3493,7 @@ print(grid.fx.shape)
 
 The shipped road tire's `citation` attribute reads: `H. B. Pacejka, Tyre and Vehicle Dynamics, 2nd ed. (2006), Appendix 3, Table A3.1 (205/60R15 91V, 2.2 bar, ISO sign)` — provenance travels with the data. Its `notes` list two extraction facts, e.g. `('/mf61/QSX*', 'overturning-moment coefficients absent - Mx = 0')`: this parameter set produces `mx = 0`, and the API tells you so rather than staying silent.
 
-### 10.3 Racelines: `min_curvature` and `Raceline`
+### 10.3 Racelines: `min_curvature`, `time_weighted`, and `Raceline`
 
 ```python
 def min_curvature(
@@ -3447,14 +3508,41 @@ def min_curvature(
 **In:** a loaded `Track`, the car's half-width in metres, and three numeric knobs: `ds_m` is the sampling step of the quadratic program (QP — the optimisation that picks the line), `margin_m` an extra safety margin kept from the track edges, and `epsilon` the Tikhonov regularisation (a tiny smoothing term that keeps the QP well-conditioned). **Out:** a `Raceline` — the minimum-curvature racing line, i.e. the path inside the track corridor that minimises the integral of squared curvature (see Chapter 8, Physics II). **Errors:** `ValueError` if `ds_m` or `half_width_m` is not positive and finite, or if the QP fails.
 
 ```python
-class Raceline:                       # produced by min_curvature; not user-constructible
+def time_weighted(
+    vehicle_dir: str,
+    track: Track,
+    half_width_m: float,
+    ds_m: float = 2.0,
+    iterations: int = 3,
+    margin_m: float = 0.3,
+    epsilon: float = 1e-8,
+    tol: float = 1e-3,
+    overrides: dict | None = None,
+    conditions: dict | None = None,
+    sim: dict | None = None,
+) -> Raceline
+```
+
+The **time-weighted** refinement (Chapter 8): the same QP re-solved with each station's squared
+curvature weighted by the time the car spends there (`w ∝ 1/v` from a T0 speed pre-pass on the
+current line), in an outer loop that keeps the fastest line and stops when the modelled lap time
+stops improving (relative tolerance `tol`) or after `iterations`. Unlike `min_curvature` it needs
+the *car* — the pre-pass runs the vehicle's own g-g-g-v envelope, so it takes `vehicle_dir` and
+honours `sim`/`overrides`/`conditions` exactly as the solvers do (the envelope is built once and
+reused across iterations). The result is faster-or-equal to the min-curvature line by
+construction. **Errors:** as `min_curvature`, plus everything vehicle loading can raise, plus a `ValueError` for `iterations` outside 1..=16.
+
+```python
+class Raceline:                       # produced by the generators; not user-constructible
     ds_m: float                       # the step the line was GENERATED with, m
+    generator: str                    # "min_curvature" | "time_weighted"
+    iterations: int                   # outer iterations actually run (1 for min_curvature)
     def s(self) -> NDArray            # parent-centerline stations, m
     def n(self) -> NDArray            # signed lateral offsets (+ = road-left), m
     def line(self) -> Track           # the racing line as a first-class Track
 ```
 
-`line()` matters: the racing line comes back as a real `Track` with its own curvature and length, so the solver can drive it exactly like a centerline. `ds_m` is recorded so the lap result carries honest provenance about how the line was generated.
+`line()` matters: the racing line comes back as a real `Track` with its own curvature and length, so the solver can drive it exactly like a centerline. `ds_m`, `generator`, and `iterations` are recorded so the lap result carries honest provenance about how the line was generated (a `time_weighted` line reports the *real* converged iteration count, never a placeholder).
 
 ```python
 from outlap.core import Track, min_curvature
@@ -3498,11 +3586,11 @@ This is the QSS (quasi-steady-state) lap solver — it computes the fastest spee
 Parameter semantics:
 
 - `ds_m` — station spacing of the solve, m. Smaller = finer resolution, more stations. Must be positive and finite.
-- `tier` — `"t0"` (point-mass on the g-g-g-v envelope) or `"t1"` (full QSS with per-wheel outputs). Overrides everything else, including `sim["tier"]` and the vehicle dir's `sim.yaml`. The default — from `schemas/sim.json` — is **`"t1"`**. `"t2"`/`"t3"` raise `ValueError` by design (transient tiers arrive in later milestones).
+- `tier` — `"t0"` (point-mass on the g-g-g-v envelope) or `"t1"` (full QSS with per-wheel outputs). Overrides everything else, including `sim["tier"]` and the vehicle dir's `sim.yaml`. The default — from `schemas/sim.json` — is **`"t1"`**. `"t2"` raises a `ValueError` that redirects you to `solve_transient_lap` (§10.4.5) — the transient lap is time-indexed and has its own entry point (`solve_lap_dataset(..., tier="t2")` handles the redirect for you); `"t3"` raises `ValueError` (not implemented).
 - `sim` — a nested dict deep-merged onto `sim.yaml`-or-defaults, e.g. `{"flat_track": True, "envelope": {"v_points": 24}}`. Unknown keys are rejected loudly (§10.4.4).
 - `conditions` — a nested dict deep-merged onto `conditions.yaml`-or-defaults (ISA-like: 20 °C, 1013.25 hPa). Same strictness.
 - `overrides` — a flat `{dotted.path: value}` vehicle patch (e.g. `{"chassis.mass_kg": 1500.0}`) applied through the full validation pipeline: schema-checked after the merge and recorded in provenance. Values may be `bool`, `int`, `float`, or `str`.
-- `raceline_ds_m` — provenance only: when you hand-solve a generated racing line, pass the step it was generated with so the result records it. `solve_lap_dataset` does this automatically for `Raceline` inputs, so you rarely touch it.
+- `raceline_ds_m` (plus `raceline_generator`, `raceline_iterations`) — provenance only: when you hand-solve a generated racing line, pass the step (and generator kind / iteration count) it was generated with so the result records it. `solve_lap_dataset` does this automatically for `Raceline` inputs, so you rarely touch them.
 
 Precedence, in one line: `tier=` argument > `sim=` dict > `sim.yaml` in the vehicle dir > built-in defaults (and the same file-then-dict order for conditions).
 
@@ -3590,7 +3678,7 @@ def solve_lap_dataset(
 ) -> xr.Dataset
 ```
 
-`lap_dataset` converts a `Lap` into the labelled `xarray.Dataset` that is outlap's designed results boundary (§10.5). `solve_lap_dataset` is `solve_lap` + `lap_dataset` in one call, with one extra convenience: `line` may be a `Raceline`, in which case it solves on `line.line()` and passes `raceline_ds_m=line.ds_m` for provenance automatically. All options after `line` are keyword-only. Errors are exactly `solve_lap`'s.
+`lap_dataset` converts a `Lap` into the labelled `xarray.Dataset` that is outlap's designed results boundary (§10.5). `solve_lap_dataset` is `solve_lap` + `lap_dataset` in one call, with two extra conveniences: `line` may be a `Raceline`, in which case it solves on `line.line()` and passes the raceline provenance (`ds_m`, generator, iterations) automatically; and `tier="t2"` dispatches to `solve_transient_lap` (§10.4.5) and returns the **time-indexed** transient dataset instead. All options after `line` are keyword-only. Errors are exactly the underlying solver's.
 
 ```python
 from outlap.core import Track, min_curvature, solve_lap_dataset
@@ -3640,14 +3728,16 @@ Both dicts are deep-merged onto the corresponding file (or defaults) and re-vali
 
 | Field | Default | Meaning |
 |---|---|---|
-| `tier` | `"t1"` | Solver tier (`t0`/`t1`/`t2`/`t3`; the last two raise for now). |
+| `tier` | `"t1"` | Solver tier (`t0`/`t1`/`t2`/`t3`; `t2` is time-indexed and routes through its own entry point, `t3` raises). |
 | `envelope` | `{"v_points": 40, "ax_points": 25, "g_normal_points": 7}` | g-g-g-v grid resolution (Chapter 8). |
-| `fz_coupling` | `"one_step_lag"` | Normal-load algebraic-loop mode; alternative `"fixed_point"`. Recorded in the result. |
+| `fz_coupling` | unset (tier-resolved) | Normal-load algebraic-loop mode: `"one_step_lag"` or `"fixed_point"`. Unset = automatic (`one_step_lag` for T0/T1, `fixed_point` for T2); the resolved value is recorded in the result. |
 | `flat_track` | `false` | Zero grade/banking/vertical curvature so the envelope collapses to a flat g-g (oracle-comparison mode). Recorded; the track file is untouched. |
 | `allow_degraded` | `false` | Permit documented-fallback combinations; the result is marked. |
-| `dt_s` | `0.001` | Fixed integration step, s — transient tiers only. |
-| `integrator` | `"heun"` | Fixed-step integrator (`heun`/`rk4`) — transient tiers only. |
-| `raceline` | `{"generator": "min_curvature"}` | Racing-line source; alternatively `{"file": "raceline.csv"}` (exactly one of the two). |
+| `dt_s` | `0.001` | Fixed integration step, s — the T2 tier's timestep. |
+| `integrator` | `"heun"` | Fixed-step integrator (`heun`/`rk4`) for the T2 tier. |
+| `slow_decimation` | `20` | T2 slow-state clock: advance SoC/temperatures every N fast steps. |
+| `fixed_point` | `{damping: 1.0, tolerance: 1e-6, max_iter: 3}`-style knobs | Iteration controls for the `fixed_point` coupling mode. |
+| `raceline` | `{"generator": "min_curvature"}` | Racing-line source: `"min_curvature"`, `{"time_weighted": {"iterations": 3}}`, or `{"file": "raceline.csv"}` (exactly one of generator/file). |
 | `schema` | — | Schema version string, e.g. `"sim/1.0"`. |
 
 `conditions=` fields and defaults:
@@ -3662,9 +3752,60 @@ Both dicts are deep-merged onto the corresponding file (or defaults) and re-vali
 | `wind.direction_deg` | `0.0` | Meteorological direction the wind blows *from*, degrees (0 = North, 90 = East). |
 | `schema` | — | e.g. `"conditions/1.0"`. |
 
+#### 10.4.5 `solve_transient_lap` and `transient_lap_dataset`
+
+```python
+def solve_transient_lap(
+    vehicle_dir: str,
+    track: Track,
+    ds_m: float = DEFAULT_DS_M,
+    raceline_ds_m: float | None = None,
+    raceline_generator: str | None = None,
+    raceline_iterations: int | None = None,
+    overrides: dict[str, bool | int | float | str] | None = None,
+    conditions: dict[str, object] | None = None,
+    sim: dict[str, object] | None = None,
+    speed_margin: float = 0.85,
+    initial_soc: float | None = None,
+) -> TransientLap
+
+def transient_lap_dataset(lap: TransientLap) -> xr.Dataset
+```
+
+The **T2 transient** entry point (§8.7). It assembles the same QSS artifacts first — the g-g-g-v
+envelope (cache-shared with the QSS solvers), the T0 speed profile, the target line — then runs
+the closed-loop time integration: the ideal driver tracks `speed_margin` × the T0 profile
+(default 0.85, the stability margin of §8.7.2; the resolved value is recorded in the result),
+the control layer runs the shift/TV/regen rules, and the split integrator advances the 7-DOF
+chassis at `sim.dt_s`. `initial_soc` optionally seeds the battery state of charge. `sim`,
+`conditions`, and `overrides` behave exactly as in `solve_lap`; `sim.flat_track` selects the
+flat analysis mode versus the full 3D road frame. The lap is seeded at the straightest station
+of the line (a cold transient dropped into a corner is unphysical) and runs one full lap of arc
+length, wrapping past the start/finish.
+
+`transient_lap_dataset` converts the result into the time-indexed dataset of §10.5; in practice
+you call `solve_lap_dataset(vehicle, line, tier="t2", ...)` and get that dataset in one step:
+
+```python
+from outlap.core import Track, min_curvature, solve_lap_dataset
+
+track = Track.load("data/tracks/catalunya_osm")
+rl = min_curvature(track, half_width_m=1.1)
+t2 = solve_lap_dataset("data/vehicles/limebeer_2014_f1", rl, tier="t2",
+                       sim={"flat_track": True})
+print(round(t2.attrs["lap_time_s"], 2), t2.sizes["time"])
+```
+
+A ~108 s lap at 1 ms is ~108 000 samples over dims `(time, wheel)` — a full data-logger trace
+(notebooks 08 and 09 plot them). **Errors:** everything `solve_lap` can raise, plus a
+`ValueError` for a `speed_margin` outside `(0, 1]`; a lap that diverges (the driver spins)
+comes back *truncated and flagged* — `attrs["completed"] == 0` — never as a silent crash.
+
 ### 10.5 The xarray Dataset contract
 
 Every solved lap crosses the Python boundary as an `xarray.Dataset` — labelled dimensions, coordinates, per-variable units, and provenance attributes. This is a semver-style contract: additions are backward-compatible, and code written against an `s`-only `t0` dataset keeps working because the richer channels are strictly additive and only appear when the solve produced them.
+
+There are two dataset shapes, one per solver family. **QSS laps (t0/t1) are arc-length-indexed** — the tables below. **Transient laps (t2) are time-indexed**: the primary dim is `time` (the fixed `dt` grid, s) with the same `wheel` dim; data variables are the chassis states (`s`, `n`, `psi_rel`, `vx`, `vy`, `yaw_rate`, `ax`, `ay`), the driver's `steer`/`throttle`/`brake`, the world trajectory `x`/`y`/`z` (from the *integrated* path), control telemetry (`gear`, `torque_scale`, `yaw_moment_nm`, `regen_power_w`, `traction_power_w`, per-axle regen torques), per-wheel `omega`/`vertical_load_n`/`slip_ratio`/`slip_angle_rad`/`force_long_n`/`force_lat_n`, and — with a battery — `state_of_charge`/`pack_temp_c`; attrs add `dt_s`, `integrator_order`, `speed_margin`, and `completed` to the usual provenance. `s` in a transient lap is a *data variable* that advances (and wraps) along the drive.
 
 **Dimensions and coordinates:**
 
@@ -3780,10 +3921,10 @@ All messages below were produced verbatim by the shipped package.
 | You do | You get |
 |---|---|
 | Load a missing vehicle/track/tire file | `FileNotFoundError: source not found: track.yaml` |
-| `solve_lap(..., tier="t2")` | `` ValueError: solver tier `t2` is not implemented yet (the transient tiers arrive in milestone M4); select tier `t0` (point-mass on the g-g-g-v envelope) or `t1` (full QSS with per-wheel outputs) `` |
+| `solve_lap(..., tier="t2")` | `` ValueError: the transient tier (t2) produces a time-indexed lap: call `outlap.solve_transient_lap(...)`, or `outlap.solve_lap_dataset(..., tier="t2")` for an xarray view `` |
 | `overrides={"chassis.masss_kg": 1500.0}` | `` ValueError: unknown field `masss_kg` `` + `` help: did you mean `mass_kg`? `` |
 | `conditions={"air": {"temp_c": 35.0}}` | `` ValueError: unknown conditions field `air.temp_c` (known fields here: ["pressure_hpa", "temperature_c"]) `` |
-| `sim={"envelop": {}}` | `` ValueError: unknown sim field `sim.envelop` (known fields here: ["allow_degraded", "dt_s", "envelope", "flat_track", "fz_coupling", "integrator", "raceline", "schema", "tier"]) `` |
+| `sim={"envelop": {}}` | `` ValueError: unknown sim field `sim.envelop` (known fields here: ["allow_degraded", "dt_s", "envelope", "fixed_point", "flat_track", "fz_coupling", "integrator", "raceline", "schema", "slow_decimation", "tier"]) `` |
 | `ds_m=-1.0` (any sampling function) | `ValueError: ds_m must be a positive, finite number of metres, got -1` |
 | Unsupported override value type (e.g. a numpy array) | `ValueError: unsupported value type in overrides: ndarray` |
 | Mismatched array lengths in `Tyre.forces` | `ValueError: length mismatch: kappa has 5 elements, alpha has 3` |
@@ -3830,16 +3971,16 @@ Finally, packaging facts for orientation: the package requires Python ≥ 3.12; 
 
 ## 11. Importers and tooling
 
-*What you will learn: every command-line tool that ships with outlap v0.2.0 — the PDT powertrain importer, the two track importers, the tyre-file codec and fitting pipeline, the data generators, and the schema and golden-file tooling — with the exact invocations, the files each one reads and writes, and the data-hygiene ("firewall") rules you must respect when feeding real data into any of them.*
+*What you will learn: every command-line tool that ships with outlap v0.2.5 — the PDT powertrain importer, the two track importers, the tyre-file codec and fitting pipeline, the data generators, and the schema and golden-file tooling — with the exact invocations, the files each one reads and writes, and the data-hygiene ("firewall") rules you must respect when feeding real data into any of them.*
 
 ### 11.1 The tooling landscape (and what does not exist yet)
 
 outlap's tools are Python *module CLIs*: you run them as `python -m <module>` from the `python/` directory of a repository checkout, typically through uv (`cd python && uv run python -m ...`). There is deliberately **no unified `outlap` command yet**. Two things a new user will trip over:
 
 - Installing the Python package puts an `outlap` script on your path, but it is a placeholder — `outlap.main()` in `python/src/outlap/__init__.py` just prints `Hello from outlap!`. Ignore it.
-- Error messages occasionally hint at `outlap migrate` (for schema-version mismatches). That verb is part of the planned unified Rust CLI (Locked Decision #19, an M7 deliverable); today the hint tells you *what* will fix the file, not a command you can run. The PDT importer docstring says the same thing explicitly: the module CLI "mirrors the future Rust `outlap import pdt-*` 1:1".
+- Error messages occasionally hint at `outlap migrate` (for schema-version mismatches). That verb is part of the planned unified Rust CLI (Chapter 15); today the hint tells you *what* will fix the file, not a command you can run. The PDT importer docstring says the same thing explicitly: the module CLI "mirrors the future Rust `outlap import pdt-*` 1:1".
 
-The complete tooling surface at v0.2.0:
+The complete tooling surface at v0.2.5:
 
 | Tool | Invocation | Reads → writes |
 |---|---|---|
@@ -3915,7 +4056,7 @@ Every emitted document is validated against the committed JSON Schema (`schemas/
 
 #### The thermal outputs: 2-node fit or detailed network
 
-When an EDrive file carries the full lumped-parameter thermal network (*LPTN* — a graph of heat capacities connected by thermal conductances) the importer takes the **detailed** path (`thermal_network.py`): it collapses the ~20-node PDT network onto outlap's reduced node menu — `winding / stator_iron / rotor / housing / coolant / ambient` — by summing capacities and inter-group conductances, routes the per-component loss maps onto those groups, and rebuilds the convection paths (air-gap film, liquid cooling jacket) from clean scalar geometry fields — never from the FEA mesh. Those convection correlations are the one deliberate, narrow reversal of the firewall (Locked Decision #25): they were ported into `outlap-thermal` as author-owned open-source physics (Churchill–Chu and Gnielinski-type film correlations; Chapter 9 covers the model).
+When an EDrive file carries the full lumped-parameter thermal network (*LPTN* — a graph of heat capacities connected by thermal conductances) the importer takes the **detailed** path (`thermal_network.py`): it collapses the ~20-node PDT network onto outlap's reduced node menu — `winding / stator_iron / rotor / housing / coolant / ambient` — by summing capacities and inter-group conductances, routes the per-component loss maps onto those groups, and rebuilds the convection paths (air-gap film, liquid cooling jacket) from clean scalar geometry fields — never from the FEA mesh. Those convection correlations are the one deliberate, narrow reversal of the firewall: they were ported into `outlap-thermal` as author-owned open-source physics (Churchill–Chu and Gnielinski-type film correlations; Chapter 9 covers the model).
 
 When the file has only thermal *envelopes* (continuous and overload torque curves), the importer distills a **lumped 2-node model** instead (`thermal_fit.py`). The model is a winding node and a case node:
 
@@ -3943,7 +4084,7 @@ Both track importers emit the same two files into a track directory: `track.yaml
 
 #### `osm_track` — OpenStreetMap + elevation (the 3D importer)
 
-Since no open **3D** circuit data exists, this importer builds it from public sources (`python/src/outlap/importers/osm_track.py`): (1) the centreline from OpenStreetMap `highway=raceway` ways (ODbL-licensed), assembled into the longest ordered polyline and projected to a local metric frame; (2) elevation from an open *DEM* (digital elevation model — a public grid of ground heights) via the free opentopodata API, trying the 25 m European dataset `eudem25m` first, then the global `srtm30m`, smoothed with a cubic smoothing spline so the second derivative of z (needed for vertical curvature) is continuous; (3) banking left at zero — coarse public DEMs cannot resolve it; you refine it later with sparse `banking_keypoints` in `track.yaml`.
+Since no open **3D** circuit data exists, this importer builds it from public sources (`python/src/outlap/importers/osm_track.py`): (1) the centreline from OpenStreetMap `highway=raceway` ways (ODbL-licensed), **assembled into the main closed lap** — OSM often fragments a circuit into corner-named way segments plus pit lanes and kart tracks, so the importer drops non-circuit ways by name, builds the node graph, prunes dead-end spurs to the 2-core, and resolves a pit-bypass *theta* junction (two junction nodes joined by three paths) to the cycle of the two longest paths, falling back to the longest single way on any unexpected topology — then projects it to a local metric frame; (2) elevation from an open *DEM* (digital elevation model — a public grid of ground heights) via the free opentopodata API, trying the 25 m European dataset `eudem25m` first, then the global `srtm30m`, smoothed with a cubic smoothing spline so the second derivative of z (needed for vertical curvature) is continuous; (3) banking left at zero — coarse public DEMs cannot resolve it; you refine it later with sparse `banking_keypoints` in `track.yaml`. The theta-junction assembly is exercised offline (no network) by `python/tests/test_osm_track.py`.
 
 ```bash
 cd python
@@ -3955,7 +4096,7 @@ uv run python -m outlap.importers.osm_track --name "My Circuit" --lat 41.57 --lo
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--preset` | — | one of `catalunya`, `spa`, `silverstone` (Decision #23) |
+| `--preset` | — | one of `catalunya`, `spa`, `silverstone` |
 | `--name/--lat/--lon` | — | ad-hoc circuit (either a preset or all three are required) |
 | `--radius` | 2500 | OSM search radius in metres (ad-hoc path only; presets bake their own) |
 | `--ds` | 3.0 | resample spacing, metres |
@@ -4012,7 +4153,7 @@ python -m outlap.tirefit synth <in.tyr.yaml> -o out.csv [--seed 0] [--noise 0.01
 
 Two generators author committed synthetic data (both run from anywhere; they anchor paths off their own file location):
 
-- **`gen_f1_aero.py`** writes `data/vehicles/f1_2026/aero/f1_2026.parquet` — the ride-height/yaw/DRS aero map of the F1 reference car: a 5×5×5×2 grid over `ride_height_f_mm, ride_height_r_mm, yaw_deg, drs_flag` with value columns `cz_front_a_m2, cz_rear_a_m2, cx_a_m2`. It is **anchored** so that at the reference ride heights (30 mm front / 70 mm rear) the map reproduces the car's constant-aero fallback exactly (1.9 / 2.6 / 1.25 m²) — asserted at generation time — and every grid-aligned fibre is monotone or single-peaked, safe for the one shared monotone cubic Hermite interpolant (Fritsch–Carlson; Decision #30). All sensitivities are estimated; the file is synthetic and says so.
+- **`gen_f1_aero.py`** writes `data/vehicles/f1_2026/aero/f1_2026.parquet` — the ride-height/yaw/DRS aero map of the F1 reference car: a 5×5×5×2 grid over `ride_height_f_mm, ride_height_r_mm, yaw_deg, drs_flag` with value columns `cz_front_a_m2, cz_rear_a_m2, cx_a_m2`. It is **anchored** so that at the reference ride heights (30 mm front / 70 mm rear) the map reproduces the car's constant-aero fallback exactly (1.9 / 2.6 / 1.25 m²) — asserted at generation time — and every grid-aligned fibre is monotone or single-peaked, safe for the one shared monotone cubic Hermite interpolant (Fritsch–Carlson). All sensitivities are estimated; the file is synthetic and says so.
 - **`gen_model3_powertrain.py`** writes the Tesla Model 3 study's entire committed powertrain (Section 12.2): three Vdc-stacked `ptm/1.1` drive-unit maps + sidecars (`ptm/du_{small,medium,large}.*`) and the synthetic 800 V-class pack (`battery/pack_800v.*`). Its design choices are deliberate teaching devices: efficiency/loss pairs are emitted consistently so energy closure holds exactly at grid nodes (drive loss $= P_{mech}(1/\eta - 1)$, regen loss $= |P_{mech}|(1 - \eta)$); efficiency is *linear* in Vdc so the shared interpolant reproduces and extrapolates that axis exactly; and the 730/790/850 V grid is deliberately narrower than the pack's voltage swing so a low-SoC lap exercises the documented below-grid extrapolation.
 
 Seven `plot_*.py` scripts render the documentation figures (`docs/theory/img/`, `docs/validation/img/`, `docs/vehicles/model3/img/`). Four of them shell out to committed Rust examples (`cargo run -p outlap-qss --example battery_coupling | ggv_traces | thermal_traces | limebeer_lap`) and plot the CSV those examples print — so every theory figure is driven by the actual model, not a re-implementation. `plot_model3.py` instead drives the public Python API (`vehicle_report`, `solve_lap_dataset`, `min_curvature`; Chapter 10). None of these run in CI.
@@ -4021,7 +4162,7 @@ Two more fixture generators live inside the Rust crate tree (`crates/outlap-sche
 
 ### 11.7 `gen_schemas` — the schema source of truth
 
-The Rust `schemars` types are the single source of truth for the file formats (Decision #34). The only binary in the workspace regenerates the published JSON Schemas from them:
+The Rust `schemars` types are the single source of truth for the file formats. The only binary in the workspace regenerates the published JSON Schemas from them:
 
 ```bash
 cargo run -p outlap-schema --bin gen_schemas            # writes schemas/*.json
@@ -4044,17 +4185,17 @@ Requirements: GNU Octave ≥ 8 on PATH and a local checkout of the oracle (never
 
 ## 12. The shipped data library
 
-*What you will learn: everything under `data/` — three reference vehicles, three citation-backed tyre sets, and 26 circuits — and, for each asset, what it is for, where every number comes from, and how much to trust it. You will also learn the licence obligations that travel with the track data if you redistribute it.*
+*What you will learn: everything under `data/` — three reference vehicles, three citation-backed tyre sets, and 27 circuits — and, for each asset, what it is for, where every number comes from, and how much to trust it. You will also learn the licence obligations that travel with the track data if you redistribute it.*
 
 ### 12.1 How the library is organized
 
-All shipped data is licensed **CC-BY-SA-4.0** (SPDX headers on every file), distinct from the AGPL-3.0-only code and the Apache-2.0 `schemas/`. The library's honesty contract is Locked Decision #15: reference data is *synthetic or transcribed, never measured*, with plausible magnitudes **clearly labelled at their source** — and Decision #41 backs it at run time: every estimated or defaulted value surfaces in the loaded-model report (`outlap.vehicle_report(...)`, Chapter 10), nothing silent. Each vehicle directory is self-contained: a `vehicle.yaml` whose referenced `.ptm`/`.tyr`/battery/emotor files live in sibling subdirectories, loadable as one unit (Chapter 4, The input quartet).
+All shipped data is licensed **CC-BY-SA-4.0** (SPDX headers on every file), distinct from the AGPL-3.0-only code and the Apache-2.0 `schemas/`. The library's honesty contract: reference data is *synthetic or transcribed, never measured*, with plausible magnitudes **clearly labelled at their source** — and the run time backs it: every estimated or defaulted value surfaces in the loaded-model report (`outlap.vehicle_report(...)`, Chapter 10), nothing silent. Each vehicle directory is self-contained: a `vehicle.yaml` whose referenced `.ptm`/`.tyr`/battery/emotor files live in sibling subdirectories, loadable as one unit (Chapter 4, The input quartet).
 
 Three trust levels recur below, so name them once: **spec** (a published manufacturer or paper value, cited), **estimated** (a documented heuristic, flagged in the loaded-model report), and **synthetic** (an invented smooth surface from a committed generator script — reproducible, but not data about any real machine).
 
 ### 12.2 Vehicles (`data/vehicles/`)
 
-Three vehicles ship at v0.2.0: `limebeer_2014_f1`, `f1_2026`, and `tesla_model3_rwd`.
+Three vehicles ship at v0.2.5: `limebeer_2014_f1`, `f1_2026`, and `tesla_model3_rwd`.
 
 #### `limebeer_2014_f1` — reference car #1, the validation car
 
@@ -4081,9 +4222,9 @@ It is the only vehicle that ships its own `conditions.yaml` (21.0 °C, 1013.25 h
 
 A demo car, not a validation car: an ICE + MGU-K on one shaft, through an 8-speed gearbox (`ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]`, `final_drive: 3.1`, 20 ms shifts) and a limited-slip differential to the rear axle. Mass 768 kg, wheelbase 3.40 m, track [1.65, 1.60] m. Everything is synthetic-but-plausible, and the file header says so twice — the ERS/energy figures (4.0 MJ store, [0.2, 0.9] SoC window, 350 kW deployment with a speed taper, 8.5 MJ per-lap harvest) are "approximate 2026-regulation values for testing", to be verified against the published FIA 2026 Technical Regulations before being treated as reference data.
 
-Its aero is the interesting part. The `aero.constant` block (CxA 1.25 m², CzA 1.9 + 2.6 = 4.5 m² — about 1.7× car weight of downforce at 250 km/h, L/D ≈ 3.6) feeds the T0 tier, while T1 consumes the shipped `aero/f1_2026.parquet` ride-height/yaw/DRS map, generated by `gen_f1_aero.py` and **anchored** so the map reproduces those exact constants at the reference ride heights (Section 11.6). The constants themselves stand in for the same aero magnitudes as the Limebeer car (ClA 4.5 m² is PL2014's value) — that anchoring is what keeps the two F1 cars' behaviour comparable. Two honest gaps: `battery.params` references `battery/f1_es.yaml`, which **does not ship yet** (the ERS energy manager is the M6 milestone; at T0 the ERS is a power cap), and `tyr/slick.tyr.yaml` is a hand-authored synthetic slick "for schema/round-trip testing only".
+Its aero is the interesting part. The `aero.constant` block (CxA 1.25 m², CzA 1.9 + 2.6 = 4.5 m² — about 1.7× car weight of downforce at 250 km/h, L/D ≈ 3.6) feeds the T0 tier, while T1 consumes the shipped `aero/f1_2026.parquet` ride-height/yaw/DRS map, generated by `gen_f1_aero.py` and **anchored** so the map reproduces those exact constants at the reference ride heights (Section 11.6). The constants themselves stand in for the same aero magnitudes as the Limebeer car (ClA 4.5 m² is PL2014's value) — that anchoring is what keeps the two F1 cars' behaviour comparable. Two honest gaps: `battery.params` references `battery/f1_es.yaml`, which **does not ship yet** (the ERS deploy/harvest energy manager is future work; the ERS is enforced as a power cap), and `tyr/slick.tyr.yaml` is a hand-authored synthetic slick "for schema/round-trip testing only".
 
-#### `tesla_model3_rwd` — the Model 3 HV variant study (the M3 capstone car)
+#### `tesla_model3_rwd` — the Model 3 HV variant study (the electrified-stack showcase)
 
 Read the caveat before quoting any number from this car: it is a production **Tesla Model 3 RWD identity re-imagined as an HV (800 V-class) variant**. The chassis, mass, and aero are Model-3-plausible; the powertrain is deliberately *not* the real ~360 V car but an 800 V-class drive-unit + pack stack, so that the Vdc–SoC coupling (Chapter 9) is live on a road car. Everything committed is **synthetic or estimated**: the drive-unit maps and pack tables are invented smooth surfaces written by `python/tools/gen_model3_powertrain.py`, never measured and never derived from any PDT export.
 
@@ -4099,7 +4240,7 @@ The committed powertrain is a three-way sizing study — the sensitivity axis of
 
 All three share a 700 rpm output-shaft base speed and a 730/790/850 V Vdc grid; the medium sizing sits at a production Model 3 RWD's ≈200 kW. The torque scales mirror the author's private drive-unit sizing sweep so this committed story and its untracked real-data twin tell the same tale, but the surfaces themselves are invented. The pack (`battery/pack_800v.battery.yaml`) is a synthetic 220-series/1-parallel, 92 Ah, 64.064 kWh Thevenin pack whose ≈634–810 V open-circuit range deliberately sags *below* the drive units' Vdc grid under low-SoC load — exercising the documented below-grid extrapolation on every deep-discharge lap. The machine-thermal model (`emotor/rear_du.emotor.yaml`) is a hand-authored six-node lumped network (winding / stator_iron / rotor / housing / coolant / ambient; winding limits 150/180 °C, rotor 140/170 °C), all values estimated from documented heuristics.
 
-Swapping a sizing is a one-line what-if override (Decision #35), no file edits:
+Swapping a sizing is a one-line what-if override, no file edits:
 
 ```python
 solve_lap_dataset(vehicle_dir, line, tier="t1",
@@ -4110,19 +4251,19 @@ Finally, the firewall in practice: the vehicle README walks through importing th
 
 ### 12.3 Tyres (`data/tires/`)
 
-Three citation-backed `.tyr` datasets ship; coefficient *values* are transcribed facts with an exact citation in each dataset's `provenance` block and README, and the source documents are never redistributed. One shared caveat first: the `tyr` format requires `thermal:` and `wear:` blocks, but those physics models land in M5 and no published source provides them — so every dataset carries **synthetic, clearly-labelled placeholders** for those two blocks. `synthetic: false` on a dataset means the load-bearing force/moment coefficients are the published set; the placeholder blocks are the documented exception.
+Three citation-backed `.tyr` datasets ship; coefficient *values* are transcribed facts with an exact citation in each dataset's `provenance` block and README, and the source documents are never redistributed. One shared caveat first: the `tyr` format requires `thermal:` and `wear:` blocks, but those physics models are still future and no published source provides them — so every dataset carries **synthetic, clearly-labelled placeholders** for those two blocks. `synthetic: false` on a dataset means the load-bearing force/moment coefficients are the published set; the placeholder blocks are the documented exception.
 
 1. **`pacejka_2006_205_60r15/`** — the 205/60R15 91V passenger tyre of Pacejka, *Tyre and Vehicle Dynamics*, 2nd ed. (2006), Table A3.1: the book's worked-example car tyre, and outlap's MF6.1 **validation tyre** (the golden CSVs of Section 11.8 are computed for it). Being a 2nd-edition set it has no inflation-pressure terms, `Mx ≡ 0`, and rolling resistance via `qsy1` only. This same file is the Model 3's `tyr/road.tyr.yaml`.
 2. **`roborace_devbot_mf52/`** — the Roborace DevBot "sport focused road tire" from TUMFTM's Open-Car-Dynamics (Apache-2.0, pinned commit `0a92c686`): an MF5.2 set mapped to MF6.1 with a per-coefficient conversion table in its README (camber `PHY3` folded into `PKY6`; no pressure model; `Mz ≡ Mx ≡ 0`).
 3. **`limebeer_2014_f1/`** — an MF6.1 re-expression of PL2014's tyre model (Appendix A + Table 3): load-linear peak friction with a $\sin(Q \arctan(S\rho))$ shape. The transcription is exact where the paper is linear — `PDX1 = 1.575`, `PDX2 = -0.35` reproduce μx = 1.75 at 2 kN and 1.40 at 6 kN *exactly* (likewise `PDY1 = 1.625` for 1.80 → 1.45), and `PCX1 = PCY1 = 1.9` is the paper's shape factor Q — while the stiffness terms (`PKX*`, `PKY*`) were fitted numerically so the MF6.1 peaks sit where the paper's formula *actually* peaks. That last clause matters: the README documents a PL2014 self-inconsistency — the stated peak slips (0.11/0.10, 9°/8°) disagree with the paper's own formula, which peaks at 0.756× those values — and anchors to the formula, since the validation target is the paper's simulation. No aligning moment, camber, or pressure sensitivity, matching the paper. No third-party source code was consulted; `fastest-lap` was read as a numerical cross-check only.
 
-One stale-doc warning: the table in `data/tires/README.md` still lists only the first two datasets and calls an F1 reference tyre "deferred" — the `limebeer_2014_f1/` directory ships regardless (it arrived with the M3 cross-check) and carries its own full provenance README. Trust the dataset directories over the index table.
+One stale-doc warning: the table in `data/tires/README.md` still lists only the first two datasets and calls an F1 reference tyre "deferred" — the `limebeer_2014_f1/` directory ships regardless (it arrived with the Limebeer cross-check) and carries its own full provenance README. Trust the dataset directories over the index table.
 
 Every `.tyr.yaml` under `data/` is schema-checked in CI (`python -m outlap.schemas --check`), and `crates/outlap-tire/tests/reference.rs` globs every dataset, asserting a warning-free load, a numerically-exact `.tir` codec round trip, and per-tyre physics checks.
 
-### 12.4 Tracks (`data/tracks/`) — 26 circuits, two provenances
+### 12.4 Tracks (`data/tracks/`) — 27 circuits, two provenances
 
-26 track directories ship: 25 flat circuits vendored from the TUMFTM racetrack-database (LGPL-3.0) plus one 3D import, `catalunya_osm`. The "length" column below is the arc length $s$ at the last centreline sample; the loader closes each loop over the final chord, so the lap length is a few metres more.
+27 track directories ship: 25 flat circuits vendored from the TUMFTM racetrack-database (LGPL-3.0) plus two 3D imports, `catalunya_osm` and `spa_osm`. The "length" column below is the arc length $s$ at the last centreline sample; the loader closes each loop over the final chord, so the lap length is a few metres more.
 
 | Directory | Circuit | Length (m) | Source | Class |
 |---|---|---|---|---|
@@ -4148,6 +4289,7 @@ Every `.tyr.yaml` under `data/` is schema-checked in CI (`python -m outlap.schem
 | `silverstone` | Silverstone Circuit | 5882 | TUMFTM | C |
 | `sochi` | Sochi Autodrom | 5836 | TUMFTM | C |
 | `spa` | Circuit de Spa-Francorchamps | 6995 | TUMFTM | C |
+| `spa_osm` | Circuit de Spa-Francorchamps | 6992 | OSM + DEM | B |
 | `spielberg` | Red Bull Ring | 4310 | TUMFTM | C |
 | `suzuka` | Suzuka Circuit | 5798 | TUMFTM | C |
 | `yas_marina` | Yas Marina Circuit | 5542 | TUMFTM | C |
@@ -4155,22 +4297,24 @@ Every `.tyr.yaml` under `data/` is schema-checked in CI (`python -m outlap.schem
 
 The **accuracy class** in each `track.yaml` meta is the trust label: class **C** means a flat 2-D centreline (`z = 0`, `banking_deg = 0`, `grip_scale = 1`) — legitimate, nothing fabricated, but these tracks exercise no grade, vertical-curvature, or banking physics. Class **B** means real elevation from a public DEM with defaulted widths and unresolved banking (adding hand-annotated `banking_keypoints` moves a track toward class A). Note the honest quirks: `ims` is the oval *geometry* only (its famous banking is not represented), `nuerburgring` is the ~5.14 km **GP-Strecke**, not the Nordschleife, and the TUMFTM set is frozen around 2021 (Yas Marina pre-2021, Zandvoort pre-2020 layouts).
 
-**The two Catalunyas are the classic trap.** `catalunya_osm` is the 3D OSM+DEM import — the *reference* Catalunya used by every notebook, example lap, and the Perantoni & Limebeer cross-check (~30 m of elevation change). `catalunya` is the flat TUMFTM vendoring, a peer of the other 24. They are the same circuit from two sources; the validation work found the class-C smoothed geometry does not reproduce the paper's apex speeds (it rounds the slow chicane open and tightens the fast corners), which is why the cross-check stays on `catalunya_osm` (Chapter 13).
+**The two Catalunyas are the classic trap.** `catalunya_osm` is the 3D OSM+DEM import — the *reference* Catalunya used by every notebook, example lap, and the Perantoni & Limebeer cross-check (~30 m of elevation change). `catalunya` is the flat TUMFTM vendoring, a peer of the other 24. They are the same circuit from two sources; the validation work found the class-C smoothed geometry does not reproduce the paper's apex speeds (it rounds the slow chicane open and tightens the fast corners), which is why the cross-check stays on `catalunya_osm` (Chapter 13). The same pairing applies to `spa` (flat) versus `spa_osm` (3D).
+
+**`spa_osm` is the elevation showcase.** Spa-Francorchamps climbs about 100 m from Eau Rouge through Raidillon up to Les Combes (committed geometry: 107.7 m of elevation span over a 6995 m closed loop — within 0.13 % of the official 7004 m GP layout), which makes it the circuit where grade and vertical-curvature physics genuinely matter: the Eau Rouge compression loads the car, the Raidillon crest unloads it. Its import is also the interesting one technically: OpenStreetMap fragments Spa into corner-named way segments plus pit and kart tracks, so the importer assembles the main lap graph-theoretically — drop non-circuit ways by name, prune dead-end spurs, and resolve the pit-bypass junction to the cycle of the two longest paths (Section 11.4; `data/tracks/README.md` shows the resulting map). Committed sanity tests pin the closure, the length, and the physical plausibility of its grade and vertical curvature. Notebook 02 plots it.
 
 #### Licence obligations when redistributing
 
-The 25 TUMFTM circuits are **LGPL-3.0 data**. outlap redistributes them legitimately by (a) shipping the upstream licence text verbatim as `data/tracks/LICENSE-tumftm-LGPL-3.0.txt` and (b) embedding the attribution string in every `track.yaml`: *"Centerline © TU München, Institute of Automotive Technology (TUMFTM racetrack-database), LGPL-3.0"*, plus a `notes` field recording the upstream commit (`e59595d`). If you redistribute these tracks — in a fork, a product, or a derived dataset — you must carry both forward. `catalunya_osm` is ODbL: keep "© OpenStreetMap contributors (ODbL)" and the elevation credit ("elevation eudem25m via opentopodata.org"), and remember that an ODbL-derived database inherits ODbL terms.
+The 25 TUMFTM circuits are **LGPL-3.0 data**. outlap redistributes them legitimately by (a) shipping the upstream licence text verbatim as `data/tracks/LICENSE-tumftm-LGPL-3.0.txt` and (b) embedding the attribution string in every `track.yaml`: *"Centerline © TU München, Institute of Automotive Technology (TUMFTM racetrack-database), LGPL-3.0"*, plus a `notes` field recording the upstream commit (`e59595d`). If you redistribute these tracks — in a fork, a product, or a derived dataset — you must carry both forward. The OSM imports (`catalunya_osm`, `spa_osm`) are ODbL: keep "© OpenStreetMap contributors (ODbL)" and the elevation credit ("elevation eudem25m via opentopodata.org"), and remember that an ODbL-derived database inherits ODbL terms.
 
 ### 12.5 `data/presets/` — reserved, currently empty
 
-The directory exists but ships **no files** at v0.2.0. It is reserved for the class presets of Locked Decision #41 (`formula_base`, `gt_base`, `passenger_base` — starting points you would `extends:` from when authoring your own vehicle). Until they land, the practical way to start a new car is to copy the closest reference vehicle and edit it, keeping the provenance comments honest (Chapter 14, Recipes, walks through exactly that). Do not confuse this directory with the track importer's `--preset` flag (Section 11.4) — same word, unrelated feature.
+The directory exists but ships **no files** at v0.2.5. It is reserved for the planned class presets (`formula_base`, `gt_base`, `passenger_base` — starting points you would `extends:` from when authoring your own vehicle). Until they land, the practical way to start a new car is to copy the closest reference vehicle and edit it, keeping the provenance comments honest (Chapter 14, Recipes, walks through exactly that). Do not confuse this directory with the track importer's `--preset` flag (Section 11.4) — same word, unrelated feature.
 
 
 ---
 
 ## 13. Validation, testing, and trust
 
-*What you will learn: why you should — and should not — believe the numbers outlap prints. This chapter walks through the one published cross-check the simulator is gated against, the two families of golden-file tests, the property tests that pin the physics sign-by-sign, the performance and determinism guarantees, and — just as important — an honest inventory of what is **not** yet validated at v0.2.0.*
+*What you will learn: why you should — and should not — believe the numbers outlap prints. This chapter walks through the one published cross-check the simulator is gated against, the two families of golden-file tests, the property tests that pin the physics sign-by-sign, the performance and determinism guarantees, and — just as important — an honest inventory of what is **not** yet validated at v0.2.5.*
 
 A lap simulator is only as useful as it is trustworthy. outlap's answer to "why should I believe this?" has four parts: (1) it is cross-checked against an independent, published F1 result; (2) its outputs are frozen as golden files that fail CI if they drift; (3) its physics is pinned by property tests that assert invariants like "grip never exceeds the friction circle" and "energy in equals energy out"; and (4) every estimate or simplification is surfaced in the loaded-model report and the lap `notes` — nothing is silent. This chapter covers each in turn, and closes with the gaps.
 
@@ -4196,7 +4340,7 @@ python python/tools/plot_limebeer.py
 
 #### 13.1.2 The gates, and what actually passes
 
-Here is the subtle and important part. The original milestone plan called for a "lap time within 1 %" gate. That gate was found to be **unattainable by construction** — a quasi-steady-state solver on a fixed heuristic racing line cannot match a transient solver that co-optimises the line and the speed for time. (The PL2014 paper *itself* cites a 2.19 s quasi-steady-versus-optimal-control gap at Barcelona.) So the lap-time gate was **re-scoped** (this is "Locked Decision #48"): the numbers that the committed track geometry can honestly support are gated; the lap time is *recorded with a decomposition* but not gated.
+Here is the subtle and important part. The original validation plan called for a "lap time within 1 %" gate. That gate was found to be **unattainable by construction** — a quasi-steady-state solver on a fixed heuristic racing line cannot match a transient solver that co-optimises the line and the speed for time. (The PL2014 paper *itself* cites a 2.19 s quasi-steady-versus-optimal-control gap at Barcelona.) So the lap-time gate was **re-scoped**: the numbers that the committed track geometry can honestly support are gated; the lap time is *recorded with a decomposition* but not gated.
 
 | Gate | outlap | PL2014 | Result |
 |------|--------|--------|--------|
@@ -4205,14 +4349,14 @@ Here is the subtle and important part. The original milestone plan called for a 
 | Fast-corner apexes ≤ 5 % | 59.1 / 60.8 m/s | 60 / 60 / 62 m/s | **PASS** (−1.5 % / −1.9 %) — *only on the paper's own geometry* |
 | Lap time | 92.36 s (committed track) / 87.08 s (paper's geometry) | 82.43 s | **recorded, not gated** |
 
-The top-speed and slowest-apex gates run in CI ([`python/tests/test_limebeer.py`](../python/tests/test_limebeer.py)) on the committed `catalunya_osm` import. The fast-corner band passes only on the paper's own digitised curvature — on the committed OSM import the fast corners are geometry-corrupted (interpolation noise throws up spurious curvature spikes, the widths are defaulted, and it is a later circuit layout than the paper's 2013 one), so the fast-corner gate is **deferred to milestone M4**, where it lands together with a time-weighted racing-line solver.
+The top-speed and slowest-apex gates run in CI ([`python/tests/test_limebeer.py`](../python/tests/test_limebeer.py)) on the committed `catalunya_osm` import. The fast-corner band passes only on the paper's own digitised curvature — on the committed OSM import the fast corners are geometry-corrupted (interpolation noise throws up spurious curvature spikes, the widths are defaulted, and it is a later circuit layout than the paper's 2013 one), so the fast-corner gate stays **deferred**: the time-weighted racing line (now shipped) recovers only a few tenths of the residual on this geometry, and no paper-exact centre-line fixture is committed — the honest cross-check remains the recorded, decomposed delta (`docs/validation/limebeer.md`).
 
 #### 13.1.3 Reading the lap-time gap honestly
 
 The 92.36 s versus 82.43 s difference looks alarming until you decompose it, which `docs/validation/limebeer.md` does. It is *structural*, not a model error:
 
 1. **Quasi-steady vs transient (~2.2 s):** the paper's own cited figure for the QSS-versus-optimal-control gap.
-2. **Line optimality:** the minimum-curvature line minimises $\int \kappa^2\,ds$ (integrated squared curvature), not lap time — the time-weighted line is an M4 deliverable.
+2. **Line optimality:** the minimum-curvature line minimises $\int \kappa^2\,ds$ (integrated squared curvature), not lap time — the time-weighted line (§10.3) recovers a few tenths of this residual.
 3. **Envelope conservatism (~1–1.5 s):** the double-track trim boundary delivers 85–91 % of the point-mass ideal. This is legitimate physics — a real four-wheel car cannot use as much grip as an idealised point mass.
 4. **Track geometry (~5 percentage points):** swapping the committed OSM curvature for the paper's own curvature drops the lap from 92.36 s to 87.08 s.
 
@@ -4272,12 +4416,12 @@ Every push and pull request runs [`.github/workflows/ci.yml`](../.github/workflo
 
 ### 13.6 What is *not* validated yet (be honest)
 
-A trustworthy tool is clear about its limits. At v0.2.0:
+A trustworthy tool is clear about its limits. At v0.2.5:
 
 - **Only one published-oracle track.** The quantitative cross-check is Catalunya against PL2014. Other tracks and vehicles are checked for internal consistency and plausible magnitudes, not against measured lap times.
-- **The lap-time gate is recorded, not enforced** (Decision #48). The honest ≤ 1 % lap-time ambition moves to M4 via the transient tier and a time-weighted line.
+- **The lap-time gate is recorded, not enforced.** The honest ≤ 1 % lap-time ambition was measured against the transient tier and the time-weighted line when they landed: even together they do not close it — the T2 lap on this geometry is ~+30% over the optimal-control oracle, dominated by the driver's stability margin (~+17% of T0) on top of the geometry (~5 pp), the ~2.2 s quasi-steady-versus-optimal-control floor the paper itself cites, and ~1.5 s of envelope conservatism. The full decomposition, and the wide tripwire that keeps the recorded band from drifting silently, live in `docs/validation/limebeer.md`.
 - **Thermal and battery are validated against synthetic fixtures and closed-form solutions, not measured hardware.** The pulse-response and energy-closure tests confirm the *math* is right; they do not claim the *parameters* of any shipped car are measured (they are estimates — see Chapter 12).
-- **The QSS↔transient parity gate is not active.** It is fully specified (lap time within 0.3 %, apex speeds within 1 %, transient samples inside the T1 hull) but cannot run until the transient tier (T2) exists — `crates/outlap-transient` is a placeholder crate today, and requesting `tier="t2"` returns a typed "not implemented until M4/M6" error. Treat the 0.3 % parity figure as a *committed future gate*, not a current guarantee.
+- **The QSS↔transient parity gate is split into what holds and what is recorded.** The *asserted* gate is **hull containment**: every `(a_x, a_y)` operating point of a T2 closed-loop lap must stay inside the T1 g-g-g-v envelope (≤ 2 % exceedance allowed; measured **0.0 %** on all three reference cars, in both the Rust harness and `python/tests/test_parity.py`) — the transient physics never produces grip the quasi-steady physics says it cannot have. The lap-time/apex parity figures (0.3 % / 1 %) are *recorded, not asserted*: the T2 driver's stability margin puts the lap ~+17 % from T0, a driver-competence gap, not a physics error. A time-indexed golden transient lap pins the whole T2 trajectory against silent drift, the T2 step is zero-allocation (dhat-gated), and its throughput is recorded with a regression tripwire.
 - **Estimated values are everywhere, and that is by design** — but it means you must read the loaded-model report. Every estimate is listed there; a lap run in degraded mode marks its results. Nothing is hidden, but nothing is measured-perfect either.
 
 The guiding principle throughout: estimated and simplified values always surface in the loaded-model report and the lap `notes`, so you are never misled about what the numbers rest on. Chapter 12 tells you the provenance of each shipped asset; Chapter 10 shows you how to read the report and notes from Python.
@@ -4605,29 +4749,28 @@ The envelope's three axes are speed $v$, normalised longitudinal acceleration $\
 
 ### 14.9 Where to go from here
 
-These recipes cover the core loop: author, solve, inspect, sweep. Combine them freely — the sizing sweep of Recipe C with the thermal read of Recipe F shows *why* the big motor stops helping; the envelope of Recipe H over two cars from Recipe A shows *how* their grip differs. Notebook 07 (`notebooks/07_qss_t1.ipynb`) is a longer, plotted version of this same material on the F1 car and the Model 3; the theory pages in `docs/theory/` give the equations behind each channel.
+These recipes cover the core loop: author, solve, inspect, sweep. Combine them freely — the sizing sweep of Recipe C with the thermal read of Recipe F shows *why* the big motor stops helping; the envelope of Recipe H over two cars from Recipe A shows *how* their grip differs. Notebook 07 (`notebooks/07_qss_t1.ipynb`) is a longer, plotted version of this same material on the F1 car and the Model 3; notebook 08 drives the same cars through time at the transient tier, and notebook 09 turns the traces into race-engineering studies (corner anatomy, car balance). The theory pages in `docs/theory/` give the equations behind each channel.
 
 
 ---
 
-## 15. Limitations and roadmap
+## 15. Limitations, history, and roadmap
 
-*What you will learn: an honest account of what outlap v0.2.0 does **not** do, and the planned path forward. Knowing the boundaries is as important as knowing the features — it tells you when a number can be trusted and when you are outside the tool's design envelope.*
+*What you will learn: an honest account of what outlap v0.2.5 does **not** do (or does with recorded caveats), how the project got here release by release, and the planned path forward. Knowing the boundaries is as important as knowing the features — it tells you when a number can be trusted and when you are outside the tool's design envelope.*
 
-### 15.1 What v0.2.0 does not do
+### 15.1 What v0.2.5 does not do
 
-outlap v0.2.0 is a complete **quasi-steady-state** simulator (the T0 and T1 tiers). That word "quasi-steady-state" is the single biggest scoping fact: at each point on the track the car is assumed to be in instantaneous force-and-moment balance, as if it had always been at that speed and that cornering state. The consequences:
+outlap v0.2.5 is a complete quasi-steady-state simulator (T0/T1) plus a first transient tier (T2) that is physics-validated but driver-limited. The honest boundary list:
 
-- **No transient dynamics.** There is no time-marching model of the car rotating into a corner, weight settling after a bump, or a slide developing and being caught. The transient tiers — **T2** (a curvilinear 3D road-frame integrator with an ideal driver and shift events) and **T3** (a 14-degree-of-freedom model) — are milestones M4 and M6. Asking for `tier="t2"` or `"t3"` today returns a typed "not implemented until M4/M6" error. The crates that will host them (`outlap-transient` and `outlap-vehicle` for the transient tiers, plus `outlap-batch` for the M7 batch/sweep layer) are placeholder stubs.
-- **No driver model.** Because it is quasi-steady, the solver assumes an *ideal* driver who always uses exactly the available grip. There is no reaction time, no steering-input model, no error. A real transient driver model arrives with T2.
-- **No tire thermal or wear.** The tires use a fixed friction coefficient at a reference pressure and camber. The tire thermal ring (a tire that heats, gains and loses grip, and goes off) and the wear/cliff model are the **headline of milestone M5** (v0.3). Today, `.tyr` files carry *synthetic, clearly-labelled placeholder* thermal and wear blocks — they exist to satisfy the schema, not to model anything. (The *machine* thermal network of Chapter 9 is a separate, real model; it is the electric drive unit that heats up, not the tires.)
-- **Fuel mass is constant.** There is no fuel-burn slow state, so a combustion car does not get lighter over a lap. Fuel mass arrives in M6.
-- **No torque-vectoring controller.** The drivetrain uses *static* front/rear and left/right torque splits and passive differential models (open, locked, LSD, solid — Chapter 9). A rule-based yaw-moment torque-vectoring controller is an M4 deliverable; the optimisation-based (quadratic-programming) allocation is post-v1.
-- **The ERS energy manager is a power cap only.** For the F1 car, the hybrid deployment/harvest budget is modelled as a simple power limit, not a lap-by-lap energy manager with deploy tapering and override modes. That full manager is M6.
+- **The T2 driver is stable, not fast.** The transient tier integrates the full 7-DOF closed loop (Chapter 8, §8.7), but its ideal driver tracks the quasi-steady speed profile at a ~0.85 stability margin — pushed harder, it spins. A T2 lap is therefore ~17 % slower than the T0/T1 lap of the same car. The physics parity is *gated* (hull containment, Chapter 13); the pace parity is *recorded*. Use T2 for the time-domain story — traces, shifts, transient loads — not as a faster lap-time oracle. An at-the-limit driver is the tier's next step.
+- **T3 does not exist.** The 14-degree-of-freedom model (suspension travel, unsprung masses, dampers, curb strikes) raises a typed "not implemented" error. T2 is a rigid-chassis model: no suspension states, so a sharp crest is handled with a documented normal-load floor rather than real suspension travel.
+- **No tire thermal or wear.** The tires use a fixed friction coefficient at a reference pressure and camber. The tire thermal ring (a tire that heats, gains and loses grip, and goes off) and the wear/cliff model are the next major physics addition. Today, `.tyr` files carry *synthetic, clearly-labelled placeholder* thermal and wear blocks — they exist to satisfy the schema, not to model anything. (The *machine* thermal network of Chapter 9 is a separate, real model; it is the electric drive unit that heats up, not the tires.)
+- **Fuel mass is constant.** There is no fuel-burn slow state, so a combustion car does not get lighter over a lap.
+- **The ERS energy manager is a power cap plus regen.** Regenerated energy flows into the pack (T2 blends regen braking live; the slow-state march carries signed pack energy), but the lap-by-lap deploy/harvest *scheduler* — when to spend, when to save, deploy tapering, override modes — is future work.
 - **No race-strategy layer.** The Monte Carlo race-strategy simulation — the long-term goal that motivates the fast, deterministic T0 tier — is a post-1.0 stage. It is why determinism and the sub-50 ms lap matter now, but it is not here yet.
 - **Aero maps only for the F1 car.** Only `f1_2026` ships a ride-height/yaw downforce map. Every other vehicle uses the constant-$C_dA$/$C_zA$ degenerate path (Chapter 7) — correct for a road car, a simplification for a high-downforce car.
-- **Vendored tracks are flat.** The 25 TUMFTM circuits carry `z = 0`, `banking = 0`, and `grip_scale = 1` (accuracy class C — Chapter 12). Only `catalunya_osm` (class B) has real elevation, and even it has widths defaulted and banking unresolved. So grade, banking, and vertical-curvature physics are *implemented* but exercised only on the one 3D track.
-- **Single-lap focus.** The tool solves one lap at a time. Multi-lap stints (with tire and fuel evolution) are the M5 demo; batch sweeps and a CLI are M7.
+- **Most vendored tracks are flat.** The 25 TUMFTM circuits carry `z = 0`, `banking = 0`, and `grip_scale = 1` (accuracy class C — Chapter 12). Two circuits have real elevation — `catalunya_osm` (~30 m) and `spa_osm` (~108 m) — but widths are defaulted and banking unresolved on both. Grade and vertical-curvature physics are implemented and exercised; *banking* physics is implemented but exercised by no shipped asset.
+- **Single-lap focus.** The tool solves one lap at a time. Multi-lap stints (with tire and fuel evolution) arrive with the tire thermal model; batch sweeps and a CLI are the road-to-1.0 items below.
 - **The class presets are not shipped.** `data/presets/` is reserved but empty; the promised `formula_base`/`gt_base`/`passenger_base` starting points are a future deliverable. Author a new car by copying a reference vehicle (Chapter 14, Recipe A) for now.
 
 None of these are hidden. Every simplification a given lap makes is listed in that lap's `notes` attribute, and every estimated parameter is in the loaded-model report (Chapters 10 and 13).
@@ -4636,26 +4779,35 @@ None of these are hidden. Every simplification a given lap makes is listed in th
 
 Each track records a `meta.accuracy_class`. It is a provenance grade, not a precision guarantee:
 
-- **Class B** (`catalunya_osm`): built from OpenStreetMap geometry fused with open elevation data. Has a real 3D ribbon, but corridor widths are defaulted and banking is not resolved from the coarse public elevation model.
+- **Class B** (`catalunya_osm`, `spa_osm`): built from OpenStreetMap geometry fused with open elevation data. Has a real 3D ribbon, but corridor widths are defaulted and banking is not resolved from the coarse public elevation model.
 - **Class C** (the 25 TUMFTM circuits): smoothed centre lines with satellite-measured corridor widths, but strictly 2-D. The standard academic bootstrap dataset — good for relative comparisons, not for matching a real lap record.
 
 A class-C track will give you plausible, self-consistent lap times that are useful for comparing cars or setups, but you should not expect them to match a measured lap; the smoothed geometry alone can shift corner speeds by several percent (Chapter 13).
 
-### 15.3 The roadmap
+### 15.3 How outlap got here — the releases so far
 
-The milestone plan (from `docs/HANDOFF.md` §12) — roadmaps can and do change, so treat this as intent, not commitment:
+outlap is built in planned increments, each shipped as a set of small, gated pull requests and closed with a tagged release. This section is the guide's one place for that history — the rest of the book describes *what is*, not *when it landed*. Roadmaps can and do change; treat the future rows as intent, not commitment.
 
-| Milestone | Version | Headline deliverable |
-|-----------|---------|----------------------|
-| M1 | 0.1 | Schema + 3D track + OSM/DEM importer + minimum-curvature line + T0 point-mass lap |
-| M2 | — | MF6.1 tire model + `.tir` codec + Python fitting pipeline + citation-backed `.tyr` files |
-| **M3** | **0.2** | **Full QSS T1: double-track trim → g-g-g-v envelopes, aero maps, topology powertrain, machine-thermal derating, battery/Vdc coupling, Limebeer cross-check (you are here)** |
-| M4 | — | Transient tier **T2** (3D road frame, ideal driver, shift events, rule-based torque-vectoring) + the QSS↔transient parity gate + time-weighted racing-line solver + the deferred ≤ 1 % Limebeer lap-time gate |
-| M5 | 0.3 | **Tire thermal ring + wear** in both tiers — the stint-simulation demo |
-| M6 | — | Full ERS 2026-style energy manager + battery ECM + **fuel mass** + T3 (14-DOF) |
-| M7 | **1.0** | Batch/sweep API (parallel, structure-of-arrays) + CLI + all four reference vehicles + the hero demo + docs site + a WebAssembly demo widget |
+**Shipped:**
 
-Beyond 1.0, the recorded intent is: sim-racing telemetry importers (MoTeC, ACC, iRacing) for community data and validation; the **Stage 2 race-strategy Monte Carlo** layer (a time-discrete race simulation with a stochastic layer and a strategy optimiser running on the fast T0-with-slow-states tier); a browser app (`outlap-web`) grown from the WASM widget; and a community data registry. The core discipline that makes all of this possible — one vehicle description across tiers, a deterministic zero-allocation hot loop, and honest reporting — is in place now.
+| Release | Headline | What landed |
+|---------|----------|-------------|
+| v0.1 | **The foundation** | The schema contract (JSON Schemas generated from the Rust types), the 3D track ribbon, the OSM+DEM track importer, the minimum-curvature racing line, and the T0 point-mass lap solver. |
+| (unversioned) | **The tire** | The clean-room MF6.1 implementation, the `.tir` codec, the Python fitting pipeline, and the citation-backed `.tyr` datasets — validated against an independent oracle to a 0.5 % CI gate. |
+| v0.2.0 | **The full QSS tier** | The T1 double-track trim and the g-g-g-v envelope; aero maps; the topology powertrain over `.ptm` files; machine-thermal derating; the battery/Vdc coupling marched as slow states; the Limebeer cross-check. |
+| v0.2.5 | **The transient tier** *(this release)* | The T2 tier end to end: the 7-DOF curvilinear road-frame chassis (symbolically verified to 1e-12), the split fixed-step integrator, tire relaxation, the MacAdam-preview driver, the shift/torque-vectoring/regen control layer, the full 3D road frame; plus the time-weighted racing line, the `spa_osm` 3D import, the QSS↔T2 hull-containment parity gate, and the T2 capstone notebooks. |
+
+Two honest scope notes are part of the v0.2.5 record, both decomposed in `docs/validation/limebeer.md` rather than hidden: the ≤ 1 % Limebeer lap-time ambition was measured and **not** achieved (the T2 driver's stability margin dominates — a driver-competence gap, not a physics error), and the transient step's original throughput target proved unreachable at full Magic-Formula fidelity (the measured number is recorded and tripwired instead). Ambitions that miss are recorded with their reasons — that is the project's validation culture (Chapter 13) applied to itself.
+
+**Planned (intent, not commitment):**
+
+| Target | Headline deliverable |
+|--------|----------------------|
+| v0.3 | **Tire thermal ring + wear** in all tiers — grip that depends on temperature, tires that go off, and the multi-lap stint demo |
+| next | Full ERS-style deploy/harvest energy manager + battery ECM + **fuel mass** + **T3** (14-DOF suspension) |
+| v1.0 | Batch/sweep API (parallel, structure-of-arrays) + CLI + all four reference vehicles + the hero demo + docs site + a WebAssembly demo widget |
+
+Beyond 1.0, the recorded intent is: sim-racing telemetry importers (MoTeC, ACC, iRacing) for community data and validation; the **race-strategy Monte Carlo** layer (a time-discrete race simulation with a stochastic layer and a strategy optimiser running on the fast T0-with-slow-states tier); a browser app (`outlap-web`) grown from the WASM widget; and a community data registry. The core discipline that makes all of this possible — one vehicle description across tiers, a deterministic zero-allocation hot loop, and honest reporting — is in place now.
 
 ---
 
@@ -4685,11 +4837,13 @@ Beyond 1.0, the recorded intent is: sim-racing telemetry importers (MoTeC, ACC, 
 - **Golden file** — a committed reference output that a test recomputes and compares against, failing on drift beyond a tolerance (Chapter 13).
 - **`GriddedMapN`** — outlap's N-dimensional gridded-map type, evaluated by the one shared monotone cubic interpolant, used for aero maps, `.ptm` tables, and the envelope (Chapters 5, 8).
 - **Hot loop** — the per-station (or per-timestep) inner computation that must be allocation-free, contain no Python, and use fixed-size state; distinct from the assembly pipeline (Chapter 6).
+- **Hull containment** — the asserted QSS↔T2 parity gate: every `(a_x, a_y)` operating point of a transient lap must lie inside the T1 g-g-g-v envelope (Chapter 13).
 - **ISO 8855** — the vehicle axis convention outlap uses: $x$ forward, $y$ left, $z$ up; it fixes the sign of every force, slip, and acceleration (Chapters 2, 6).
 - **Loaded-model report** — the dictionary returned by `vehicle_report`, listing every inherited, estimated, degraded, warned, and overridden value; the "nothing silent" surface (Chapters 4, 10).
 - **Load sensitivity** — the fact that a tire's friction *coefficient* falls as its vertical load rises, so doubling the load less-than-doubles the grip (Chapter 2).
 - **Load transfer** — the shift of vertical load between wheels under acceleration, braking, and cornering; longitudinal (front↔rear) and lateral (left↔right) (Chapters 2, 8).
 - **LPTN (lumped-parameter thermal network)** — the machine thermal model: a small network of thermal masses (nodes) connected by conductances, integrated per lap segment (Chapter 9).
+- **MacAdam preview driver** — the T2 tier's steering model: it looks ahead a speed-scaled preview distance on the target line and steers to null the predicted error, plus a curvature feedforward (after MacAdam 1981) (Chapter 8).
 - **Magic Formula / MF6.1** — the empirical tire force model (Pacejka's version 6.1) that fits measured tire data with a characteristic sine-of-arctangent curve (Chapters 2, 7).
 - **Minimum-curvature line** — the racing line that minimises integrated squared curvature within the track corridor, found by a quadratic program; not the same as the time-optimal line (Chapters 2, 8).
 - **Monotone cubic Hermite** — the single (Fritsch–Carlson) interpolation scheme used for *all* gridded maps: smooth ($C^1$) and shape-preserving, so it never overshoots between data points (Chapters 5, 8).
@@ -4700,15 +4854,19 @@ Beyond 1.0, the recorded intent is: sim-racing telemetry importers (MoTeC, ACC, 
 - **`.ptm` file** — the neutral powertrain-map file (YAML plus a parquet table sidecar) through which every powertrain enters the simulator (Chapters 5, 9).
 - **QSS (quasi-steady-state)** — the modelling assumption that the car is in instantaneous equilibrium at each point; the basis of the T0 and T1 tiers (Chapters 2, 8).
 - **Racing line** — the path the car actually drives through the corridor, distinct from the track's centre line (Chapters 2, 8).
-- **Relaxation length** — the distance a tire must roll before its force builds up to the steady-state value; a transient tire property (relevant to the brush model) (Chapter 7).
+- **Relaxation length** — the distance a tire must roll before its force builds up to the steady-state value; integrated live by the T2 tier's exact-exponential slip lag (Chapters 7, 8).
 - **Ribbon** — outlap's 3D track model: the road surface as a band with curvature, grade, and banking parameterised by arc length (Chapters 2, 5).
 - **Roll centre** — the geometric point about which a car's sprung mass rolls in a corner; its height governs how much load transfer is geometric versus elastic (Chapters 2, 8).
+- **Sideslip angle (β)** — the angle between where the chassis points and where it travels, `atan2(v_y, v_x)`; the "car rotated relative to its path" number a transient lap exposes (Chapter 8).
 - **Slip angle ($\alpha$)** — the angle between where a tire points and where it is actually travelling; the source of lateral (cornering) force (Chapters 2, 7).
 - **Slip ratio ($\kappa$)** — the relative difference between a tire's rolling speed and the road speed; the source of longitudinal (drive/brake) force (Chapters 2, 7).
-- **Slow state** — a quantity that evolves gradually across the lap and carries between stations (machine temperature, battery SoC), as opposed to the fast per-station trim states (Chapter 9).
+- **Slow state** — a quantity that evolves gradually across the lap and carries between stations or timesteps (machine temperature, battery SoC), as opposed to the fast chassis/trim states (Chapters 8, 9).
 - **SoC (state of charge)** — the battery's remaining charge as a fraction from 0 to 1; a slow state that falls as the pack discharges (Chapter 9).
-- **Tier (T0/T1/T2/T3)** — the solver ladder: T0 point-mass, T1 quasi-steady double-track (both shipping), T2/T3 transient (future) (Chapters 2, 8).
+- **Speed margin (T2)** — the fraction of the QSS speed profile the transient driver tracks (default 0.85); the stability headroom that keeps the closed loop from spinning, recorded on every T2 result (Chapter 8).
+- **Split integrator** — the T2 fixed-step scheme: Runge–Kutta for chassis/controller states, exact-exponential updates for tire relaxation, a decimated clock for slow states (Chapter 8).
 - **Thévenin (battery) model** — an equivalent-circuit battery model (open-circuit voltage minus resistive and RC-network drops) used to compute terminal voltage under load (Chapter 9).
+- **Tier (T0/T1/T2/T3)** — the solver ladder: T0 point-mass, T1 quasi-steady double-track, T2 closed-loop transient (all shipping), T3 14-DOF transient (future) (Chapters 2, 8).
+- **Time-weighted line** — the racing line from the min-curvature QP re-weighted by the time spent at each station (`w ∝ 1/v` from a speed pre-pass); faster-or-equal to min-curvature by construction (Chapters 8, 10).
 - **Trim** — the equilibrium state of the car at a given operating point: the steering, body slip, and wheel loads/slips that balance all forces and moments (Chapter 8).
 - **Understeer gradient** — a setup metric measuring how much extra steering a car needs as lateral acceleration rises; positive means understeer (Chapters 2, 8).
 - **Vdc** — the DC-link voltage supplied to an electric drive unit; when a battery pack is present, the drive-unit maps are evaluated at the pack's SoC-dependent terminal voltage (the Vdc–SoC coupling) (Chapter 9).
@@ -4722,8 +4880,8 @@ Beyond 1.0, the recorded intent is: sim-racing telemetry importers (MoTeC, ACC, 
 **Why does `import outlap` give me almost nothing?**
 The top-level `outlap` package is a stub — the real API lives in `outlap.core`. Always import from there: `from outlap.core import Track, min_curvature, solve_lap_dataset, vehicle_report` (Chapter 10).
 
-**Why does `tier="t2"` (or `"t3"`) raise an error?**
-The transient tiers are not implemented yet — they are milestones M4 and M6. The error is deliberate and typed: *"solver tier `t2` is not implemented yet (the transient tiers arrive in milestone M4); select tier `t0` … or `t1`."* Use `t0` or `t1` (Chapters 8, 15).
+**Why does `tier="t2"` raise an error in `solve_lap`? Isn't T2 shipped?**
+It is shipped — but a transient lap is *time*-indexed, so it does not fit `solve_lap`'s arc-length result type. The error is a deliberate, typed redirect: call `solve_transient_lap(...)` directly, or `solve_lap_dataset(..., tier="t2")`, which routes for you and returns the time-indexed dataset (Chapters 8, 10). `tier="t3"` — the 14-DOF suspension model — genuinely is not implemented yet and raises a typed error.
 
 **Why do T0 and T1 give the same lap time?**
 Because T1 re-trims the double-track car *on the velocity profile T0 already produced* — it adds per-wheel loads, slips, forces, and setup metrics, but does not change the lap time on the same car and line. If you want per-wheel detail, use `t1`; if you only need the lap time and speed trace, `t0` is enough (Chapters 8, 14).
@@ -4759,7 +4917,7 @@ For the golden *laps*, run `OUTLAP_BLESS=1 uv run pytest tests/test_limebeer.py`
 On the same platform, the same inputs give bit-identical results. Across platforms, results are tolerance-exact and documented. This is enforced by fixed-step integration, fixed iteration counts, fixed-order reductions, and no fast-math — and it is a prerequisite for the future Monte Carlo layer (Chapter 13).
 
 **Can I run outlap in the browser?**
-The solver crates are kept WebAssembly-clean and CI builds them for `wasm32-unknown-unknown`, so the core *can* run in the browser. A WebAssembly demo widget lands with v1.0 (M7); the packaged browser app (`outlap-web`) grown from it is post-1.0 (Chapters 6, 15).
+The solver crates are kept WebAssembly-clean and CI builds them for `wasm32-unknown-unknown` — including the whole transient tier — so the core *can* run in the browser. A WebAssembly demo widget lands with v1.0; the packaged browser app (`outlap-web`) grown from it is post-1.0 (Chapters 6, 15).
 
 **There are two "catalunya" tracks — which do I use?**
 `catalunya_osm` is the 3D OpenStreetMap+elevation import — the reference Catalunya used by the notebooks, examples, and the Limebeer cross-check. `catalunya` is the flat TUMFTM vendoring, a peer of the other 24 circuits. Same circuit, two sources; use `catalunya_osm` unless you specifically want the flat 2D version (Chapters 12, 13).
@@ -4771,4 +4929,4 @@ Your own authored data is yours. But be aware of the inputs you build on: outlap
 A single QSS lap solves in well under 50 ms once the envelope is cached (that is a CI-gated performance guarantee). A full T1 Dataset for a ~4.6 km track at 2 m spacing is roughly 0.6 MB (about 2,300 stations × 16 channels). For cheap exploration, use a coarse envelope grid (Chapters 13, 14).
 
 **Where do I ask for help or contribute?**
-Start with `CONTRIBUTING.md` (contributions are AGPL-3.0 with a DCO sign-off), the theory pages in `docs/theory/`, and the notebooks in `notebooks/`. The full architecture and decision log is `docs/HANDOFF.md` (Chapter 1).
+Start with `CONTRIBUTING.md` (contributions are AGPL-3.0 with a DCO sign-off), the theory pages in `docs/theory/` (the equations and citations behind every model), and the notebooks in `notebooks/` (the same material, runnable).
