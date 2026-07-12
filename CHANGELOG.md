@@ -13,6 +13,11 @@ QSS (T0/T1) paths are untouched.
 
 ### Added
 
+- **notebooks**: **`08_transient_t2.ipynb`** — the T2 capstone (CI-executed, committed outputs) on
+  the Limebeer car: the QSS↔T2 speed overlay + hull containment, the time-domain traces a station
+  solver cannot show (steer, yaw rate, sideslip, throttle/brake, per-wheel load/slip), the gear-shift
+  state machine (shown on the multi-ratio F1 2026 car), the time-weighted line's lap-time recovery,
+  and a lap on the full 3-D Catalunya road frame.
 - **validation**: the **Limebeer T2 lap-time delta — recorded, not the ≤1% gate** (PR11, Decision
   #48). The M4 ≤1% Limebeer gate is **not achievable at T2**: on `catalunya_osm` the T2 transient
   lap is **~+30%** over the 82.43 s OCP oracle (min-curvature 107.92 s, time-weighted 107.57 s),
