@@ -64,3 +64,22 @@ uv run python -m outlap.importers.osm_track --preset catalunya --out ../data/tra
 > the other 24 circuits; PR10 found its class-C smoothed geometry does not reproduce the PL2014
 > apex bands, so the cross-check stays on `catalunya_osm` (the fast-corner gate is deferred to M4).
 > They are the same circuit from two sources.
+
+### `spa_osm` — the 3-D showcase circuit
+
+`spa_osm` is the **3D** Circuit de Spa-Francorchamps from the same importer — the M4 elevation
+showcase (Spa climbs ~100 m from Eau Rouge to Les Combes, so its grade and vertical curvature are
+the point). Same licensing as `catalunya_osm` (OSM/ODbL centreline + `eudem25m` elevation).
+
+Spa's OSM `highway=raceway` geometry is **fragmented** into corner-named ways (Kemmel, Blanchimont,
+Fagnes, …) plus a pit lane and a separate kart track. The importer assembles the timed lap in
+`_assemble_circuit`: it drops non-circuit ways by name, prunes dead-end spurs to the 2-core, and
+resolves the pit-bypass *theta* junction (two degree-3 nodes joined by three paths) to the cycle of
+the **two longest** paths — the short third path is the bypass/pit chord. The result is a 6995 m
+closed loop (official GP layout 7004 m, i.e. within 0.13%). `spa` (flat TUMFTM, above) is the same
+circuit with zero elevation; `spa_osm` is the 3-D version.
+
+```sh
+cd python
+uv run --with requests python -m outlap.importers.osm_track --preset spa --out ../data/tracks/spa_osm
+```
