@@ -18,6 +18,7 @@ zero-to-hero guide; the guide's chapters map onto the notebook sequence below.
 | [`05_tyre_mf61.ipynb`](05_tyre_mf61.ipynb) | MF6.1 in depth: load/camber families, the slip-plane force map, and per-channel oracle validation. |
 | [`06_powertrain_pdt.ipynb`](06_powertrain_pdt.ipynb) | The `.ptm` firewall, the PDT importer on synthetic HDF5, the distilled 2-node thermal model, and the battery pack. |
 | [`07_qss_t1.ipynb`](07_qss_t1.ipynb) | **The T1 capstone**: double-track trim, per-wheel loads, setup metrics, the g-g-g-v envelope — then the Model 3 RWD (HV variant) with the live Vdc–SoC coupling + machine-thermal derate, swept across three drive-unit sizings. |
+| [`08_transient_t2.ipynb`](08_transient_t2.ipynb) | **The T2 capstone**: the transient tier driven around the lap — the QSS↔T2 overlay and hull containment, the time-domain traces a station solver can't show (steer, yaw rate, sideslip, per-wheel load/slip, the shift FSM), the time-weighted line's lap-time recovery, and a lap on the full 3-D road frame. |
 
 Interactive panels (ipywidgets sliders driving the override API) are live in a running Jupyter;
 each has a static twin so the GitHub-rendered page tells the same story.
