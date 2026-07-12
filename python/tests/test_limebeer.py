@@ -131,3 +131,67 @@ def test_golden_lap(name: str, vehicle: str, tier: str, flat: bool) -> None:
             scale = 1.0
         worst = float(np.nanmax(np.abs(o - g))) / scale if np.isfinite(g).any() else 0.0
         assert worst < tol, f"{name}/{var} drifted: {worst:.4f} > {tol}"
+
+
+# --- Golden transient (T2) lap: the time-indexed regression (dims time/wheel) --------------------
+
+# A fixed coarse envelope so the golden is deterministic and CI-fast (the T2 lap itself is the cost).
+_T2_SIM: dict[str, object] = {
+    "flat_track": True,
+    "envelope": {"v_points": 12, "ax_points": 10, "g_normal_points": 3},
+}
+# Per-channel relative tolerances for the time-indexed channels.
+_T2_TOLS = {
+    "s": 0.005,
+    "vx": 0.01,
+    "vy": 0.02,
+    "yaw_rate": 0.02,
+    "steer": 0.02,
+    "gear": 0.0,  # discrete → must match exactly (determinism)
+    "vertical_load_n": 0.02,
+    "slip_ratio": 0.05,
+    "slip_angle_rad": 0.05,
+}
+
+
+# A ~90 s lap at 1 ms is ~90k rows; decimate the golden to keep the committed parquet small (the
+# regression still pins the whole trajectory — a drift shows at the sampled stations too).
+_T2_STRIDE = 100
+
+
+def test_golden_transient_lap() -> None:
+    ds = solve_lap_dataset(
+        LIMEBEER, min_curvature(Track.load(CATALUNYA), 1.1), tier="t2", sim=_T2_SIM
+    )
+    assert str(ds.attrs.get("completed")) in ("1", "True"), (
+        "T2 golden lap did not close"
+    )
+    ds = ds.isel(time=slice(None, None, _T2_STRIDE))
+    path = GOLDEN_DIR / "limebeer_t2_flat.parquet"
+    frame = ds.drop_vars([v for v in ("x", "y", "z") if v in ds]).to_dataframe()
+
+    if os.environ.get("OUTLAP_BLESS") == "1":
+        GOLDEN_DIR.mkdir(exist_ok=True)
+        frame.to_parquet(path)
+        pytest.skip(f"blessed {path.name}")
+
+    assert path.exists(), (
+        f"golden {path.name} missing — regenerate via OUTLAP_BLESS=1 (with a PR note)"
+    )
+    gold = xr.Dataset.from_dataframe(pd.read_parquet(path))
+    got = xr.Dataset.from_dataframe(frame)
+    # Same number of time steps (fixed dt ⇒ deterministic grid).
+    assert got.sizes["time"] == gold.sizes["time"], (
+        f"T2 step count {got.sizes['time']} vs golden {gold.sizes['time']}"
+    )
+    for var, tol in _T2_TOLS.items():
+        if var not in gold:
+            continue
+        g = gold[var].to_numpy()
+        o = got[var].to_numpy()
+        assert g.shape == o.shape, f"t2/{var} shape {o.shape} vs golden {g.shape}"
+        scale = float(np.nanmax(np.abs(g)))
+        if not np.isfinite(scale) or scale == 0.0:
+            scale = 1.0
+        worst = float(np.nanmax(np.abs(o - g))) / scale
+        assert worst <= tol, f"t2/{var} drifted: {worst:.4f} > {tol}"

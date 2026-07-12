@@ -362,12 +362,13 @@ impl<T: Float> TransientSolver<T> {
         let s = self.get_fast(ChassisState::S);
         let vx = self.get_fast(ChassisState::Vx).max(T::zero());
         let g = self.blocks.chassis.params.gravity;
-        let (grade, bank) = (self.line.grade(s), self.line.banking(s));
+        // One interval lookup for grade/banking/κ_v (shared grid) instead of three.
+        let (grade, bank, kappa_v) = self.line.load_geometry(s);
         let g_static = g * grade.cos() * bank.cos();
         // Vertical-curvature normal-load term `κ_v·v²`: dips (κ_v > 0) load the tyres, crests
         // (κ_v < 0) unload them. Its *unloading* is floored (see `CREST_UNLOADING_FLOOR_G`); the
         // loading (compression / Eau-Rouge downforce) side is transmitted in full.
-        let kv_term = self.line.kappa_v(s) * vx * vx;
+        let kv_term = kappa_v * vx * vx;
         let unload_floor = -T::from(CREST_UNLOADING_FLOOR_G).unwrap_or_else(T::zero) * g;
         let g_normal = g_static + kv_term.max(unload_floor);
         self.blocks.load.set_operating_point(vx, g_normal, ax, ay);
@@ -666,18 +667,22 @@ fn publish_road<T: Float>(
     vx: T,
     preview_time: T,
 ) {
-    bus.set_channel(road.kappa, 0, line.kappa_h(s));
-    bus.set_channel(road.grade, 0, line.grade(s));
-    bus.set_channel(road.banking, 0, line.banking(s));
-    bus.set_channel(road.kappa_v, 0, line.kappa_v(s));
-    bus.set_channel(road.n_ref, 0, line.n_ref(s));
-    bus.set_channel(road.kappa_ref, 0, line.kappa_ref(s));
-    bus.set_channel(road.v_ref, 0, line.v_ref(s));
+    // One interval lookup for the seven road/reference channels at `s` (and one for the three
+    // preview channels), instead of ten separate binary searches — the hot path.
+    let r = line.road_sample(s);
+    bus.set_channel(road.kappa, 0, r.kappa_h);
+    bus.set_channel(road.grade, 0, r.grade);
+    bus.set_channel(road.banking, 0, r.banking);
+    bus.set_channel(road.kappa_v, 0, r.kappa_v);
+    bus.set_channel(road.n_ref, 0, r.n_ref);
+    bus.set_channel(road.kappa_ref, 0, r.kappa_ref);
+    bus.set_channel(road.v_ref, 0, r.v_ref);
     // Preview station (line queries wrap/clamp `s + L_p` for closed/open loops).
     let sp = s + preview_distance(vx, preview_time);
-    bus.set_channel(road.n_ref_preview, 0, line.n_ref(sp));
-    bus.set_channel(road.kappa_ref_preview, 0, line.kappa_ref(sp));
-    bus.set_channel(road.v_ref_preview, 0, line.v_ref(sp));
+    let p = line.preview_sample(sp);
+    bus.set_channel(road.n_ref_preview, 0, p.n_ref);
+    bus.set_channel(road.kappa_ref_preview, 0, p.kappa_ref);
+    bus.set_channel(road.v_ref_preview, 0, p.v_ref);
 }
 
 /// One full RHS evaluation: clear bus, publish road + preview at `fast`'s `(s, v_x)`, run the block

@@ -13,6 +13,19 @@ QSS (T0/T1) paths are untouched.
 
 ### Added
 
+- **validation, transient**: **QSS↔T2 parity + perf gates** (PR10, Decisions #11/#15/#16). The
+  asserted physics-parity gate is **hull containment** — the T2 closed-loop `(a_x, a_y)` operating
+  points stay inside the T1 g-g-g-v envelope (≤2% exceedance; measured **0.0%** on all three
+  reference cars, `python/tests/test_parity.py` + the Rust `parity_report`). The T2 **step is
+  zero-alloc** (`perf_alloc`, own dhat binary) and its **throughput is recorded** (`perf_throughput`,
+  ~62k steps/s/core at the fixed-point default). A time-indexed **golden transient lap**
+  (`limebeer_t2_flat`, decimated) joins the `OUTLAP_BLESS` suite. A shared line-lookup optimisation
+  (`LineTable::road_sample`, one interval search for the seven road channels — bit-identical) bought
+  ~+13%. **Recorded, not gated** (surfaced with a decomposition, Decision #48): the T2−T0 lap/apex
+  deltas (~+17%, driver-margin-limited — the ideal driver tracks 0.85 of the QSS profile and spins
+  at the limit, a driver-competitiveness gap per Decision #13) and the Decision #15 250k steps/s
+  floor (RHS-bound at MF6.1 tyre fidelity — a single RHS is ~2.3 µs/core, four Pacejka evaluations,
+  so even Heun's two-eval theoretical ceiling is ~217k).
 - **tracks**: **`spa_osm`** — the 3-D Circuit de Spa-Francorchamps (OSM/ODbL centreline + `eudem25m`
   elevation), the M4 elevation showcase (~100 m of climb; committed geometry span 107.7 m, 6995 m
   closed = 0.13% off the 7004 m GP layout). The OSM importer gained `_assemble_circuit`: it stitches

@@ -17,6 +17,8 @@ outlap-vehicle = { path = "../outlap-vehicle" }
 outlap-track = { path = "../outlap-track" }
 outlap-qss = { path = "../outlap-qss" }
 outlap-raceline = { path = "../outlap-raceline" }
+# Zero-alloc gate for the T2 step (process-global profiler → its own test binary, perf_alloc).
+dhat = { workspace = true }
 
 [lints]
 workspace = true

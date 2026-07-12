@@ -83,6 +83,22 @@ impl<T: Float> MonotoneCubic<T> {
     /// The interpolated value at `x` (clamped to the endpoint value outside the grid).
     pub fn eval(&self, x: T) -> T {
         let (k, t, h) = self.locate(x);
+        self.eval_segment(k, t, h)
+    }
+
+    /// Locate the interval for `x`, exposed so a caller can share one lookup across several tables
+    /// that were built on the **same** abscissae (e.g. every channel of a line table). Returns
+    /// `(k, t, h)` for [`eval_segment`](Self::eval_segment).
+    #[must_use]
+    pub fn locate_at(&self, x: T) -> (usize, T, T) {
+        self.locate(x)
+    }
+
+    /// Evaluate at a pre-located segment `(k, t, h)` from [`locate_at`](Self::locate_at) on a table
+    /// with the **same grid**. Bit-identical to `eval(x)` when `(k, t, h) == self.locate_at(x)` — it
+    /// is the exact tail of `eval`, just without the per-call interval search.
+    #[must_use]
+    pub fn eval_segment(&self, k: usize, t: T, h: T) -> T {
         let (h00, h10, h01, h11) = hermite_basis(t);
         h00 * self.ys[k] + h10 * h * self.m[k] + h01 * self.ys[k + 1] + h11 * h * self.m[k + 1]
     }

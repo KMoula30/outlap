@@ -20,6 +20,36 @@ use num_traits::Float;
 
 use outlap_core::interp::{InterpError, MonotoneCubic};
 
+/// The seven road/reference channels at one station (from [`LineTable::road_sample`]).
+#[derive(Clone, Copy, Debug)]
+pub struct RoadSample<T> {
+    /// Plan-view curvature `κ_h`, 1/m.
+    pub kappa_h: T,
+    /// Grade `θ`, rad.
+    pub grade: T,
+    /// Banking `φ`, rad.
+    pub banking: T,
+    /// Vertical curvature `κ_v`, 1/m.
+    pub kappa_v: T,
+    /// Target lateral offset `n_ref`, m.
+    pub n_ref: T,
+    /// Target-line curvature `κ_ref`, 1/m.
+    pub kappa_ref: T,
+    /// Target speed `v_ref`, m/s.
+    pub v_ref: T,
+}
+
+/// The three target-line channels at the preview station (from [`LineTable::preview_sample`]).
+#[derive(Clone, Copy, Debug)]
+pub struct PreviewSample<T> {
+    /// Target lateral offset `n_ref`, m.
+    pub n_ref: T,
+    /// Target-line curvature `κ_ref`, 1/m.
+    pub kappa_ref: T,
+    /// Target speed `v_ref`, m/s.
+    pub v_ref: T,
+}
+
 /// A sampled target line + road geometry, queryable per step (see the module docs).
 #[derive(Clone, Debug)]
 pub struct LineTable<T> {
@@ -167,6 +197,47 @@ impl<T: Float> LineTable<T> {
     #[must_use]
     pub fn v_ref(&self, s: T) -> T {
         self.v_ref.eval(self.norm_s(s))
+    }
+
+    /// The seven road/reference channels at `s`, sharing **one** interval lookup (all channels are
+    /// built on the same `s` grid). Bit-identical to seven separate `kappa_h(s)`/… calls, but with a
+    /// single binary search instead of seven — the hot `publish_road` path (Decision #30's one
+    /// interpolant, one lookup). Fields mirror the individual accessors.
+    #[must_use]
+    pub fn road_sample(&self, s: T) -> RoadSample<T> {
+        let (k, t, h) = self.kappa_h.locate_at(self.norm_s(s));
+        RoadSample {
+            kappa_h: self.kappa_h.eval_segment(k, t, h),
+            grade: self.grade.eval_segment(k, t, h),
+            banking: self.banking.eval_segment(k, t, h),
+            kappa_v: self.kappa_v.eval_segment(k, t, h),
+            n_ref: self.n_ref.eval_segment(k, t, h),
+            kappa_ref: self.kappa_ref.eval_segment(k, t, h),
+            v_ref: self.v_ref.eval_segment(k, t, h),
+        }
+    }
+
+    /// The three target-line channels at the preview station `sp`, sharing one interval lookup.
+    #[must_use]
+    pub fn preview_sample(&self, sp: T) -> PreviewSample<T> {
+        let (k, t, h) = self.n_ref.locate_at(self.norm_s(sp));
+        PreviewSample {
+            n_ref: self.n_ref.eval_segment(k, t, h),
+            kappa_ref: self.kappa_ref.eval_segment(k, t, h),
+            v_ref: self.v_ref.eval_segment(k, t, h),
+        }
+    }
+
+    /// The three road-geometry channels the load block needs (`grade`, `banking`, `κ_v`) at `s`,
+    /// sharing one interval lookup. Bit-identical to the three separate accessors.
+    #[must_use]
+    pub fn load_geometry(&self, s: T) -> (T, T, T) {
+        let (k, t, h) = self.grade.locate_at(self.norm_s(s));
+        (
+            self.grade.eval_segment(k, t, h),
+            self.banking.eval_segment(k, t, h),
+            self.kappa_v.eval_segment(k, t, h),
+        )
     }
 
     /// Reconstruct the world position `ref(s) + n·lateral(s)` for the integrated `(s, n)` (m).
