@@ -161,10 +161,10 @@ small proportional offset, and the speed loop follows a QSS-style profile almost
 
 ![Driver line + speed tracking](img/driver_tracking.png)
 
-On the real `catalunya_osm` racing line, the transient car follows the whole QSS speed profile (below,
-seeded at the straightest station and tracking a grip margin of the profile — see the warn-only
-parity report). PR6's active torque vectoring closes the margin; the residual is the transient-vs-
-point-mass parity signal PR10 gates.
+On the real `catalunya_osm` racing line, the transient car tracks the **corner-scaled** reference
+(below, seeded at the straightest station): it meets the raw QSS profile at the top of the straights
+and holds the stability margin through the corners — the residual corner gap is the recorded
+transient-vs-point-mass parity signal (`docs/validation/limebeer.md`).
 
 ![QSS↔T2 speed profile on catalunya_osm](img/driver_parity_catalunya.png)
 
