@@ -92,24 +92,30 @@ production envelope (`python/tests/test_limebeer.py::test_limebeer_t2_lap_time_r
 | OCP oracle (PL2014 §4.3) | 82.43 s | — |
 | T0 QSS, min-curvature line | 92.36 s | +12.0% |
 | T0 QSS, **time-weighted** line | 92.07 s | +11.7%  (line saves 0.29 s) |
-| **T2 transient**, min-curvature line | 107.92 s | +30.9% |
-| **T2 transient**, time-weighted line | 107.57 s | +30.5%  (line saves 0.35 s) |
+| **T2 transient**, min-curvature line | 105.47 s | +28.0% |
+| **T2 transient**, time-weighted line | 105.20 s | +27.6%  (line saves 0.27 s) |
 
-The T2 lap is **~+30%** over the oracle — it does not approach ≤1%, and the gap is structural, not a
+The T2 lap is **~+28%** over the oracle — it does not approach ≤1%, and the gap is structural, not a
 model error. It adds one T2-specific term to the four QSS components above:
 
-5. **Driver stability margin, +15.6 s (the dominant term)** — the ideal MacAdam-preview + PI driver
-   tracks ~0.85 of the QSS speed profile and **spins if pushed to the limit** (measured: stable at
-   0.85, diverges at ≥0.95 even on flat ground). This is a driver-**competitiveness** limit
-   (Decision #13, "the biggest scope add"), not a chassis or tyre error — the T2 operating points
-   sit comfortably **inside** the T1 g-g-g-v hull (0.0% exceedance, the asserted PR10 parity gate).
-   Closing it needs an at-the-limit driver, which the M4 ideal driver is not.
+5. **Driver stability margin, +13.1 s (the dominant term)** — the ideal MacAdam-preview + PI driver
+   keeps a **corner-scaled** stability margin: it tracks the full QSS profile where lateral demand
+   is low (top speed 310 vs 316 km/h — within 2%), ~0.85 of it where the profile rides the lateral
+   grip limit, with friction-ellipse-aware braking/traction passes shaping the transitions, a
+   sideslip damper catching translational slides, and a pedal governor holding drive wheelspin at
+   the force peak (`outlap_qss::margin`, `docs/theory/driver.md`). Tracking the **raw** profile
+   still **spins the car** — the QSS boundary is not filtered for open-loop stability — so the
+   corner margin is the honest boundary of this driver. It is a driver-**competitiveness** limit at
+   the limit, not a chassis or tyre error: the T2 operating points sit **inside** the T1 g-g-g-v
+   hull (0.0% exceedance, the asserted parity gate).
 
-Because the driver margin alone is ~+17%, and the QSS floors (geometry ~5 pp, QSS-vs-OCP ~2.2 s,
-envelope ~1.5 s) account for the rest, the ≤1% assertion stays **deferred** — there is no
-paper-geometry fixture committed, and even on ideal geometry the T2 driver margin puts the gate
-~20 percentage points out of reach. The recorded band (a wide tripwire around +20–45%) guards
-against silent drift; the honest number is surfaced, never a green ≤1% that isn't real.
+An earlier *global* 0.85 margin (every station, straights included) measured +15.6 s; the
+corner-scaled scheme recovered 2.4 s of it, almost all on the straights. Because the corner margin
+alone is still ~+14% of T0, and the QSS floors (geometry ~5 pp, QSS-vs-OCP ~2.2 s, envelope
+~1.5 s) account for the rest, the ≤1% assertion stays **deferred** — there is no paper-geometry
+fixture committed, and even on ideal geometry the corner margin puts the gate well out of reach.
+The recorded band (a wide tripwire around +20–45%) guards against silent drift; the honest number
+is surfaced, never a green ≤1% that isn't real.
 
 ## Notes on the tyre transcription
 

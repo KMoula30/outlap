@@ -39,7 +39,7 @@ r_tgt   = v_x · κ_ref(s_p)                                    (reference yaw r
 n_pred  = n + L_p · sin ψ_rel                                 (offset predicted at the preview point)
 β       = atan2(v_y, v_x)                                     (sideslip)
 recover = clamp(k_slip·(|β| − β_lim), 0, 1)                   (slide severity: 0 gripping, 1 loose)
-δ_fb    = (1−recover)·k_prev·(n_ref(s_p) − n_pred) − k_ψ·ψ_rel + k_r·(1 + 5·recover)·(r_tgt − r)
+δ_fb    = (1−recover)·k_prev·(n_ref(s_p) − n_pred) − k_ψ·ψ_rel + k_r·(1 + 5·recover)·(r_tgt − r) − k_β·β
 δ       = clamp(δ_ff + δ_fb, ±δ_max)
 ```
 
@@ -58,12 +58,23 @@ car over-rotates (`|r| > |r_tgt|` ⇒ oversteer). Two things escalate the recove
 out: the path term, which would steer *further into* the corner and worsen the slide, is faded out by
 `(1 − recover)`; and the counter-steer gain ramps up sharply (`k_r·(1 + 5·recover)`) so a loose rear
 gets strong opposite lock. When gripping (`recover ≈ 0`) the law reduces to gentle path-following +
-yaw damping and does not touch clean cornering (the smooth-track property tests are unchanged). This
-is the **minimal yaw stabilisation** the ideal driver needs to lap a real circuit before PR6's
-torque-vectoring controller (`ΔM_z = K_p·(r_tgt − r)`) adds an *active* yaw moment; until then, on a
-real track, the driver also tracks a grip margin (a fraction of the QSS speed profile) so the
-rear-drive car stays inside its combined-slip limit. Gains are Limebeer-tuned literature defaults
-(§4), surfaced as estimated.
+yaw damping and does not touch clean cornering (the smooth-track property tests are unchanged).
+
+**Sideslip damping catches the slide the yaw damper cannot see.** The yaw-rate term only reacts to
+*rotational* slides (`r` far from `r_tgt`). A **translational** slide — the car "crabbing" off the
+line with the nose crooked but `r ≈ r_tgt ≈ 0`, the measured post-corner-exit failure mode — is
+invisible to it, and the path term is faded exactly when it happens. The `−k_β·β` term closes that
+gap: it steers the heading back toward the velocity vector, killing the crab's quasi-equilibrium.
+During clean cornering `β` is small (1–3°) and the term is a mild trim the feed-forward absorbs.
+
+On a real track the driver also tracks a **corner-scaled grip margin** — the shaped speed reference
+of `outlap_qss::margin`: the full QSS profile where lateral demand is low, a stability margin
+(default 0.85) where the profile rides the lateral grip limit, each corner's margin propagated back
+through its braking zone plus a settle ramp, and friction-ellipse-aware braking/traction feasibility
+passes so the shaped target is dynamically reachable at every corner entry and exit. The margin at
+the limit is the honest boundary of this driver: the QSS envelope boundary is not filtered for
+open-loop stability, and tracking the raw profile spins the car. Gains are Limebeer-tuned
+literature defaults (§4), surfaced as estimated.
 
 ## 3. Speed: PI tracking with a preview feed-forward (augmented-ODE integral)
 
@@ -73,7 +84,8 @@ The longitudinal loop tracks the QSS profile `v_ref` with a preview feed-forward
 e_v  = v_ref(s) − v_x
 a_ff = (v_ref(s_p) − v_x) · v_x / L_p                         (accel to reach the previewed speed)
 u    = a_ff / a_scale + k_p·e_v + k_i·ξ                       (a_scale = gg-headroom usable accel)
-throttle = max(clamp(u, ±1), 0) · (1 − recover),  brake = max(−clamp(u, ±1), 0)
+tc       = clamp(1 − k_κ·(max_w κ_w − κ_lim), 0, 1)           (drive wheel-slip governor)
+throttle = max(clamp(u, ±1), 0) · (1 − recover) · tc,  brake = max(−clamp(u, ±1), 0)
 ξ̇  = e_v         (held at 0 when the pedal is saturated and e_v would push further — anti-windup)
 ```
 
@@ -86,6 +98,14 @@ close to the point-mass reference.
 **Power is cut as the rear slides.** The throttle is scaled by `(1 − recover)` — the same slide
 factor that fades the steer path term (§2) — so a rear that steps out under power loses the drive that
 is overloading it and can recover grip. This is the longitudinal half of the minimal stabiliser.
+
+**And modulated against wheelspin.** With a race gearing, low-gear wheel torque is a *multiple* of
+the grip limit, so even a modest pedal fraction can light up the driven axle mid-corner-exit — the
+measured slide trigger once the `f1_2026` reference gained its realistic final drive. The governor
+`tc` cuts the pedal proportionally as the worst positive (drive-side) lagged slip ratio passes the
+force-peak region `κ_lim`; braking slips are negative and untouched. This is the ideal driver
+modulating the pedal the way a human does, not a traction-control system on the car: it reads the
+same lagged slip states the tyre model integrates, deterministically.
 
 **The integral is a real state, not a per-step snapshot.** `ξ = ∫(v_ref − v_x) dt` is carried in the
 fast state as a continuous **augmented ODE** ([`ControllerState::SpeedIntegral`]) and advanced by the
@@ -116,6 +136,9 @@ the file.
 | `a_scale` | `ff_accel_scale_mps2` | 15 m/s² | gg-headroom usable accel (feed-forward normaliser) |
 | `β_lim` | `stability_slip_limit_rad` | 0.05 rad | sideslip at which the slide recovery engages |
 | `k_slip` | `stability_slip_gain` | 8 /rad | how fast recovery ramps in past `β_lim` |
+| `k_β` | `sideslip_damping` | 0.5 rad/rad | sideslip-damping steer (the translational-slide correction) |
+| `κ_lim` | `traction_slip_limit` | 0.09 | drive-wheel slip ratio where the pedal governor starts cutting |
+| `k_κ` | `traction_slip_gain` | 25 /slip | governor cut rate past `κ_lim` |
 
 The PI gains follow a bandwidth rule (the proportional gain sets the speed-loop crossover; the
 integral time `k_p/k_i` removes the residual drag/rolling offset that would otherwise leave a

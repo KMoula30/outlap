@@ -3,8 +3,8 @@
 
 Drives everything from the real solvers on the Limebeer car / Catalunya (flat): the T0 point-mass
 profile, the T2 closed-loop lap, and the T1 g-g-g-v envelope. Two panels:
-  (a) speed profiles — T0 (reference) vs T2 (tracks the ~0.85 stability margin, hence the +17% lap
-      gap that is recorded, not gated).
+  (a) speed profiles — T0 (reference) vs T2 (corner-scaled stability margin: full speed on the
+      straights, 0.85 at the lateral limit; the remaining corner gap is recorded, not gated).
   (b) hull containment — the T2 (a_x, a_y) operating points against the T1 envelope boundary at a
       representative speed: they sit inside the hull (the ASSERTED physics-parity gate).
 
@@ -73,7 +73,9 @@ def main() -> None:
     )
     ax0.set_xlabel("arc length s [m]")
     ax0.set_ylabel("speed [m/s]")
-    ax0.set_title("(a) Speed: T2 tracks the 0.85 stability margin (gap recorded)")
+    ax0.set_title(
+        "(a) Speed: corner-scaled margin — full on straights, 0.85 at the limit"
+    )
     ax0.legend(loc="upper right", fontsize=9)
 
     # (b) hull containment: T2 (ax, ay) points vs the envelope boundary at a representative speed.

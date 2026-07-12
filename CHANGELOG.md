@@ -13,6 +13,27 @@ QSS (T0/T1) paths are untouched.
 
 ### Added
 
+- **vehicle, qss, schema**: the **corner-scaled T2 stability margin** replaces the global speed
+  margin. The driver's speed reference is shaped per station (`outlap_qss::margin`): the full QSS
+  profile where lateral demand is low, `speed_margin` (default 0.85) where the profile rides the
+  lateral grip limit, each corner's margin propagated back through its braking zone plus a ~1.5 s
+  settle ramp, and friction-ellipse-aware **braking and traction feasibility passes** evaluated at
+  the path's true `g_normal` — so the shaped target is dynamically reachable at every corner entry
+  and exit. Two new driver stabilisers make it trackable: a **sideslip damper** (`δ −= k_β·β`, the
+  correction for the measured translational "crab" slide the yaw damper cannot see) and a
+  **wheel-slip pedal governor** (the ideal driver modulates throttle against drive wheelspin).
+  Measured on `catalunya_osm`: top speeds recover from ~0.85× to within ~2–7% of the QSS profile
+  (limebeer 265 → 310 km/h), lap deltas improve to ~+14–17% (limebeer flat +16.9 → +14.2%, 3-D
+  +16.8 → +14.0%, Model 3 +18.0 → +14.3%), hull containment stays at 0.0% on all three reference
+  cars, and max sideslip ≤ 5° everywhere. New additive `driver` schema fields (`sideslip_damping`,
+  `traction_slip_limit`, `traction_slip_gain`); `docs/theory/driver.md` documents the shaped
+  reference and both stabilisers; golden `limebeer_t2_flat` re-blessed.
+- **data**: **`f1_2026` gearing fixed** — `final_drive` 3.1 → 6.4, sizing 8th gear to top out at
+  the 15 000 rpm limiter at ~340 km/h (it previously implied a 700 km/h top gear, so a lap never
+  left 3rd). A T2 lap now sweeps all eight gears with **59 shift events** (a real F1 lap shows
+  ~50), the shift ladder spanning ~100–300 km/h; the pedal governor holds the doubled low-gear
+  torque at the tyre's force peak (max rear slip ratio 0.107). Golden `f1_2026_t0` re-blessed
+  (the traction envelope changed at mid/high speed; T0 centreline 112.557 → 112.520 s).
 - **notebooks**: **`08_transient_t2.ipynb`** — the T2 capstone (CI-executed, committed outputs) on
   the Limebeer car: the QSS↔T2 speed overlay + hull containment, the time-domain traces a station
   solver cannot show (steer, yaw rate, sideslip, throttle/brake, per-wheel load/slip), the gear-shift

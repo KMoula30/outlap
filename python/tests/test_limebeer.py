@@ -212,8 +212,9 @@ def test_limebeer_t2_lap_time_recorded_not_gated() -> None:
 
     This is **recorded with a decomposition, not the ≤1% gate** (docs/validation/limebeer.md). The
     ≤1% Limebeer lap-time gate is not achievable at the T2 tier on this geometry: on the committed
-    ``catalunya_osm`` the T2 lap is ~+30% over the OCP oracle, dominated by the ideal driver's 0.85
-    stability margin (~+17% of T0, Decision #13), on top of the ~5% track-geometry offset
+    ``catalunya_osm`` the T2 lap is ~+28% over the OCP oracle, dominated by the ideal driver's
+    corner-scaled stability margin (~+14% of T0 — full profile speed on the straights, 0.85 at the
+    lateral grip limit), on top of the ~5% track-geometry offset
     (``catalunya_osm`` vs the PL2014 Fig. 6 centre line), the ~2.2 s structural QSS-vs-OCP floor the
     paper itself cites, and ~1.5 s of envelope conservatism. The time-weighted line recovers only
     ~0.3 s of the line-optimality residual. No paper-geometry fixture is committed, so the ungated
