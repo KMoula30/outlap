@@ -13,6 +13,13 @@ QSS (T0/T1) paths are untouched.
 
 ### Added
 
+- **tracks**: **`spa_osm`** — the 3-D Circuit de Spa-Francorchamps (OSM/ODbL centreline + `eudem25m`
+  elevation), the M4 elevation showcase (~100 m of climb; committed geometry span 107.7 m, 6995 m
+  closed = 0.13% off the 7004 m GP layout). The OSM importer gained `_assemble_circuit`: it stitches
+  Spa's fragmented corner-named `highway=raceway` ways into the main lap by dropping pit/kart ways,
+  pruning dead-end spurs to the 2-core, and resolving the pit-bypass *theta* junction to the
+  two-longest-path cycle. Committed Rust sanity tests (closure/length/physical grade+κ_v) and an
+  offline Python unit test for the theta assembly.
 - **raceline**: the **time-weighted racing line** (Decision #10; Rowold 2023; Lovato & Massaro 2022).
   The min-curvature QP is re-solved with per-station weights `wᵢ = Δtᵢ ∝ 1/vᵢ` from a T0/g-g-g-v
   speed pre-pass on the current line, in an outer reweight loop that keeps the fastest line and stops

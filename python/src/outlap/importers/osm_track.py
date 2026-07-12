@@ -4,8 +4,9 @@
 Since no open **3D** circuit data exists, the importer builds it (HANDOFF §9.3):
 
 1. **Centerline** from OpenStreetMap ``highway=raceway`` ways (ODbL — redistributable with
-   attribution), assembled into the longest ordered polyline near the circuit and projected to a
-   local ENU metric frame.
+   attribution): the fragmented corner-named ways are assembled into the main **closed lap**
+   (``_assemble_circuit``: drop pit/kart ways, prune spurs to the 2-core, resolve the pit-bypass
+   theta junction to the two-longest-path cycle) and projected to a local ENU metric frame.
 2. **Elevation** fused from an open DEM (Copernicus GLO-30 / EU-DEM via the free opentopodata API),
    sampled along the centerline and smoothed **C²-consistently** with a cubic smoothing spline
    (`z` and its derivatives are continuous — the outlap-track spline needs `z''` for vertical
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -106,7 +108,7 @@ def fetch_raceway_ways(lat: float, lon: float, radius_m: int) -> dict[str, Any]:
 
 
 def _longest_way(osm: dict[str, Any]) -> list[int]:
-    """Return the node-id sequence of the longest raceway way (the main circuit layout)."""
+    """Return the node-id sequence of the longest raceway way (a coarse single-way fallback)."""
     nodes = {e["id"]: e for e in osm["elements"] if e["type"] == "node"}
     ways = [
         e for e in osm["elements"] if e["type"] == "way" and len(e.get("nodes", [])) > 1
@@ -122,6 +124,123 @@ def _longest_way(osm: dict[str, Any]) -> list[int]:
         )
 
     return max(ways, key=way_length)["nodes"]
+
+
+# Way names that are raceway but NOT part of the timed circuit lap (dropped before assembly).
+_NON_CIRCUIT = ("pit", "kart", "support", "paddock", "service", "access")
+
+
+def _polyline_len(node_ids: list[int], nodes: dict[int, Any]) -> float:
+    pts = [nodes[i] for i in node_ids if i in nodes]
+    return sum(
+        _haversine(a["lat"], a["lon"], b["lat"], b["lon"])
+        for a, b in zip(pts, pts[1:], strict=False)
+    )
+
+
+def _walk_cycle(adj: dict[int, set[int]]) -> list[int]:
+    """Order a simple cycle (all nodes degree 2) into a node sequence."""
+    start = next(iter(adj))
+    loop = [start]
+    prev, cur = None, start
+    while True:
+        nxts = [x for x in adj[cur] if x != prev]
+        if not nxts:
+            break
+        nxt = nxts[0]
+        if nxt == start:
+            break
+        loop.append(nxt)
+        prev, cur = cur, nxt
+        if len(loop) > len(adj) + 2:  # safety against a malformed graph
+            break
+    return loop
+
+
+def _path_between(
+    adj: dict[int, set[int]], start: int, first: int, end: int
+) -> list[int] | None:
+    """The degree-2 chain from ``start`` (leaving via ``first``) to the junction ``end``."""
+    path = [start, first]
+    prev, cur = start, first
+    while cur != end:
+        nxts = [x for x in adj[cur] if x != prev]
+        if len(nxts) != 1:
+            return None
+        prev, cur = cur, nxts[0]
+        path.append(cur)
+    return path
+
+
+def _assemble_circuit(osm: dict[str, Any]) -> list[int]:
+    """Assemble the main **closed** circuit lap from the OSM ``highway=raceway`` ways.
+
+    OSM splits a circuit into many corner-named ways plus non-circuit ways (pit lane, kart track).
+    This drops the non-circuit ways by name, builds the node-segment graph, prunes dead-end spurs to
+    the 2-core (all that is left is cycles), and returns the main loop: a simple cycle when the 2-core
+    is one, or — for a *theta* 2-core (two degree-3 junctions joined by three paths, the classic
+    pit-bypass chord) — the cycle formed by the **two longest** of the three paths (the short third
+    path is the bypass/pit link). Falls back to the longest single way on any unexpected topology.
+    """
+    nodes = {e["id"]: e for e in osm["elements"] if e["type"] == "node"}
+    ways = [
+        e for e in osm["elements"] if e["type"] == "way" and len(e.get("nodes", [])) > 1
+    ]
+
+    def is_circuit(w: dict[str, Any]) -> bool:
+        name = w.get("tags", {}).get("name", "").lower()
+        return not any(k in name for k in _NON_CIRCUIT)
+
+    circ = [w for w in ways if is_circuit(w)]
+    if not circ:
+        return _longest_way(osm)
+
+    adj: dict[int, set[int]] = defaultdict(set)
+    for w in circ:
+        ns = [i for i in w["nodes"] if i in nodes]
+        for a, b in zip(ns, ns[1:], strict=False):
+            adj[a].add(b)
+            adj[b].add(a)
+
+    # Prune dead-end spurs iteratively → the 2-core (cycles only). Degree-1 nodes are spur tips;
+    # degree-0 nodes are the leftover of a fully-pruned tree branch.
+    changed = True
+    while changed:
+        changed = False
+        for n in [n for n, nb in list(adj.items()) if len(nb) < 2]:
+            for other in adj[n]:
+                adj[other].discard(n)
+            del adj[n]
+            changed = True
+
+    if not adj:
+        return _longest_way(osm)
+
+    juncs = [n for n, nb in adj.items() if len(nb) > 2]
+    if not juncs:
+        loop = _walk_cycle(adj)
+        return loop + [
+            loop[0]
+        ]  # close the ring so the closing edge enters the arc length
+
+    if len(juncs) == 2 and all(len(adj[j]) == 3 for j in juncs):
+        a, b = juncs
+        seen: dict[tuple[int, ...], list[int]] = {}
+        for first in adj[a]:
+            p = _path_between(adj, a, first, b)
+            if p is not None:
+                seen[tuple(p)] = p
+        paths = sorted(seen.values(), key=lambda p: _polyline_len(p, nodes))
+        if len(paths) >= 2:
+            long1, long2 = paths[-1], paths[-2]  # two longest = the racing loop
+            # a → (long1 interior) → b → (long2 reversed interior) → back to a (ring closed)
+            return long1[:-1] + long2[::-1][:-1] + [a]
+
+    print(
+        "  circuit graph has complex junctions; falling back to the longest single way",
+        file=sys.stderr,
+    )
+    return _longest_way(osm)
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -252,7 +371,7 @@ def build_centerline(
         file=sys.stderr,
     )
     osm = fetch_raceway_ways(lat, lon, radius_m)
-    node_ids = _longest_way(osm)
+    node_ids = _assemble_circuit(osm)
     nodes = {e["id"]: e for e in osm["elements"] if e["type"] == "node"}
     pts = [nodes[i] for i in node_ids if i in nodes]
     lats = [p["lat"] for p in pts]
