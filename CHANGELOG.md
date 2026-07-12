@@ -13,6 +13,15 @@ QSS (T0/T1) paths are untouched.
 
 ### Added
 
+- **raceline**: the **time-weighted racing line** (Decision #10; Rowold 2023; Lovato & Massaro 2022).
+  The min-curvature QP is re-solved with per-station weights `wᵢ = Δtᵢ ∝ 1/vᵢ` from a T0/g-g-g-v
+  speed pre-pass on the current line, in an outer reweight loop that keeps the fastest line and stops
+  on lap-time convergence (`P = 2MᵀWM`, `q = 2MᵀWκ_r`; `W = I` reduces to min-curvature bit-for-bit).
+  New `outlap.time_weighted(vehicle_dir, track, half_width_m, …)` Python binding; new
+  `RacelineGenerator::TimeWeighted { iterations }` schema variant (additive MINOR) and
+  `LineDescriptor::TimeWeighted` provenance (the real converged iteration count). Theory page
+  `docs/theory/raceline.md`; property tests for weighted-cost optimality, scale invariance, and
+  monotone lap-time improvement vs min-curvature.
 - **vehicle**: the **T2 physics blocks** (HANDOFF §6.1; Perantoni & Limebeer 2014; Rowold 2023;
   Pacejka 2012). A curvilinear 3-D-road-frame **chassis RHS** for `[s, n, ψ_rel, v_x, v_y, r, ω₁..₄]`
   (planar rigid body + four wheel spins + Frenet progress; grade/banking rotate gravity; `1−nκ`

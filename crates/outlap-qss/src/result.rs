@@ -15,6 +15,13 @@ pub enum LineDescriptor {
         /// Re-linearization iterations run.
         iterations: usize,
     },
+    /// A generated time-weighted line (min-curvature QP reweighted by Δt, Decision #10).
+    TimeWeighted {
+        /// Sampling step used, metres.
+        ds_m: f64,
+        /// Outer reweight iterations actually run before convergence.
+        iterations: usize,
+    },
     /// A user-supplied line file.
     File {
         /// The line file path.
