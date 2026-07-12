@@ -33,6 +33,7 @@
 )]
 
 pub mod error;
+pub mod margin;
 pub mod path;
 pub mod qss;
 pub mod result;
@@ -41,6 +42,7 @@ pub mod t1;
 pub mod vehicle;
 
 pub use error::{T0Error, T1Error};
+pub use margin::corner_scaled_targets;
 pub use path::T0Path;
 pub use qss::{
     solve_t0, solve_t1, tier_not_implemented, QssError, QssLap, SetupLog, SlowCoupling, SlowLog,

@@ -50,6 +50,19 @@ pub struct Driver {
     /// Throttle-cut rate per rad of sideslip past the limit, 1/rad (a lift-when-loose stability aid).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stability_slip_gain: Option<f64>,
+    /// Sideslip-damping steer gain `k_β`, rad/rad — steers the heading back toward the velocity
+    /// vector (`δ −= k_β·β`). This is the correction for a *translational* slide (the car crabbing
+    /// with near-zero yaw rate), which the yaw-rate damper cannot see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sideslip_damping: Option<f64>,
+    /// Drive-wheel slip ratio at which the driver's pedal governor starts cutting throttle (the
+    /// slip near the tire's force peak). With race gearing, low-gear torque is a multiple of the
+    /// grip limit; an ideal driver modulates the pedal against wheelspin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traction_slip_limit: Option<f64>,
+    /// Pedal-governor cut rate per unit of slip ratio past the limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traction_slip_gain: Option<f64>,
 }
 
 impl Driver {
@@ -73,6 +86,12 @@ impl Driver {
     pub const DEFAULT_STABILITY_SLIP_LIMIT_RAD: f64 = 0.05;
     /// Literature default sideslip stability-cut rate, 1/rad.
     pub const DEFAULT_STABILITY_SLIP_GAIN: f64 = 8.0;
+    /// Literature default sideslip-damping steer gain, rad/rad.
+    pub const DEFAULT_SIDESLIP_DAMPING: f64 = 0.5;
+    /// Default pedal-governor slip threshold (near the MF force peak).
+    pub const DEFAULT_TRACTION_SLIP_LIMIT: f64 = 0.09;
+    /// Default pedal-governor cut rate per unit slip past the limit.
+    pub const DEFAULT_TRACTION_SLIP_GAIN: f64 = 25.0;
 
     /// The resolved preview time, s (field or literature default).
     #[must_use]
@@ -126,5 +145,23 @@ impl Driver {
     pub fn stability_slip_gain(&self) -> f64 {
         self.stability_slip_gain
             .unwrap_or(Self::DEFAULT_STABILITY_SLIP_GAIN)
+    }
+    /// The resolved sideslip-damping steer gain, rad/rad.
+    #[must_use]
+    pub fn sideslip_damping(&self) -> f64 {
+        self.sideslip_damping
+            .unwrap_or(Self::DEFAULT_SIDESLIP_DAMPING)
+    }
+    /// The resolved pedal-governor slip threshold.
+    #[must_use]
+    pub fn traction_slip_limit(&self) -> f64 {
+        self.traction_slip_limit
+            .unwrap_or(Self::DEFAULT_TRACTION_SLIP_LIMIT)
+    }
+    /// The resolved pedal-governor cut rate.
+    #[must_use]
+    pub fn traction_slip_gain(&self) -> f64 {
+        self.traction_slip_gain
+            .unwrap_or(Self::DEFAULT_TRACTION_SLIP_GAIN)
     }
 }

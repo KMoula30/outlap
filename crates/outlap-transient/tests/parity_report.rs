@@ -157,7 +157,9 @@ fn qss_t2_parity_report_limebeer_catalunya() {
     // --- T2 transient lap: seeded at the straightest station, tracking SPEED_MARGIN × the profile. ---
     let mut it = ChannelInterner::new();
     let blocks = common::build_blocks(&t1, &resolved.spec, &mut it);
-    let v_target: Vec<f64> = t0r.v.iter().map(|v| v * SPEED_MARGIN).collect();
+    // Corner-scaled targets — the same shaping the production Python boundary applies.
+    let v_target =
+        outlap_qss::corner_scaled_targets(&env_hull, &path, &t0r.v, &t0r.ax, SPEED_MARGIN);
     let line = line_from_track(&rl.line, &path, &v_target);
     let start_i = straightest(&path.kappa_l);
     let start_s = path.s[start_i];
@@ -172,9 +174,12 @@ fn qss_t2_parity_report_limebeer_catalunya() {
 
     // Optional CSV dump for the PR figures (T0 profile + T2 traces), gated by an env var.
     if let Ok(dir) = std::env::var("OUTLAP_PARITY_CSV") {
-        let mut t0_csv = String::from("s,v\n");
+        let mut t0_csv = String::from("s,v,v_target,kappa_l,ax\n");
         for i in 0..t0r.s.len() {
-            t0_csv.push_str(&format!("{},{}\n", t0r.s[i], t0r.v[i]));
+            t0_csv.push_str(&format!(
+                "{},{},{},{},{}\n",
+                t0r.s[i], t0r.v[i], v_target[i], path.kappa_l[i], t0r.ax[i]
+            ));
         }
         std::fs::write(format!("{dir}/t0_catalunya.csv"), t0_csv).ok();
         let mut t2_csv = String::from("s,vx,n,steer,beta\n");
@@ -253,13 +258,16 @@ fn qss_t2_parity_report_limebeer_catalunya() {
     eprintln!("  worst apex Δ = {worst_apex_pct:.1}%  over {n_apex} apexes   (recorded; ≤1% NOT met — driver margin)");
     eprintln!("  HULL containment (ASSERTED gate): {hull_pct:.2}% of {hull_samples} samples exceed the T1 envelope by >2%   (gate ≤ 2%)");
     eprintln!(
-        "  note: T2 tracks {:.0}% of the QSS profile (driver stability margin, Decision #13). The",
+        "  note: T2 tracks a corner-scaled reference (full profile on straights, {:.0}% at the",
         SPEED_MARGIN * 100.0
     );
     eprintln!(
-        "        lap/apex deltas are driver-competitiveness, not physics — hull containment is"
+        "        lateral grip limit). The lap/apex deltas are driver-competitiveness at the limit,"
     );
-    eprintln!("        the asserted physics-parity gate. The 3-car sweep runs in python/tests/test_parity.py.");
+    eprintln!(
+        "        not physics — hull containment is the asserted physics-parity gate. The 3-car"
+    );
+    eprintln!("        sweep runs in python/tests/test_parity.py.");
     eprintln!("=============================================================================");
 
     // Asserted: the closed-loop lap completes without spinning AND its operating points stay inside

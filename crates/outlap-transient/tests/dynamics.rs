@@ -74,6 +74,7 @@ fn feed_forward_steer_only(solver_blocks: &mut outlap_transient::T2Blocks<f64>) 
     solver_blocks.driver.preview_gain = 0.0;
     solver_blocks.driver.heading_gain = 0.0;
     solver_blocks.driver.yaw_damping = 0.0;
+    solver_blocks.driver.sideslip_damping = 0.0;
 }
 
 /// Silence the longitudinal loop entirely (no throttle, no brake) — a pure coastdown driver.

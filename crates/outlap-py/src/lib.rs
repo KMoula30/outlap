@@ -1809,6 +1809,7 @@ fn solve_transient_lap(
     notes.extend(t0v.notes().iter().cloned());
     notes.extend(t1v.notes().iter().cloned());
     notes.extend(env.notes().iter().cloned());
+    let env_shape = env.clone(); // kept for the corner-scaled target shaping (solve_t0 consumes env)
     let reference = solve_t0(
         &t0v,
         env,
@@ -1833,7 +1834,16 @@ fn solve_transient_lap(
         outlap_vehicle::assemble_t2(&t1v, &resolved.spec, &mut interner, &t2_opts, &mut notes)
             .into();
 
-    let v_target: Vec<f64> = reference.lap.v.iter().map(|v| v * speed_margin).collect();
+    // Corner-scaled speed targets (outlap_qss::margin): full profile speed where lateral demand is
+    // low (straights), `speed_margin` at the lateral grip limit, and a margined braking feasibility
+    // pass so the shaped reference is dynamically reachable at every corner entry.
+    let v_target = outlap_qss::corner_scaled_targets(
+        &env_shape,
+        &path,
+        &reference.lap.v,
+        &reference.lap.ax,
+        speed_margin,
+    );
     let line = line_from_track(&track.inner, &path, &v_target, flat)?;
     let start_i = straightest_station(&path.kappa_l);
     let start_s = path.s[start_i];
@@ -1878,9 +1888,12 @@ fn solve_transient_lap(
         solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
     }
     notes.push(format!(
-        "T2 driver tracks {:.0}% of the QSS speed profile (the point-mass profile spends the whole \
-         grip envelope longitudinally); the lap is seeded at the straightest station, s = {start_s:.1} m",
-        speed_margin * 100.0
+        "T2 driver tracks a corner-scaled speed reference: the full QSS profile where lateral \
+         demand is low, {:.0}% of it at the lateral grip limit (the profile rides an envelope not \
+         filtered for open-loop stability), with braking feasibility enforced at {:.0}% of the \
+         braking capability; the lap is seeded at the straightest station, s = {start_s:.1} m",
+        speed_margin * 100.0,
+        speed_margin * speed_margin * 100.0
     ));
     // Attach the gear-shift FSM: the crossover speeds where the best gear changes, and the gearbox's
     // own shift time. A single-speed (direct-drive) car has no up-shift speeds, so the FSM is a no-op

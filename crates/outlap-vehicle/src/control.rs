@@ -57,7 +57,7 @@ pub fn preview_distance<T: Float>(vx: T, preview_time: T) -> T {
 /// δ_ff   = κ_ref(s+L_p) · (L + K_us · v_x²)                  (understeer-gradient feed-forward)
 /// r_tgt  = v_x · κ_ref(s+L_p)                                (reference yaw rate)
 /// n_pred = n + L_p · sin ψ_rel                               (offset predicted at the preview point)
-/// δ_fb   = (1−recover)·k_prev·(n_ref(s+L_p) − n_pred) − k_ψ·ψ_rel + k_r·(1+5·recover)·(r_tgt − r)
+/// δ_fb   = (1−recover)·k_prev·(n_ref(s+L_p) − n_pred) − k_ψ·ψ_rel + k_r·(1+5·recover)·(r_tgt − r) − k_β·β
 /// δ      = clamp(δ_ff + δ_fb, ±δ_max)
 /// ```
 /// Damping the yaw to `r_tgt` (not 0) makes the driver **counter-steer** when the car over-rotates;
@@ -108,6 +108,16 @@ pub struct Driver<T> {
     /// Slide-recovery ramp rate per rad of sideslip past [`slip_limit`](Self::slip_limit) (1/rad); the
     /// `recover` factor reaches 1 (full opposite-lock, no power) at `β = slip_limit + 1/slip_gain`.
     pub slip_gain: T,
+    /// Sideslip-damping steer gain `k_β`, rad/rad: `δ −= k_β·β` re-aligns the heading with the
+    /// velocity vector. The yaw-rate damper only sees *rotational* slides (`r` far from `r_target`);
+    /// a **translational** slide — the car crabbing off the line with `r ≈ r_target ≈ 0` after a
+    /// corner-exit — is invisible to it, and the path term is faded exactly when it happens. This
+    /// term is the correction that closes that gap.
+    pub sideslip_damping: T,
+    /// Drive-wheel slip ratio at which the pedal governor starts cutting (near the force peak).
+    pub traction_slip_limit: T,
+    /// Governor cut rate per unit of slip past the limit (pedal fraction per slip ratio).
+    pub traction_slip_gain: T,
     /// Anti-windup clamp on `|ξ|`, m (a backstop; conditional integration is the primary limiter).
     pub integral_limit: T,
     /// Interned road channels (reads the current + preview target-line channels).
@@ -177,8 +187,9 @@ impl<T: Float> Block<T> for Driver<T> {
         // gripping, strong opposite lock once the rear is loose — so the recovery has the authority to
         // catch a slide without over-damping normal cornering (where `recover ≈ 0`).
         let yaw_gain = self.yaw_damping * (one + T::from(5.0).unwrap_or_else(T::one) * recover);
-        let d_fb =
-            grip * self.preview_gain * e_lat - self.heading_gain * psi + yaw_gain * (r_target - r);
+        let d_fb = grip * self.preview_gain * e_lat - self.heading_gain * psi
+            + yaw_gain * (r_target - r)
+            - self.sideslip_damping * beta;
         let steer = (d_ff + d_fb).max(-self.max_steer).min(self.max_steer);
         bus.set(CoreSignal::Steer, lane, steer);
 
@@ -189,7 +200,17 @@ impl<T: Float> Block<T> for Driver<T> {
         let u_sat = u.max(-one).min(one);
         let want_thr = u_sat.max(zero);
         let want_brk = (-u_sat).max(zero);
-        let throttle = want_thr * grip; // no power while the rear is sliding
+        // Wheel-slip governor: an ideal driver modulates the pedal against drive wheelspin (with a
+        // race gearing, low-gear torque is a multiple of the grip limit, so an unmodulated pedal
+        // fraction lights up the driven axle mid-exit — the measured slide trigger). Proportional
+        // cut on the worst positive lagged slip ratio; braking slips are negative and untouched.
+        let mut kappa_max = T::zero();
+        for w in 0..outlap_core::bus::WHEELS {
+            kappa_max = kappa_max.max(x.relax(outlap_core::state::RelaxState::Kappa, w));
+        }
+        let over = (kappa_max - self.traction_slip_limit).max(zero);
+        let tc = (one - self.traction_slip_gain * over).max(zero);
+        let throttle = want_thr * grip * tc; // no power while sliding or spinning up
         let brake = want_brk;
         bus.set(CoreSignal::Throttle, lane, throttle);
         bus.set(CoreSignal::Brake, lane, brake);
