@@ -272,6 +272,16 @@ def test_t0_dataset_stays_s_only(catalunya: Track) -> None:
     assert "vertical_load_n" not in lap
 
 
+def test_fz_coupling_settable_via_sim_dict(catalunya: Track) -> None:
+    # Regression: `fz_coupling` is Option<FzCoupling> (unset = tier-resolved), so it is absent
+    # from the serialized sim base — the strict merge must still accept the documented override
+    # (null-injected like raceline.generator/file), not reject it as an unknown field.
+    lap = solve_fast(
+        F1_DIR, catalunya, sim={**COARSE_SIM, "fz_coupling": "fixed_point"}
+    )
+    assert lap.attrs["fz_coupling"] == "fixed_point"
+
+
 def test_t1_dataset_has_wheel_dim_and_channels(catalunya: Track) -> None:
     lap = solve_lap_dataset(F1_DIR, catalunya, ds_m=25.0, tier="t1", sim=COARSE_SIM)
     assert lap.attrs["tier"] == "t1"
