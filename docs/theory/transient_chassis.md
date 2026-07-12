@@ -201,8 +201,10 @@ airborne at racing speed), collapsing grip until the yaw rate runs away; the flo
 
 ![The road-normal load factor and yaw rate, before vs after](img/t2_3d_stability_mechanism.png)
 
-With both normal-load guards the three reference cars lap the elevated circuit within ≤0.2 % of their
-flat-plane time — the 3-D and flat driver-stability envelopes now coincide.
+With both normal-load guards the three reference cars lap the elevated circuit within ≤0.5 % of their
+flat-plane time (limebeer −0.32 %, f1_2026 −0.49 %, model3 −0.18 % — the 3-D laps run marginally
+*faster*, the shaped speed reference exploiting the downhill sections) — the 3-D and flat
+driver-stability envelopes coincide.
 
 ![Flat vs 3-D lap time for the three reference cars](img/t2_3d_pace_parity.png)
 
