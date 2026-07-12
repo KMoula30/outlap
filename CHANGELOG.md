@@ -4,12 +4,17 @@ All notable changes to outlap are documented here. This project follows
 [Conventional Commits](https://www.conventionalcommits.org) and
 [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [0.2.5] - 2026-07-13
 
-Milestone **M4** groundwork — the block/bus scaffolding, the fixed-step split integrator, and the
-transient **T2** physics blocks + lap-orchestration skeleton. No change to the Python solver surface
-yet: `solve_lap` still raises `tier_not_implemented` for T2 (the Python dispatch is a later PR); the
-QSS (T0/T1) paths are untouched.
+Milestone **M4** — the transient **T2** tier, end to end: a 7-DOF chassis integrated through time at
+1 ms in the curvilinear 3-D road frame, with tire relaxation, an ideal preview driver behind a
+corner-scaled stability margin, a rule-based control layer (gear-shift FSM, torque vectoring, regen
+blending), and the electrical slow states live in the loop. Plus the time-weighted racing line, the
+`spa_osm` 3-D import, the QSS↔T2 parity/perf gate suite, the notebook course through `09`, and the
+v0.2.5 user guide. Two Decision-#48-style honest records ship with it (both decomposed in
+`docs/validation/limebeer.md`): the ≤1% Limebeer lap-time ambition is **not** met at this tier
+(driver-competence at the limit, not physics — the T2 hull-containment parity gate holds at 0.0%),
+and the 250k steps/s throughput target is RHS-bound at MF6.1 fidelity (measured ~62k, tripwired).
 
 ### Added
 
@@ -28,12 +33,6 @@ QSS (T0/T1) paths are untouched.
   cars, and max sideslip ≤ 5° everywhere. New additive `driver` schema fields (`sideslip_damping`,
   `traction_slip_limit`, `traction_slip_gain`); `docs/theory/driver.md` documents the shaped
   reference and both stabilisers; golden `limebeer_t2_flat` re-blessed.
-- **data**: **`f1_2026` gearing fixed** — `final_drive` 3.1 → 6.4, sizing 8th gear to top out at
-  the 15 000 rpm limiter at ~340 km/h (it previously implied a 700 km/h top gear, so a lap never
-  left 3rd). A T2 lap now sweeps all eight gears with **59 shift events** (a real F1 lap shows
-  ~50), the shift ladder spanning ~100–300 km/h; the pedal governor holds the doubled low-gear
-  torque at the tyre's force peak (max rear slip ratio 0.107). Golden `f1_2026_t0` re-blessed
-  (the traction envelope changed at mid/high speed; T0 centreline 112.557 → 112.520 s).
 - **notebooks**: **`08_transient_t2.ipynb`** — the T2 capstone (CI-executed, committed outputs) on
   the Limebeer car: the QSS↔T2 speed overlay + hull containment, the time-domain traces a station
   solver cannot show (steer, yaw rate, sideslip, throttle/brake, per-wheel load/slip), the gear-shift
@@ -67,6 +66,50 @@ QSS (T0/T1) paths are untouched.
   pruning dead-end spurs to the 2-core, and resolving the pit-bypass *theta* junction to the
   two-longest-path cycle. Committed Rust sanity tests (closure/length/physical grade+κ_v) and an
   offline Python unit test for the theta assembly.
+- **vehicle, transient, py**: the **T2 3-D road frame is on by default** (PR #43). A crest that
+  unloads the car is floored at 0.15 g below static (a rigid T2 chassis has no suspension travel to
+  absorb it — full fidelity awaits T3), per-wheel `F_z` is floored so the tyre relaxation stays
+  well-posed over crests, and a divergence guard truncates-and-flags instead of crashing. A 3-D
+  `catalunya_osm` T2 lap completes at flat-track pace (flat-vs-3-D ≤0.5% on all three cars);
+  `sim.flat_track` is respected exactly as in the QSS tiers.
+- **qss, transient**: **traction discharge** — the pack's state of charge moves both ways (PR #42):
+  electric machines draw the pack under power (`F_drive·v/η` per machine axle) and recharge it under
+  braking, Coulomb-counted as net energy on the decimated slow clock; a pack seeded full discharges
+  to open regen headroom instead of refusing regen forever. The **gear-shift FSM is attached** to
+  every Python T2 lap via the QSS powertrain's own best-gear crossover speeds
+  (`T1Vehicle::upshift_speeds`), with down-shift hysteresis against limit-cycling.
+- **py, transient**: **T2 through the Python boundary** (PR #39). `solve_transient_lap(...)` (and
+  `solve_lap_dataset(..., tier="t2")`) assembles the QSS artifacts — cached envelope, T0 profile,
+  line table — and returns a **time-indexed** dataset over `(time, wheel)`: chassis states, driver
+  channels, per-wheel loads/slips/forces, gear + torque-scale, TV moment, regen/traction power,
+  SoC/pack temperature; x/y/z reconstructed from the *integrated* trajectory; provenance records the
+  resolved `fz_coupling`/`dt`/integrator/`speed_margin`. `solve_lap(tier="t2")` redirects instead of
+  erroring.
+- **qss, vehicle, schema**: **physically-real regen** (`battery/1.1`, `ptm/1.2` — additive MINOR;
+  PR #39). Each drive axle's machine brakes its own axle within a per-axle regen envelope; charge
+  acceptance derates with **both** state of charge and pack temperature (a cold or full pack accepts
+  less), replacing the single ohmic-limit model that could not represent a cold pack.
+- **transient, vehicle, schema**: the **rule-based control layer** (PR #39; HANDOFF §8.2/§8.3).
+  The full gear-shift state machine (torque-cut → ratio swap → clutch ramp, consuming
+  `Gearbox.shift_time_s` as step-boundary events); yaw-moment torque vectoring
+  (`ΔM_z = K_p·(r_target − r)`, `r_target = v·κ_ref`) allocated within per-wheel friction-ellipse +
+  machine limits; series regen/brake blending closing the pack recharge path. Property tests:
+  allocator ellipse containment, energy closure across the regen loop, shift-event determinism.
+- **vehicle, schema**: the **ideal driver** (PR #38; MacAdam 1981; Decision #21). MacAdam-style
+  preview steering + understeer-gradient curvature feed-forward (`δ_ff = κ(L + K_us·v²)`, `K_us`
+  from the vehicle's own `understeer_gradient()`), PI speed tracking of the QSS profile with a
+  gg-headroom feed-forward (augmented-ODE integral state), sideslip-gated slide recovery
+  (counter-steer escalation + throttle cut), and minimal actuation (static splits, balance-bar
+  braking) — first closed-loop laps on all three reference cars. New additive `driver` vehicle
+  schema section, Limebeer-tuned literature defaults surfaced as estimated;
+  `docs/theory/driver.md`.
+- **docs**: the **v0.2.5 user guide** — `docs/GUIDE.md` fully revised: the transient tier (§8.7),
+  the T2/raceline API (§10), 27 circuits, the split parity story (§13), a self-contained release
+  history (§15.3), and zero internal-planning references in the prose; every quoted number
+  re-verified against the shipped package. The **notebook course** now runs `00`–`09`: the
+  refreshed tour, the Spa showcase in `02`, the time-weighted comparison in `03`, the T2 capstone
+  `08`, and the new race-engineering notebook `09` (corner anatomy from the transient trace; car
+  balance via what-if overrides).
 - **raceline**: the **time-weighted racing line** (Decision #10; Rowold 2023; Lovato & Massaro 2022).
   The min-curvature QP is re-solved with per-station weights `wᵢ = Δtᵢ ∝ 1/vᵢ` from a T0/g-g-g-v
   speed pre-pass on the current line, in an outer reweight loop that keeps the fastest line and stops
@@ -122,6 +165,24 @@ QSS (T0/T1) paths are untouched.
   `LoadTransferGeometry`) so the forthcoming T2 chassis block derives per-wheel normal loads from
   the identical expressions (HANDOFF §6.1). Behaviour-preserving refactor: the trim solver now calls
   the free function.
+
+### Fixed
+
+- **track**: DEM **grade and vertical curvature** are estimated by central finite differences over a
+  30 m physical baseline instead of the elevation spline's analytic second derivative (PR #41): on
+  `catalunya_osm` the spline ringing had produced κ_v ≈ 0.32 (a 3 m vertical radius) and a 34° grade,
+  driving a ~250 g normal-load spike that diverged 3-D transient laps and distorted QSS 3-D
+  fidelity; the baseline estimate recovers the physical profile (κ_v ≈ 0.025). One golden re-blessed
+  (`f1_2026` 3-D, with note).
+- **py**: `sim={"fz_coupling": ...}` is settable again — `Option<FzCoupling>`'s skip-serialized
+  default made the strict deep-merge reject the documented override as an unknown field
+  (null-injected like `raceline.generator`/`file`; regression-tested).
+- **data**: `f1_2026`'s final drive (3.1 → 6.4) — the old value implied a 700 km/h top gear, so a
+  lap never left 3rd (gear indices 0–2, ~9 shift events). 8th now tops out at the 15 000 rpm
+  limiter at ~340 km/h (matching the ERS taper ending at 345), the ladder spans ~100–300 km/h, and
+  a T2 lap sweeps **all eight gears with 59 shift events** — the driver's pedal governor holding
+  the doubled low-gear torque at the tyre force peak. Golden `f1_2026_t0` re-blessed with a note
+  (T0 centreline 112.557 → 112.520 s).
 
 ### Changed
 

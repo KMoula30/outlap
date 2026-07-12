@@ -842,7 +842,7 @@ wheels = [
 
 [[package]]
 name = "outlap"
-version = "0.2.0"
+version = "0.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "h5py" },
