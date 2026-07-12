@@ -28,5 +28,5 @@ pub use outlap_core::bus::ChannelInterner;
 
 pub use control::{ShiftEvent, Shifter, SlowStack, DOWNSHIFT_HYSTERESIS, SHIFT_CUT_FRACTION};
 pub use lap::{Provenance, SimConfig, T2Blocks, TransientSolver};
-pub use line_table::{LineSamples, LineTable};
+pub use line_table::{LineSamples, LineTable, PreviewSample, RoadSample};
 pub use result::{TransientLap, Wheels};
