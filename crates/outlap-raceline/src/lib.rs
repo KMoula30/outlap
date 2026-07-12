@@ -24,7 +24,8 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
 )]
 
 use clarabel::algebra::CscMatrix;
@@ -83,31 +84,49 @@ pub enum RacelineError {
     /// The QP solver did not converge.
     #[error("min-curvature QP did not solve (status: {0:?})")]
     QpFailed(SolverStatus),
+    /// A time-weight profile of the wrong length was supplied.
+    #[error("weights has {got} entries; the QP samples {want} stations at this ds")]
+    WeightLenMismatch {
+        /// Weights supplied.
+        got: usize,
+        /// Stations the QP samples (see `raceline_stations`).
+        want: usize,
+    },
     /// Building the offset line as a track failed.
     #[error(transparent)]
     Track(#[from] TrackError),
 }
 
-/// Generate the minimum-curvature line for `track`, keeping the car (half-width `half_width_m`,
-/// which the caller derives from `chassis.track_m` plus a margin) inside the track.
-pub fn min_curvature_line(
-    track: &Track,
-    half_width_m: f64,
-    opts: &RacelineOptions,
-) -> Result<Raceline, RacelineError> {
+/// The station count and step the QP samples `track` at for the given `ds_m`.
+///
+/// Deterministic in `(length, closed, ds_m)` — [`raceline_stations`] and both generators agree, so a
+/// caller can precompute a per-station weight profile (e.g. Δt from a speed pre-pass) that lines up
+/// exactly with [`min_curvature_line_weighted`].
+fn station_grid(track: &Track, ds_m: f64) -> (usize, f64, bool) {
     let length = track.length();
     let closed = track.is_closed();
-    let n_seg = ((length / opts.ds_m).round() as usize).max(MIN_STATIONS);
+    let n_seg = ((length / ds_m).round() as usize).max(MIN_STATIONS);
     let ds = length / n_seg as f64;
     let n = if closed { n_seg } else { n_seg + 1 };
-    if n < MIN_STATIONS {
-        return Err(RacelineError::TooFewStations {
-            got: n,
-            min: MIN_STATIONS,
-        });
-    }
+    (n, ds, closed)
+}
 
-    // Sample the centerline: signed plan-view curvature κ_r and the corridor bounds.
+/// The centerline arc-length stations (metres) the QP will sample for `ds_m`.
+///
+/// Use this to sample a per-station weight profile (`weights[i]` at station `stations[i]`) before
+/// calling [`min_curvature_line_weighted`]; the indices align by construction.
+pub fn raceline_stations(track: &Track, ds_m: f64) -> Vec<f64> {
+    let (n, ds, _) = station_grid(track, ds_m);
+    (0..n).map(|i| i as f64 * ds).collect()
+}
+
+/// Sample the centerline into `(s, κ_r, n_lo, n_hi)` over the QP grid.
+fn sample_corridor(
+    track: &Track,
+    half_width_m: f64,
+    ds: f64,
+    n: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut s = Vec::with_capacity(n);
     let mut kappa = Vec::with_capacity(n);
     let mut n_lo = Vec::with_capacity(n);
@@ -124,9 +143,68 @@ pub fn min_curvature_line(
         n_lo.push(lo);
         n_hi.push(hi);
     }
+    (s, kappa, n_lo, n_hi)
+}
 
-    let n_opt = solve_qp(&kappa, ds, closed, &n_lo, &n_hi, opts.epsilon)?;
+/// Generate the minimum-curvature line for `track`, keeping the car (half-width `half_width_m`,
+/// which the caller derives from `chassis.track_m` plus a margin) inside the track.
+pub fn min_curvature_line(
+    track: &Track,
+    half_width_m: f64,
+    opts: &RacelineOptions,
+) -> Result<Raceline, RacelineError> {
+    let (n, ds, closed) = station_grid(track, opts.ds_m);
+    if n < MIN_STATIONS {
+        return Err(RacelineError::TooFewStations {
+            got: n,
+            min: MIN_STATIONS,
+        });
+    }
+    let (s, kappa, n_lo, n_hi) = sample_corridor(track, half_width_m, ds, n);
+    let n_opt = solve_qp(&kappa, ds, closed, &n_lo, &n_hi, opts.epsilon, None)?;
     let line = offset_track(track, &s, &n_opt, "min-curvature line")?;
+    Ok(Raceline { s, n: n_opt, line })
+}
+
+/// Generate a **time-weighted** minimum-curvature line: the same QP with a per-station weight
+/// `w_i ≥ 0` on the curvature cost, minimising `Σ w_i·κ_new,i²` instead of the flat `Σ κ_new,i²`
+/// (Locked Decision #10). Feeding `w_i = Δt_i = Δs_i / v_i` from a speed pre-pass spends the
+/// curvature budget where the car is slow (corners), trading a little straight-line curvature for a
+/// faster driven line. `weights.len()` must equal [`raceline_stations`]`(track, opts.ds_m).len()`.
+///
+/// The outer reweight loop (re-run the speed pre-pass on the new line, recompute `w`, repeat) lives
+/// at the orchestration layer that owns the speed model — this crate stays wasm-clean and does the
+/// one weighted solve.
+pub fn min_curvature_line_weighted(
+    track: &Track,
+    half_width_m: f64,
+    weights: &[f64],
+    opts: &RacelineOptions,
+) -> Result<Raceline, RacelineError> {
+    let (n, ds, closed) = station_grid(track, opts.ds_m);
+    if n < MIN_STATIONS {
+        return Err(RacelineError::TooFewStations {
+            got: n,
+            min: MIN_STATIONS,
+        });
+    }
+    if weights.len() != n {
+        return Err(RacelineError::WeightLenMismatch {
+            got: weights.len(),
+            want: n,
+        });
+    }
+    let (s, kappa, n_lo, n_hi) = sample_corridor(track, half_width_m, ds, n);
+    let n_opt = solve_qp(
+        &kappa,
+        ds,
+        closed,
+        &n_lo,
+        &n_hi,
+        opts.epsilon,
+        Some(weights),
+    )?;
+    let line = offset_track(track, &s, &n_opt, "time-weighted line")?;
     Ok(Raceline { s, n: n_opt, line })
 }
 
@@ -146,9 +224,11 @@ fn neighbor(k: usize, delta: isize, n: usize, closed: bool) -> Option<usize> {
 ///
 /// Scalar linearisation (Heilmeier et al. 2020 §3.1): the offset-path curvature is
 /// `κ_new,i = κ_r,i + (n_{i-1} − 2n_i + n_{i+1})/Δs² + κ_r,i²·n_i`, i.e. `M·n + κ_r` with `M`
-/// tridiagonal (`M_{i,i} = −2/Δs² + κ_r,i²`, `M_{i,i±1} = 1/Δs²`). Minimising `‖M·n + κ_r‖²` gives
-/// `P = 2·MᵀM` (pentadiagonal + wrap) and `q = 2·Mᵀκ_r`. The `κ_r²·n` metric term is what makes an
-/// inward offset correctly *increase* curvature.
+/// tridiagonal (`M_{i,i} = −2/Δs² + κ_r,i²`, `M_{i,i±1} = 1/Δs²`). Minimising the weighted residual
+/// `Σ w_i·κ_new,i² = (M·n + κ_r)ᵀW(M·n + κ_r)` gives `P = 2·MᵀWM` (pentadiagonal + wrap) and
+/// `q = 2·MᵀWκ_r`. The `κ_r²·n` metric term is what makes an inward offset correctly *increase*
+/// curvature. `weights = None` is the flat `W = I` (min-curvature); `Some(w)` is the time-weighted
+/// variant (Decision #10) — the flat path is assembled bit-identically to preserve provenance.
 fn solve_qp(
     kappa: &[f64],
     ds: f64,
@@ -156,37 +236,103 @@ fn solve_qp(
     n_lo: &[f64],
     n_hi: &[f64],
     epsilon: f64,
+    weights: Option<&[f64]>,
 ) -> Result<Vec<f64>, RacelineError> {
     let n = kappa.len();
     let ds2 = ds * ds;
     let ds4 = ds2 * ds2;
     let inv2 = 1.0 / ds2;
+    let inv4 = 1.0 / ds4;
     // Tridiagonal M's diagonal: d_i = −2/Δs² + κ_i².
     let d: Vec<f64> = (0..n).map(|i| -2.0 * inv2 + kappa[i] * kappa[i]).collect();
 
-    // q = 2·Mᵀκ_r; (Mᵀκ_r)_i = (κ_{i-1} + κ_{i+1})/Δs² + d_i·κ_i.
-    let mut q = vec![0.0; n];
-    for i in 0..n {
-        let km = neighbor(i, -1, n, closed).map_or(0.0, |j| kappa[j]);
-        let kp = neighbor(i, 1, n, closed).map_or(0.0, |j| kappa[j]);
-        q[i] = 2.0 * ((km + kp) * inv2 + d[i] * kappa[i]);
-    }
-
-    // P = 2·MᵀM (upper triangle): diag 2(2/Δs⁴ + d_i²) + ε, ±1: 2(d_i+d_j)/Δs², ±2: 2/Δs⁴.
-    let max_diag = 2.0 * (2.0 / ds4 + d.iter().fold(0.0_f64, |m, &v| m.max(v * v)));
-    let eps = epsilon * max_diag;
-    let mut entries: Vec<(usize, usize, f64)> = Vec::with_capacity(3 * n);
-    for i in 0..n {
-        entries.push((i, i, 2.0 * (2.0 / ds4 + d[i] * d[i]) + eps));
-        if let Some(j) = neighbor(i, 1, n, closed) {
-            if j != i {
-                entries.push((i.min(j), i.max(j), 2.0 * (d[i] + d[j]) * inv2));
+    let (q, mut entries, max_offdiag);
+    if let Some(w) = weights {
+        // Row i of M weighted by w_i: (MᵀWκ_r)_j = Σ_i w_i M_{ij} κ_i over rows i ∈ {j-1, j, j+1}.
+        let wof = |i: usize| w[i];
+        let mut qw = vec![0.0; n];
+        for j in 0..n {
+            let mut acc = w[j] * d[j] * kappa[j];
+            if let Some(im) = neighbor(j, -1, n, closed) {
+                acc += wof(im) * inv2 * kappa[im]; // row j-1 hits column j via M_{j-1,j}=inv2
+            }
+            if let Some(ip) = neighbor(j, 1, n, closed) {
+                acc += wof(ip) * inv2 * kappa[ip]; // row j+1 hits column j via M_{j+1,j}=inv2
+            }
+            qw[j] = 2.0 * acc;
+        }
+        // (MᵀWM)_{jk} = Σ_i w_i M_{ij} M_{ik}. Diagonal, +1 and +2 bands (upper triangle).
+        let mut ent: Vec<(usize, usize, f64)> = Vec::with_capacity(3 * n);
+        let mut peak = 0.0_f64;
+        for j in 0..n {
+            let mut diag = w[j] * d[j] * d[j];
+            if let Some(im) = neighbor(j, -1, n, closed) {
+                diag += wof(im) * inv2 * inv2; // row j-1: M_{j-1,j}²
+            }
+            if let Some(ip) = neighbor(j, 1, n, closed) {
+                diag += wof(ip) * inv2 * inv2; // row j+1: M_{j+1,j}²
+            }
+            ent.push((j, j, 2.0 * diag));
+            // Traverse only +1/+2 from each j so every undirected band edge (including the closed
+            // wrap edge) is emitted exactly once; place it in the upper triangle by (min, max).
+            if let Some(k) = neighbor(j, 1, n, closed) {
+                if k != j {
+                    // rows i=j (d_j·inv2) and i=k (inv2·d_k)
+                    let off = w[j] * d[j] * inv2 + w[k] * inv2 * d[k];
+                    ent.push((j.min(k), j.max(k), 2.0 * off));
+                    peak = peak.max((2.0 * off).abs());
+                }
+            }
+            if let Some(k) = neighbor(j, 2, n, closed) {
+                if k != j {
+                    // only the row between them (M·inv2 on both sides), weighted by that row's w
+                    let mid = neighbor(j, 1, n, closed).expect("interior neighbor exists");
+                    let off = wof(mid) * inv2 * inv2;
+                    ent.push((j.min(k), j.max(k), 2.0 * off));
+                    peak = peak.max((2.0 * off).abs());
+                }
             }
         }
-        if let Some(j) = neighbor(i, 2, n, closed) {
-            if j != i {
-                entries.push((i.min(j), i.max(j), 2.0 / ds4));
+        q = qw;
+        entries = ent;
+        max_offdiag = peak;
+    } else {
+        // Flat W = I: the original assembly, byte-for-byte (min-curvature provenance is stable).
+        let mut qf = vec![0.0; n];
+        for i in 0..n {
+            let km = neighbor(i, -1, n, closed).map_or(0.0, |j| kappa[j]);
+            let kp = neighbor(i, 1, n, closed).map_or(0.0, |j| kappa[j]);
+            qf[i] = 2.0 * ((km + kp) * inv2 + d[i] * kappa[i]);
+        }
+        let mut ent: Vec<(usize, usize, f64)> = Vec::with_capacity(3 * n);
+        for i in 0..n {
+            ent.push((i, i, 2.0 * (2.0 / ds4 + d[i] * d[i])));
+            if let Some(j) = neighbor(i, 1, n, closed) {
+                if j != i {
+                    ent.push((i.min(j), i.max(j), 2.0 * (d[i] + d[j]) * inv2));
+                }
             }
+            if let Some(j) = neighbor(i, 2, n, closed) {
+                if j != i {
+                    ent.push((i.min(j), i.max(j), 2.0 / ds4));
+                }
+            }
+        }
+        q = qf;
+        entries = ent;
+        max_offdiag = 2.0 * inv4;
+    }
+
+    // Tikhonov ε on the diagonal for a unique solution on straights (relative to the biggest term).
+    let max_diag = entries
+        .iter()
+        .filter(|&&(r, c, _)| r == c)
+        .fold(0.0_f64, |m, &(_, _, v)| m.max(v.abs()))
+        .max(max_offdiag);
+    let eps = epsilon * max_diag;
+    for e in &mut entries {
+        if e.0 == e.1 {
+            e.2 += eps;
         }
     }
     let p = upper_csc(&mut entries, n);

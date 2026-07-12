@@ -7,8 +7,8 @@ use crate::error::{Result, SchemaError};
 use crate::load::report::ReportEntry;
 use crate::tree::SpanIndex;
 use crate::{
-    conditions::Conditions, emotor::Emotor, ptm::Ptm, sim::Sim, track::TrackDoc, tyr,
-    vehicle::Vehicle,
+    conditions::Conditions, emotor::Emotor, ptm::Ptm, sim::RacelineGenerator, sim::Sim,
+    track::TrackDoc, tyr, vehicle::Vehicle,
 };
 
 /// Aero map axis names this loader recognizes (unknown names are a semantic error with a hint).
@@ -730,7 +730,19 @@ pub fn check_sim(
     }
     // Exactly one racing-line source.
     match (&sim.raceline.generator, &sim.raceline.file) {
-        (Some(_), None) | (None, Some(_)) => {}
+        (Some(g), None) => {
+            if let RacelineGenerator::TimeWeighted { iterations } = g {
+                if *iterations < 1 || *iterations > 16 {
+                    return Err(SchemaError::semantic(
+                        sources,
+                        s.at("/raceline/generator"),
+                        "`time_weighted` needs `iterations` in 1..=16 (2–4 is typical)",
+                        None,
+                    ));
+                }
+            }
+        }
+        (None, Some(_)) => {}
         (Some(_), Some(_)) => {
             return Err(SchemaError::semantic(
                 sources,

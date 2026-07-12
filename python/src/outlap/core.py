@@ -26,6 +26,7 @@ from outlap_core import (
     min_curvature,
     solve_lap,
     solve_transient_lap,
+    time_weighted,
     vehicle_report,
 )
 
@@ -43,6 +44,7 @@ __all__ = [
     "solve_lap",
     "solve_lap_dataset",
     "solve_transient_lap",
+    "time_weighted",
     "track_dataset",
     "transient_lap_dataset",
     "tyre_forces",
@@ -224,9 +226,12 @@ def solve_lap_dataset(
     :func:`transient_lap_dataset` (dims ``time``/``wheel``) rather than the arc-length one. It takes
     the same arguments; ``speed_margin`` is available on :func:`solve_transient_lap` directly.
     """
-    track, raceline_ds_m = (
-        (line.line(), line.ds_m) if isinstance(line, Raceline) else (line, None)
-    )
+    if isinstance(line, Raceline):
+        track, raceline_ds_m = line.line(), line.ds_m
+        raceline_generator, raceline_iterations = line.generator, line.iterations
+    else:
+        track, raceline_ds_m = line, None
+        raceline_generator, raceline_iterations = None, None
     if tier == "t2":
         return transient_lap_dataset(
             solve_transient_lap(
@@ -234,6 +239,8 @@ def solve_lap_dataset(
                 track,
                 ds_m=ds_m,
                 raceline_ds_m=raceline_ds_m,
+                raceline_generator=raceline_generator,
+                raceline_iterations=raceline_iterations,
                 overrides=overrides,
                 conditions=conditions,
                 sim=sim,
@@ -244,6 +251,8 @@ def solve_lap_dataset(
         track,
         ds_m=ds_m,
         raceline_ds_m=raceline_ds_m,
+        raceline_generator=raceline_generator,
+        raceline_iterations=raceline_iterations,
         overrides=overrides,
         conditions=conditions,
         tier=tier,

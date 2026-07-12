@@ -37,7 +37,9 @@ use outlap_qss::{
     PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle,
     WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
 };
-use outlap_raceline::{min_curvature_line, RacelineOptions};
+use outlap_raceline::{
+    min_curvature_line, min_curvature_line_weighted, raceline_stations, RacelineOptions,
+};
 use outlap_schema::io::FsLoader;
 use outlap_schema::load::load_tyr;
 use outlap_schema::load::report::ReportEntry;
@@ -373,7 +375,7 @@ impl Track {
     }
 }
 
-/// A generated minimum-curvature racing line.
+/// A generated racing line (min-curvature or time-weighted).
 #[pyclass(frozen)]
 pub struct Raceline {
     s: Vec<f64>,
@@ -382,6 +384,12 @@ pub struct Raceline {
     /// The sampling step the line was GENERATED with, m (recorded into lap provenance).
     #[pyo3(get)]
     ds_m: f64,
+    /// Which generator produced this line: `"min_curvature"` or `"time_weighted"`.
+    #[pyo3(get)]
+    generator: String,
+    /// Outer iterations actually run (1 for min-curvature; the converged count for time-weighted).
+    #[pyo3(get)]
+    iterations: usize,
 }
 
 #[pymethods]
@@ -433,6 +441,155 @@ fn min_curvature(
         n: r.n,
         line: Py::new(py, Track { inner: r.line })?,
         ds_m,
+        generator: "min_curvature".to_owned(),
+        iterations: 1,
+    })
+}
+
+/// Generate the **time-weighted** racing line (Decision #10): the min-curvature QP re-solved with
+/// per-station weights `wᵢ = 1/vᵢ` (∝ Δt on the uniform grid) from a T0/GGV speed pre-pass on the
+/// current line, in an outer reweight loop that keeps the fastest line and stops when the modelled
+/// lap time stops improving (or after `iterations`).
+///
+/// Unlike [`min_curvature`], this needs the car — the speed pre-pass runs the vehicle's own g-g-g-v
+/// envelope — so it takes `vehicle_dir` and honours `sim`/`overrides`/`conditions` exactly as the
+/// solver does (`sim.flat_track` picks the flat vs 3-D speed model). The envelope is built once and
+/// reused across iterations.
+#[pyfunction]
+#[pyo3(signature = (vehicle_dir, track, half_width_m, ds_m = 2.0, iterations = 3, margin_m = 0.3, epsilon = 1e-8, tol = 1e-3, overrides = None, conditions = None, sim = None))]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn time_weighted(
+    py: Python<'_>,
+    vehicle_dir: &str,
+    track: &Track,
+    half_width_m: f64,
+    ds_m: f64,
+    iterations: usize,
+    margin_m: f64,
+    epsilon: f64,
+    tol: f64,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<Raceline> {
+    check_ds(ds_m)?;
+    if !(half_width_m > 0.0 && half_width_m.is_finite()) {
+        return Err(PyValueError::new_err(format!(
+            "half_width_m must be a positive, finite number of metres, got {half_width_m}"
+        )));
+    }
+    if !(1..=16).contains(&iterations) {
+        return Err(PyValueError::new_err(format!(
+            "iterations must be in 1..=16 (2-4 is typical), got {iterations}"
+        )));
+    }
+    let opts = RacelineOptions {
+        ds_m,
+        margin_m,
+        epsilon,
+    };
+
+    // --- assemble the speed pre-pass once (the envelope is line-independent) --------------------
+    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
+    let sim_cfg = build_sim(&vl, sim, None)?;
+    let base_conditions = match load_conditions("conditions.yaml", &vl) {
+        Ok(c) => c,
+        Err(e) if is_not_found(&e) => Conditions::default(),
+        Err(e) => return Err(schema_err(e)),
+    };
+    let conditions = match conditions {
+        Some(patch) => merge_conditions(base_conditions, &py_to_json(patch.as_any())?)?,
+        None => base_conditions,
+    };
+    let t0_opts = T0Options {
+        ds_m,
+        allow_degraded: sim_cfg.allow_degraded,
+        ..T0Options::default()
+    };
+    let mut t1v =
+        T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
+    let mut asm_notes = Vec::new();
+    let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut asm_notes)?;
+    let hash = resolved.report.resolved_hash.clone();
+    let env = cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?;
+    let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &t0_opts).map_err(err)?;
+    let flat = sim_cfg.flat_track;
+    let fzc = sim_cfg.resolved_fz_coupling();
+
+    // A T0/GGV speed pre-pass on `line`, returning its per-station (s, v) and modelled lap time.
+    let prepass = |line: &outlap_track::Track| -> PyResult<(Vec<f64>, Vec<f64>, f64)> {
+        let path = if flat {
+            T0Path::from_track_flat(line, ds_m)
+        } else {
+            T0Path::from_track(line, ds_m)
+        };
+        let lap = solve_t0(
+            &t0v,
+            env.clone(),
+            None,
+            &path,
+            LineDescriptor::Centerline,
+            hash.clone(),
+            Vec::new(),
+            fzc,
+            flat,
+        )
+        .map_err(err)?
+        .lap;
+        Ok((lap.s, lap.v, lap.lap_time_s))
+    };
+
+    // Resample a pre-pass speed profile onto the QP's `n` stations by fractional lap position, and
+    // return the weights wᵢ = 1/vᵢ (∝ Δt on the uniform grid).
+    let stations = raceline_stations(&track.inner, ds_m);
+    let weights_from = |v: &[f64]| -> Vec<f64> {
+        let p = v.len().max(1);
+        let n = stations.len();
+        (0..n)
+            .map(|i| {
+                let f = i as f64 / n as f64;
+                let idx = f * p as f64;
+                let lo = (idx.floor() as usize).min(p - 1);
+                let hi = (lo + 1).min(p - 1);
+                let frac = idx - lo as f64;
+                let vi = v[lo] * (1.0 - frac) + v[hi] * frac;
+                1.0 / vi.max(1.0) // v floor: 1 m/s guards a degenerate station
+            })
+            .collect()
+    };
+
+    // --- outer reweight loop: keep the fastest line, stop on lap-time convergence ----------------
+    let mut best = min_curvature_line(&track.inner, half_width_m, &opts).map_err(err)?;
+    let (_, mut best_v, mut best_time) = prepass(&best.line)?;
+    let mut ran = 1usize;
+    for _ in 1..iterations {
+        let w = weights_from(&best_v);
+        let cand =
+            min_curvature_line_weighted(&track.inner, half_width_m, &w, &opts).map_err(err)?;
+        let (_, cand_v, cand_time) = prepass(&cand.line)?;
+        ran += 1;
+        if cand_time < best_time - tol * best_time {
+            best = cand;
+            best_v = cand_v;
+            best_time = cand_time;
+        } else {
+            break; // converged (no meaningful improvement)
+        }
+    }
+
+    Ok(Raceline {
+        s: best.s,
+        n: best.n,
+        line: Py::new(py, Track { inner: best.line })?,
+        ds_m,
+        generator: "time_weighted".to_owned(),
+        iterations: ran,
     })
 }
 
@@ -954,6 +1111,34 @@ fn cached_envelope(
     Ok(env)
 }
 
+/// Build the recorded line descriptor from the raceline provenance passed across the boundary.
+///
+/// `raceline_ds_m = None` ⇒ a centerline lap. Otherwise the generator kind (`"time_weighted"` vs
+/// anything else ⇒ min-curvature) and its converged iteration count are recorded honestly.
+fn line_descriptor(
+    raceline_ds_m: Option<f64>,
+    generator: Option<&str>,
+    iterations: Option<usize>,
+) -> LineDescriptor {
+    match raceline_ds_m {
+        Some(g) => {
+            let iters = iterations.unwrap_or(1);
+            if generator == Some("time_weighted") {
+                LineDescriptor::TimeWeighted {
+                    ds_m: g,
+                    iterations: iters,
+                }
+            } else {
+                LineDescriptor::MinCurvature {
+                    ds_m: g,
+                    iterations: iters,
+                }
+            }
+        }
+        None => LineDescriptor::Centerline,
+    }
+}
+
 /// Row-major flatten of a per-wheel SoA channel (`Vec<[f64; 4]>` → `Vec<f64>`).
 fn flat4(v: &[[f64; 4]]) -> Vec<f64> {
     let mut out = Vec::with_capacity(v.len() * 4);
@@ -981,13 +1166,15 @@ fn flat4(v: &[[f64; 4]]) -> Vec<f64> {
 /// The call holds the GIL for its duration (envelope generation is a seconds-scale cold step in a
 /// debug build); releasing it is deferred to the batch/sweep API milestone.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, overrides = None, conditions = None, tier = None, sim = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None))]
 #[allow(clippy::too_many_arguments)]
 fn solve_lap(
     vehicle_dir: &str,
     track: &Track,
     ds_m: f64,
     raceline_ds_m: Option<f64>,
+    raceline_generator: Option<&str>,
+    raceline_iterations: Option<usize>,
     overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
     conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
     tier: Option<&str>,
@@ -1016,13 +1203,7 @@ fn solve_lap(
     } else {
         T0Path::from_track(&track.inner, ds_m)
     };
-    let line = match raceline_ds_m {
-        Some(g) => LineDescriptor::MinCurvature {
-            ds_m: g,
-            iterations: 1,
-        },
-        None => LineDescriptor::Centerline,
-    };
+    let line = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
     let hash = resolved.report.resolved_hash.clone();
 
     // Enum dispatch on the resolved tier (assembly-time, never in the loop).
@@ -1537,13 +1718,15 @@ impl TransientLap {
 ///
 /// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn solve_transient_lap(
     vehicle_dir: &str,
     track: &Track,
     ds_m: f64,
     raceline_ds_m: Option<f64>,
+    raceline_generator: Option<&str>,
+    raceline_iterations: Option<usize>,
     overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
     conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
@@ -1612,13 +1795,7 @@ fn solve_transient_lap(
     } else {
         T0Path::from_track(&track.inner, ds_m)
     };
-    let line_descriptor = match raceline_ds_m {
-        Some(g) => LineDescriptor::MinCurvature {
-            ds_m: g,
-            iterations: 1,
-        },
-        None => LineDescriptor::Centerline,
-    };
+    let line_descriptor = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
     let mut t1v =
         T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
     let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
@@ -1807,6 +1984,7 @@ fn outlap_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TransientLap>()?;
     m.add_class::<Envelope>()?;
     m.add_function(wrap_pyfunction!(min_curvature, m)?)?;
+    m.add_function(wrap_pyfunction!(time_weighted, m)?)?;
     m.add_function(wrap_pyfunction!(solve_lap, m)?)?;
     m.add_function(wrap_pyfunction!(solve_transient_lap, m)?)?;
     m.add_function(wrap_pyfunction!(vehicle_report, m)?)?;

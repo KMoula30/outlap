@@ -200,13 +200,27 @@ impl Default for Raceline {
     }
 }
 
-/// A racing-line generator (v1 ships only the min-curvature QP, §6.3).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// A racing-line generator: the min-curvature QP (§6.3) or the time-weighted refinement (Decision
+/// #10) that reweights it by the local Δt from a speed pre-pass to approach the minimum-time line.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RacelineGenerator {
     /// Minimum-curvature line: QP over lateral offset minimizing ∫κ² on the 3D ribbon.
     #[default]
     MinCurvature,
+    /// Time-weighted line: the same QP re-solved with per-station weights `wᵢ = Δsᵢ/vᵢ` from a
+    /// T0/GGV speed pre-pass on the current line, in an outer reweight loop that stops on lap-time
+    /// convergence. Minimises `∫κ²·dt` (a proxy for lap time), opening the slow corners more.
+    TimeWeighted {
+        /// Maximum outer reweight iterations (typical 2–4); the loop also stops when the lap time
+        /// stops improving.
+        #[serde(default = "default_tw_iterations")]
+        iterations: u32,
+    },
+}
+
+fn default_tw_iterations() -> u32 {
+    3
 }
 
 fn default_dt_s() -> f64 {

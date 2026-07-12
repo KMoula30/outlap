@@ -193,12 +193,34 @@
       }
     },
     "RacelineGenerator": {
-      "description": "A racing-line generator (v1 ships only the min-curvature QP, §6.3).",
+      "description": "A racing-line generator: the min-curvature QP (§6.3) or the time-weighted refinement (Decision\n#10) that reweights it by the local Δt from a speed pre-pass to approach the minimum-time line.",
       "oneOf": [
         {
           "description": "Minimum-curvature line: QP over lateral offset minimizing ∫κ² on the 3D ribbon.",
           "type": "string",
           "const": "min_curvature"
+        },
+        {
+          "description": "Time-weighted line: the same QP re-solved with per-station weights `wᵢ = Δsᵢ/vᵢ` from a\nT0/GGV speed pre-pass on the current line, in an outer reweight loop that stops on lap-time\nconvergence. Minimises `∫κ²·dt` (a proxy for lap time), opening the slow corners more.",
+          "type": "object",
+          "properties": {
+            "time_weighted": {
+              "type": "object",
+              "properties": {
+                "iterations": {
+                  "description": "Maximum outer reweight iterations (typical 2–4); the loop also stops when the lap time\nstops improving.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "default": 3,
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "time_weighted"
+          ]
         }
       ]
     },

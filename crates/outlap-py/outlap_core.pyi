@@ -41,6 +41,8 @@ class Track:
 
 class Raceline:
     ds_m: float
+    generator: str
+    iterations: int
     def s(self) -> NDArray[np.float64]: ...
     def n(self) -> NDArray[np.float64]: ...
     def line(self) -> Track: ...
@@ -142,11 +144,26 @@ def min_curvature(
     margin_m: float = 0.3,
     epsilon: float = 1e-8,
 ) -> Raceline: ...
+def time_weighted(
+    vehicle_dir: str,
+    track: Track,
+    half_width_m: float,
+    ds_m: float = 2.0,
+    iterations: int = 3,
+    margin_m: float = 0.3,
+    epsilon: float = 1e-8,
+    tol: float = 1e-3,
+    overrides: dict[str, bool | int | float | str] | None = None,
+    conditions: dict[str, object] | None = None,
+    sim: dict[str, object] | None = None,
+) -> Raceline: ...
 def solve_lap(
     vehicle_dir: str,
     track: Track,
     ds_m: float = ...,
     raceline_ds_m: float | None = None,
+    raceline_generator: str | None = None,
+    raceline_iterations: int | None = None,
     overrides: dict[str, bool | int | float | str] | None = None,
     conditions: dict[str, object] | None = None,
     tier: str | None = None,
@@ -157,6 +174,8 @@ def solve_transient_lap(
     track: Track,
     ds_m: float = ...,
     raceline_ds_m: float | None = None,
+    raceline_generator: str | None = None,
+    raceline_iterations: int | None = None,
     overrides: dict[str, bool | int | float | str] | None = None,
     conditions: dict[str, object] | None = None,
     sim: dict[str, object] | None = None,

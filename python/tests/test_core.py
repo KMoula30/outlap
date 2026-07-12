@@ -18,6 +18,7 @@ from outlap.core import (
     Tyre,
     min_curvature,
     solve_lap_dataset,
+    time_weighted,
     track_dataset,
     tyre_forces,
     vehicle_report,
@@ -126,6 +127,25 @@ def test_raceline_improves_lap(catalunya: Track) -> None:
     lap_c = solve_fast(F1_DIR, catalunya)
     lap_r = solve_fast(F1_DIR, rl)  # Raceline accepted directly
     assert lap_r.attrs["lap_time_s"] < lap_c.attrs["lap_time_s"]
+
+
+def test_time_weighted_line_is_at_least_as_fast(catalunya: Track) -> None:
+    # The Δt-weighted QP reweights min-curvature by 1/v from a speed pre-pass; keeping the fastest
+    # line each iteration means the modelled lap is monotone non-increasing vs min-curvature.
+    mc = min_curvature(catalunya, 1.1)
+    tw = time_weighted(F1_DIR, catalunya, 1.1, iterations=4, sim=COARSE_SIM)
+    assert tw.generator == "time_weighted"
+    assert 1 <= tw.iterations <= 4  # honest converged count, never a silent 1
+    assert tw.ds_m == 2.0
+    lap_mc = solve_fast(F1_DIR, mc)
+    lap_tw = solve_fast(F1_DIR, tw)
+    # Faster-or-equal (a small tolerance covers envelope resampling noise on the coarse grid).
+    assert lap_tw.attrs["lap_time_s"] <= lap_mc.attrs["lap_time_s"] * 1.001
+
+
+def test_time_weighted_iterations_bounds(catalunya: Track) -> None:
+    with pytest.raises(ValueError, match="iterations"):
+        time_weighted(F1_DIR, catalunya, 1.1, iterations=0, sim=COARSE_SIM)
 
 
 def test_lap_dataset_shape_and_sanity(catalunya: Track) -> None:
