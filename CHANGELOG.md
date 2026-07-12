@@ -13,6 +13,14 @@ QSS (T0/T1) paths are untouched.
 
 ### Added
 
+- **validation**: the **Limebeer T2 lap-time delta — recorded, not the ≤1% gate** (PR11, Decision
+  #48). The M4 ≤1% Limebeer gate is **not achievable at T2**: on `catalunya_osm` the T2 transient
+  lap is **~+30%** over the 82.43 s OCP oracle (min-curvature 107.92 s, time-weighted 107.57 s),
+  dominated by the ideal driver's 0.85 stability margin (+15.6 s, ~+17% of T0 — Decision #13), on
+  top of the QSS floors (geometry ~5 pp, QSS-vs-OCP ~2.2 s, envelope ~1.5 s). Recorded with the full
+  decomposition in `docs/validation/limebeer.md` + a wide-tripwire test
+  (`test_limebeer_t2_lap_time_recorded_not_gated`); the ≤1% assertion stays deferred (no
+  paper-geometry fixture committed, and the driver margin alone puts it ~20 pp out of reach).
 - **validation, transient**: **QSS↔T2 parity + perf gates** (PR10, Decisions #11/#15/#16). The
   asserted physics-parity gate is **hull containment** — the T2 closed-loop `(a_x, a_y)` operating
   points stay inside the T1 g-g-g-v envelope (≤2% exceedance; measured **0.0%** on all three

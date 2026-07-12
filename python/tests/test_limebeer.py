@@ -25,7 +25,14 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from outlap.core import Track, min_curvature, solve_lap_dataset
+from outlap.core import (
+    Track,
+    min_curvature,
+    solve_lap_dataset,
+    solve_transient_lap,
+    time_weighted,
+    transient_lap_dataset,
+)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DATA = _ROOT / "data"
@@ -195,3 +202,46 @@ def test_golden_transient_lap() -> None:
             scale = 1.0
         worst = float(np.nanmax(np.abs(o - g))) / scale
         assert worst <= tol, f"t2/{var} drifted: {worst:.4f} > {tol}"
+
+
+# --- The Limebeer T2 lap-time delta: RECORDED, not the ≤1% gate ----------------------------------
+
+
+def test_limebeer_t2_lap_time_recorded_not_gated() -> None:
+    """The transient (T2) Limebeer lap on ``catalunya_osm`` vs the 82.43 s OCP oracle.
+
+    This is **recorded with a decomposition, not the ≤1% gate** (docs/validation/limebeer.md). The
+    ≤1% Limebeer lap-time gate is not achievable at the T2 tier on this geometry: on the committed
+    ``catalunya_osm`` the T2 lap is ~+30% over the OCP oracle, dominated by the ideal driver's 0.85
+    stability margin (~+17% of T0, Decision #13), on top of the ~5% track-geometry offset
+    (``catalunya_osm`` vs the PL2014 Fig. 6 centre line), the ~2.2 s structural QSS-vs-OCP floor the
+    paper itself cites, and ~1.5 s of envelope conservatism. The time-weighted line recovers only
+    ~0.3 s of the line-optimality residual. No paper-geometry fixture is committed, so the ungated
+    ``catalunya_osm`` figure is the recorded cross-check. A wide tripwire keeps the recorded band from
+    drifting silently.
+    """
+    track = Track.load(CATALUNYA)
+    tw = time_weighted(LIMEBEER, track, 1.1, iterations=4, sim=_T2_SIM)
+    ds = transient_lap_dataset(
+        solve_transient_lap(
+            LIMEBEER,
+            tw.line(),
+            raceline_ds_m=tw.ds_m,
+            raceline_generator=tw.generator,
+            raceline_iterations=tw.iterations,
+            sim=_T2_SIM,
+        )
+    )
+    assert str(ds.attrs.get("completed")) in ("1", "True"), (
+        "T2 Limebeer lap did not close"
+    )
+    lap = float(ds.attrs["lap_time_s"])
+    delta_pct = 100.0 * (lap - ORACLE_LAP_S) / ORACLE_LAP_S
+    print(
+        f"[limebeer T2] lap = {lap:.2f} s vs OCP {ORACLE_LAP_S} s ({delta_pct:+.1f}%) "
+        f"— RECORDED, not the ≤1% gate (driver-margin + geometry + QSS-OCP floor; see limebeer.md)"
+    )
+    # Wide tripwire around the analysed +20–45% structural band — NOT the ≤1% assertion.
+    assert ORACLE_LAP_S * 1.20 < lap < ORACLE_LAP_S * 1.45, (
+        f"T2 Limebeer lap {lap:.2f} s left its recorded structural band — re-analyse (not a ≤1% gate)"
+    )

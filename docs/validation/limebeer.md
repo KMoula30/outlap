@@ -80,6 +80,37 @@ loads, peak-slip locations within 0.5%, combined-slip coupling within ~5% of the
 the full longitudinal drive/brake chain overlaying the closed forms, top speed to −0.2%, and the
 slow/fast corner speeds to ≤5% on like-for-like geometry.
 
+## The T2 transient lap — recorded, not the ≤1% gate (M4)
+
+The M4 ≤1% Limebeer lap-time gate was scoped behind the transient **T2** tier + the time-weighted
+raceline QP. Both have landed; the gate is **not achievable at T2** and is recorded with a
+decomposition rather than flipped (the Decision #48 pattern). Measured on `catalunya_osm`, flat,
+production envelope (`python/tests/test_limebeer.py::test_limebeer_t2_lap_time_recorded_not_gated`):
+
+| lap | time | vs OCP 82.43 s |
+|---|---|---|
+| OCP oracle (PL2014 §4.3) | 82.43 s | — |
+| T0 QSS, min-curvature line | 92.36 s | +12.0% |
+| T0 QSS, **time-weighted** line | 92.07 s | +11.7%  (line saves 0.29 s) |
+| **T2 transient**, min-curvature line | 107.92 s | +30.9% |
+| **T2 transient**, time-weighted line | 107.57 s | +30.5%  (line saves 0.35 s) |
+
+The T2 lap is **~+30%** over the oracle — it does not approach ≤1%, and the gap is structural, not a
+model error. It adds one T2-specific term to the four QSS components above:
+
+5. **Driver stability margin, +15.6 s (the dominant term)** — the ideal MacAdam-preview + PI driver
+   tracks ~0.85 of the QSS speed profile and **spins if pushed to the limit** (measured: stable at
+   0.85, diverges at ≥0.95 even on flat ground). This is a driver-**competitiveness** limit
+   (Decision #13, "the biggest scope add"), not a chassis or tyre error — the T2 operating points
+   sit comfortably **inside** the T1 g-g-g-v hull (0.0% exceedance, the asserted PR10 parity gate).
+   Closing it needs an at-the-limit driver, which the M4 ideal driver is not.
+
+Because the driver margin alone is ~+17%, and the QSS floors (geometry ~5 pp, QSS-vs-OCP ~2.2 s,
+envelope ~1.5 s) account for the rest, the ≤1% assertion stays **deferred** — there is no
+paper-geometry fixture committed, and even on ideal geometry the T2 driver margin puts the gate
+~20 percentage points out of reach. The recorded band (a wide tripwire around +20–45%) guards
+against silent drift; the honest number is surfaced, never a green ≤1% that isn't real.
+
 ## Notes on the tyre transcription
 
 The paper's Table 3 states the peak slips as κ = 0.11/0.10 and α = 9°/8°, but its own formula
