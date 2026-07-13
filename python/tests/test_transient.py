@@ -157,6 +157,38 @@ def test_transient_laps_are_deterministic(catalunya: Track) -> None:
     np.testing.assert_array_equal(a.vx(), b.vx())
 
 
+def test_the_tire_thermal_stack_is_opt_in_and_changes_the_lap(catalunya: Track) -> None:
+    """M5 PR3: the ring+wear stack is opt-in (default off ⇒ frozen tyres, byte-identical), and turning
+    it on makes the lap respond to tyre temperature/wear.
+
+    With the still-synthetic reference `.tyr` params the loaded steady-state sits below the grip
+    window, so the wired lap loses grip and is *slower* than frozen — that pace change is the wiring's
+    first lap-level effect. FastF1 calibration (PR7/PR8) moves the steady-state into the window and the
+    flag flips on by default there. The stack is deterministic and the lap still completes.
+    """
+    frozen = solve_transient_lap(LIMEBEER, catalunya, ds_m=DEFAULT_DS_M, sim=COARSE_SIM)
+    warm = solve_transient_lap(
+        LIMEBEER, catalunya, ds_m=DEFAULT_DS_M, sim=COARSE_SIM, tire_thermal=True
+    )
+    # Default off is byte-identical to the frozen path.
+    default_off = solve_transient_lap(
+        LIMEBEER, catalunya, ds_m=DEFAULT_DS_M, sim=COARSE_SIM
+    )
+    assert default_off.lap_time_s == frozen.lap_time_s, (
+        "default is byte-identical frozen tyres"
+    )
+
+    # The wired lap completes, is deterministic, and its pace responds to the tyre state.
+    warm_again = solve_transient_lap(
+        LIMEBEER, catalunya, ds_m=DEFAULT_DS_M, sim=COARSE_SIM, tire_thermal=True
+    )
+    assert warm.lap_time_s == warm_again.lap_time_s, "the wired lap is deterministic"
+    assert warm.lap_time_s != frozen.lap_time_s, "the tyre thermal state moved the lap"
+    assert float(np.asarray(warm.vx()).max()) < 120.0, (
+        "the wired lap stays bounded (no runaway)"
+    )
+
+
 # --- Series regen braking, end to end -------------------------------------------------------------
 
 

@@ -38,5 +38,5 @@ pub use control::{
     allocate_yaw_moment, drive_weights, preview_distance, AxleRegen, Driver, Powertrain,
     RegenParams, TorqueVectoring, YawAllocation, PREVIEW_FLOOR_M, REGEN_FADE_SPEED_MPS,
 };
-pub use forces::{relax_wheel, Aero, LoadTransfer, RelaxProvider, RelaxTargets, Tire};
+pub use forces::{relax_wheel, Aero, LoadTransfer, RelaxProvider, RelaxTargets, ThermalGrip, Tire};
 pub use params::{ActuationChannels, ChassisParams, RoadChannels, WheelGeometry, G};

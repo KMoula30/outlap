@@ -227,6 +227,7 @@ fn tire_block(
         relax_front: RelaxProvider::from_model(&t1.tire_front, 0.5 * r_f),
         relax_rear: RelaxProvider::from_model(&t1.tire_rear, 0.5 * r_r),
         wheels,
+        thermal: None, // frozen-tire until the T2 tire-thermal stack wires it (M5 PR3)
     }
 }
 

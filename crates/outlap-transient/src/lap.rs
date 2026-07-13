@@ -42,6 +42,7 @@ use outlap_vehicle::{
 use crate::control::{Shifter, SlowStack};
 use crate::line_table::LineTable;
 use crate::result::TransientLap;
+use crate::tire_thermal::TireThermalStack;
 
 /// Numerics for a transient run (the resolved subset the stepper needs; recorded in provenance).
 #[derive(Clone, Copy, Debug)]
@@ -173,6 +174,11 @@ pub struct TransientSolver<T> {
     // caller; absent ⇒ an ideal single-gear, no-regen lap (byte-identical to the PR5 skeleton).
     shifter: Option<Shifter<T>>,
     slow: Option<Box<dyn SlowStack>>,
+    // The per-wheel tire-thermal ring + wear stack (M5 PR3): the third slow subsystem. Absent ⇒ a
+    // frozen-tire lap (byte-identical to the pre-M5 skeleton). Accumulates each step's heat and
+    // advances on the same decimated slow clock as the battery; its held grip/pressure override lives
+    // on `blocks.tire`.
+    tire_thermal: Option<TireThermalStack<T>>,
     actuation: ActuationChannels,
     /// Drive-torque scale published this step (`1` when engaged / no shift FSM).
     torque_scale: T,
@@ -257,6 +263,7 @@ impl<T: Float> TransientSolver<T> {
             slow_clock,
             shifter: None,
             slow: None,
+            tire_thermal: None,
             actuation,
             torque_scale: T::one(),
             regen_limit_w: T::zero(),
@@ -285,6 +292,17 @@ impl<T: Float> TransientSolver<T> {
     pub fn with_slow_stack(mut self, slow: Box<dyn SlowStack>) -> Self {
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
         self.slow = Some(slow);
+        self
+    }
+
+    /// Attach the per-wheel tire-thermal ring + wear stack (consuming, M5 PR3): the tyres warm, wear,
+    /// and degrade over the lap, and their grip window + gas-law pressure feed the force call. Without
+    /// one the lap runs frozen tyres (the pre-M5 behaviour). The seeded (warm) override is installed
+    /// immediately so the very first step's forces already carry the seed grip/pressure.
+    #[must_use]
+    pub fn with_tire_thermal(mut self, stack: TireThermalStack<T>) -> Self {
+        self.blocks.tire.set_thermal_grip(stack.current_grip());
+        self.tire_thermal = Some(stack);
         self
     }
 
@@ -495,8 +513,12 @@ impl<T: Float> TransientSolver<T> {
                 self.net_charge_energy_accum + (regen_power - traction_power) * dt;
             self.slow_pending_steps += 1;
         }
+        // Tire-thermal accumulation (M5 PR3): bank this step's per-wheel frictional + carcass heat
+        // from the post-step force solution now on the bus. The ring advances on the same clock fire.
+        self.accumulate_tire_heat(dt);
         if self.slow_clock.tick() {
             self.advance_slow(dt);
+            self.advance_tire_slow();
         }
 
         self.t = self.t + dt;
@@ -522,6 +544,38 @@ impl<T: Float> TransientSolver<T> {
         self.net_charge_energy_accum = T::zero();
         self.slow_pending_steps = 0;
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
+    }
+
+    /// Bank this step's per-wheel tire heat into the ring stack's window accumulators (M5 PR3). The
+    /// surface heat is the frictional sliding power from the post-step force solution on the bus; the
+    /// carcass heat is formed inside the stack from the per-wheel load and wheel spin. No-op without a
+    /// stack; allocation-free.
+    fn accumulate_tire_heat(&mut self, dt: T) {
+        if self.tire_thermal.is_none() {
+            return;
+        }
+        let sv = StateView::new(&self.fast, 1, 0);
+        let slip_power = self.blocks.tire.wheel_slip_powers(&sv, &self.bus, 0);
+        let mut fz = [T::zero(); WHEELS];
+        let mut omega = [T::zero(); WHEELS];
+        for i in 0..WHEELS {
+            fz[i] = self.bus.get_wheel(WheelSignal::TireFz, i, 0);
+            omega[i] = self.get_fast(omega_state(i));
+        }
+        if let Some(stack) = self.tire_thermal.as_mut() {
+            stack.accumulate(&slip_power, &fz, &omega, dt);
+        }
+    }
+
+    /// Advance the tire-thermal ring over the accumulated slow-clock window and install the refreshed
+    /// per-wheel grip window + gas-law pressure onto the tyre force block, held frozen until the next
+    /// fire. No-op without a stack or an empty window (the lap-end flush is idempotent).
+    fn advance_tire_slow(&mut self) {
+        let speed = self.get_fast(ChassisState::Vx);
+        let grip = self.tire_thermal.as_mut().and_then(|s| s.advance(speed));
+        if let Some(grip) = grip {
+            self.blocks.tire.set_thermal_grip(grip);
+        }
     }
 
     /// Record the current state + bus diagnostics as one row of `lap`.
@@ -588,6 +642,32 @@ impl<T: Float> TransientSolver<T> {
             lap.pack_temp_c
                 .push(T::from(slow.temp_c()).unwrap_or_else(T::zero));
         }
+        // Per-wheel tire-thermal channels (M5 PR3): surface/carcass/gas temperatures (°C), tread wear
+        // (mm), thermal damage, and the total grip multiplier the force call used this step.
+        if let Some(stack) = self.tire_thermal.as_ref() {
+            let celsius = T::from(273.15).unwrap_or_else(T::zero);
+            let mut ts = [T::zero(); WHEELS];
+            let mut tc = [T::zero(); WHEELS];
+            let mut tg = [T::zero(); WHEELS];
+            let mut wear = [T::zero(); WHEELS];
+            let mut dmg = [T::zero(); WHEELS];
+            let mut grip = [T::zero(); WHEELS];
+            for i in 0..WHEELS {
+                let st = stack.state(i);
+                ts[i] = st.t_s_k - celsius;
+                tc[i] = st.t_c_k - celsius;
+                tg[i] = st.t_g_k - celsius;
+                wear[i] = st.wear_mm;
+                dmg[i] = st.damage;
+                grip[i] = stack.grip(i);
+            }
+            lap.tire_surface_c.push(ts);
+            lap.tire_carcass_c.push(tc);
+            lap.tire_gas_c.push(tg);
+            lap.tire_wear_mm.push(wear);
+            lap.tire_damage.push(dmg);
+            lap.tire_grip.push(grip);
+        }
     }
 
     /// Run until the arc length reaches `s_end` or `max_steps` elapse, recording every step.
@@ -612,6 +692,9 @@ impl<T: Float> TransientSolver<T> {
         // Flush the final partial slow window so recovered regen energy between the last slow-clock
         // fire and the finish line is Coulomb-counted (energy closure at the lap boundary).
         self.advance_slow(self.cfg.dt);
+        // Flush the tire-thermal ring's final partial window too (idempotent — no-op on an empty
+        // window), then re-stamp the last recorded tire row with the flushed state below.
+        self.advance_tire_slow();
         // Re-stamp the last recorded SoC/temperature with the flushed slow state.
         if let Some(slow) = self.slow.as_ref() {
             if let Some(last) = lap.state_of_charge.last_mut() {
