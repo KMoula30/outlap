@@ -14,7 +14,7 @@ use outlap_schema::load::load_tyr;
 use outlap_schema::tyr::Tyr;
 use outlap_schema::vehicle::Wheel;
 use outlap_schema::ResolvedVehicle;
-use outlap_tire::TireModel;
+use outlap_tire::{TireModel, TireThermalRing};
 
 use crate::error::T1Error;
 use crate::t1::aero::{AeroLumped, AeroMap, AeroPlatform};
@@ -63,6 +63,12 @@ pub struct T1Vehicle {
     pub p_front: f64,
     /// Rear tyre cold inflation pressure, Pa.
     pub p_rear: f64,
+    /// Representative tyre thermal + wear ring, built from the **front** tyre's `thermal:`/`wear:`
+    /// blocks (§7.2/§7.3). The trim itself never reads it — it drives the g-g-g-v envelope's optional
+    /// T_tire / wear grip axes (the amendment to Decision #31 / D-M5-2): the generator samples the
+    /// grip window `λ_μ(T_s)` and the wear factor to re-solve the boundary across tyre state. The
+    /// per-wheel live ring lives in the tiers (T2 PR3 / QSS PR5), not here.
+    pub(crate) tire_thermal: TireThermalRing<f64>,
     /// Uniform tyre-grip scale (`μ_tire`), 1.0 at the reference state. Multiplies the per-wheel
     /// `μ_scale_x`/`μ_scale_y` in the trim so the g-g-g-v envelope generator (PR7) can re-solve at
     /// perturbed grip for the Decision #31 sensitivity corrections. Not a per-run setting — a
@@ -141,6 +147,11 @@ impl T1Vehicle {
         }
         let p_front = 1000.0 * front_doc.thermal.p_cold;
         let p_rear = 1000.0 * rear_doc.thermal.p_cold;
+        // Representative tyre thermal/wear ring for the envelope's optional T_tire/wear axes: the
+        // front tyre's grip window + wear cliff (the trim applies a uniform grip scale across axles,
+        // so one representative ring drives the uniform axis; per-axle divergence is a tier effect).
+        let tire_thermal =
+            TireThermalRing::<f64>::from_schema_with_wear(&front_doc.thermal, &front_doc.wear);
         let r_front = tyr_radius(&front_doc);
         let r_rear = tyr_radius(&rear_doc);
 
@@ -231,6 +242,7 @@ impl T1Vehicle {
             tire_rear,
             p_front,
             p_rear,
+            tire_thermal,
             mu_scale: 1.0,
             cla_scale: 1.0,
             qx,
@@ -428,6 +440,14 @@ impl T1Vehicle {
     /// with no aero and no acceleration).
     pub fn front_weight_fraction(&self) -> f64 {
         self.b_r / self.wheelbase_m
+    }
+
+    /// The representative tyre thermal + wear ring (front-axle tyre) the g-g-g-v envelope samples for
+    /// its optional T_tire / wear grip axes. See
+    /// [`GgvEnvelope::generate_with_tire_state`](crate::t1::envelope::GgvEnvelope::generate_with_tire_state).
+    #[must_use]
+    pub fn tire_thermal(&self) -> &TireThermalRing<f64> {
+        &self.tire_thermal
     }
 
     /// Assembly notes / simplifications (nothing silent).

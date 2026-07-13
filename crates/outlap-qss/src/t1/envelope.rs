@@ -142,6 +142,25 @@ const TOP_SPEED_DV: f64 = 2.0;
 /// degenerate no-drive / no-brake case).
 const CAP_FLOOR: f64 = 0.5;
 
+// --- Optional tire-state (T_tire / wear) grid axes (§7.2/§7.3; the amendment to Decision #31,
+// D-M5-2). These extend the base envelope with two *genuine* grid dimensions the boundary is
+// re-solved across — not multiplicative corrections. Off by default (see [`GgvEnvelope::generate`]);
+// built on request by [`GgvEnvelope::generate_with_tire_state`].
+
+/// Default T_tire (surface-temperature) node count. Odd so the grip-optimum `T_opt` is the exact
+/// centre node, which is what makes the reference slice bit-identical to the frozen envelope.
+const N_T_STATE_DEFAULT: usize = 5;
+/// Default tread-wear node count (node 0 is exactly zero wear — the reference).
+const N_W_STATE_DEFAULT: usize = 4;
+/// T_tire axis span **below** `T_opt`, °C — deep enough to reach cold-tyre warm-up temperatures.
+const T_BAND_LO_C: f64 = 55.0;
+/// T_tire axis span **above** `T_opt`, °C — into the overheated (grip-window) regime.
+const T_BAND_HI_C: f64 = 35.0;
+/// Wear-axis upper bound past the cliff centre `w_c`, in units of the cliff width `s_w` (the whole
+/// grip-relevant range is `[0, w_c + k·s_w]`; beyond it the cliff sigmoid has saturated). Capped at
+/// the bald depth `w_max`.
+const WEAR_PAST_CLIFF_SW: f64 = 3.0;
+
 /// A generated g-g-g-v acceleration envelope: the base velocity-frame lateral-acceleration boundary
 /// `a_y,corr(v, a_x, g_normal)` (on a normalised `a_x` axis), the three Decision #31 sensitivity
 /// fields, and the per-`(v, g_normal)` longitudinal capability the normalisation uses.
@@ -178,6 +197,12 @@ pub struct GgvEnvelope {
     mass_ref: f64,
     /// The recorded coupling mode (Decision #29).
     coupling: FzCoupling,
+    /// Optional (opt-in) tyre-state grip axes (§7.2/§7.3; the amendment to Decision #31, D-M5-2).
+    /// `Some` only when built via [`GgvEnvelope::generate_with_tire_state`]; then
+    /// [`GgvEnvelope::ay_boundary_at`] indexes the boundary on live `(T_tire, wear)`. When `None` the
+    /// tyre is frozen at the reference `(T_opt, zero-wear)` slice and every query behaves exactly as
+    /// before M5.
+    tire_axes: Option<TireStateAxes>,
     /// Human-readable notes on the envelope's construction and any degradations.
     notes: Vec<String>,
 }
@@ -193,11 +218,42 @@ impl GgvEnvelope {
     /// # Errors
     /// [`T1Error::GgvEnvelope`] / [`T1Error::Envelope`] if an interpolant cannot be built (should not
     /// happen: the generator builds full rectilinear grids of finite values).
-    #[allow(clippy::too_many_lines)] // one linear grid-sweep procedure; splitting it hurts clarity.
     pub fn generate(
         car: &T1Vehicle,
         resolution: &EnvelopeRes,
         coupling: FzCoupling,
+    ) -> Result<Self, T1Error> {
+        Self::generate_inner(car, resolution, coupling, None)
+    }
+
+    /// Generate the envelope **with** the optional T_tire / wear grip axes (§7.2/§7.3; the amendment
+    /// to Decision #31, D-M5-2): the boundary is re-solved across `tire_res.t_points` surface
+    /// temperatures and `tire_res.w_points` tread-wear depths, giving a genuine
+    /// `gg(v, â_x, g_normal, T_tire, wear)` table that [`Self::ay_boundary_at`] indexes on live tyre
+    /// state. **Higher fidelity, higher cost** — the boundary sweep runs `t_points × w_points` times
+    /// (recorded in [`Self::notes`]); the reference envelope + Decision #31 corrections are built
+    /// exactly as [`Self::generate`], so [`Self::ay_boundary`] / [`Self::ay_boundary_corrected`] are
+    /// unchanged and the reference tyre-state slice is bit-identical to the frozen envelope.
+    ///
+    /// # Errors
+    /// As [`Self::generate`].
+    pub fn generate_with_tire_state(
+        car: &T1Vehicle,
+        resolution: &EnvelopeRes,
+        coupling: FzCoupling,
+        tire_res: TireStateRes,
+    ) -> Result<Self, T1Error> {
+        Self::generate_inner(car, resolution, coupling, Some(tire_res))
+    }
+
+    /// The shared generator (`tire_res = None` for the frozen-tyre envelope, `Some` for the extended
+    /// build). See [`Self::generate`] / [`Self::generate_with_tire_state`].
+    #[allow(clippy::too_many_lines)] // one linear grid-sweep procedure; splitting it hurts clarity.
+    fn generate_inner(
+        car: &T1Vehicle,
+        resolution: &EnvelopeRes,
+        coupling: FzCoupling,
+        tire_res: Option<TireStateRes>,
     ) -> Result<Self, T1Error> {
         let mut notes = Vec::new();
         let nv = (resolution.v_points as usize).max(2);
@@ -268,34 +324,11 @@ impl GgvEnvelope {
         let solve_fibre = |&(iv, ign): &(usize, usize)| -> FibreOut {
             let v = v_axis[iv];
             let gn = gn_axis[ign];
-            // Per-point longitudinal capability (the â_x = ±1 shoulders).
-            let a_cap = max_straight_ax(car, v, gn, coupling, 1.0).max(CAP_FLOOR);
-            let b_cap = (-max_straight_ax(car, v, gn, coupling, -1.0)).max(CAP_FLOOR);
+            // Pass 1: the base boundary over the â_x fibre (shoulders + outward march from â_x = 0),
+            // shared verbatim with the optional tyre-state sweep so both agree bit-for-bit at a grip
+            // state.
+            let (a_cap, b_cap, fibre) = base_fibre(car, v, gn, coupling, &axn_axis, i0);
             let ax_of = |axn: f64| axn * if axn >= 0.0 { a_cap } else { b_cap };
-
-            // Pass 1: the base boundary over the â_x fibre, marching outward from â_x = 0.
-            let mut fibre: Vec<Boundary> = vec![Boundary::zero(); nax];
-            fibre[i0] = max_lateral(car, v, ax_of(axn_axis[i0]), gn, coupling, None);
-            for iax in (i0 + 1)..nax {
-                fibre[iax] = max_lateral(
-                    car,
-                    v,
-                    ax_of(axn_axis[iax]),
-                    gn,
-                    coupling,
-                    fibre[iax - 1].hint(),
-                );
-            }
-            for iax in (0..i0).rev() {
-                fibre[iax] = max_lateral(
-                    car,
-                    v,
-                    ax_of(axn_axis[iax]),
-                    gn,
-                    coupling,
-                    fibre[iax + 1].hint(),
-                );
-            }
 
             // Pass 2: central-difference sensitivities in the fibre's near-peak bulk — on
             // every 2nd â_x node only (the skipped nodes are filled by linear interpolation
@@ -390,6 +423,15 @@ impl GgvEnvelope {
         let drag_accel =
             MonotoneCubic::new(v_axis.clone(), drag_vals).map_err(T1Error::Envelope)?;
 
+        // Optional tyre-state axes (D-M5-2): re-solve the boundary across T_tire / wear grip states.
+        // Built while the three base axes are still owned (they are moved into the maps below).
+        let tire_axes = match &tire_res {
+            Some(tr) => Some(build_tire_axes(
+                car, &v_axis, &axn_axis, &gn_axis, i0, coupling, tr, &mut notes,
+            )?),
+            None => None,
+        };
+
         let axes3 = vec![v_axis.clone(), axn_axis, gn_axis.clone()];
         let modes3 = vec![OutOfDomain::Clamp; 3];
         let build3 = |values: Vec<f64>| {
@@ -415,6 +457,7 @@ impl GgvEnvelope {
             drag_accel,
             mass_ref,
             coupling,
+            tire_axes,
             notes,
         })
     }
@@ -494,6 +537,71 @@ impl GgvEnvelope {
             .eval_flagged(&[v, self.normalize_ax(v, ax, g_normal), g_normal])
     }
 
+    /// The lateral-acceleration boundary at a **live tyre state** `a_y,corr(v, a_x, g_normal; T_tire,
+    /// wear)`, m/s² (velocity-vector frame), at surface temperature `t_tire_k` (K) and tread wear
+    /// `wear_mm` (mm). When the envelope was built without tyre-state axes ([`Self::generate`] rather
+    /// than [`Self::generate_with_tire_state`]) the tyre state is ignored and this returns the frozen
+    /// [`Self::ay_boundary`]. **Bit-identical to [`Self::ay_boundary`] at the reference tyre state**
+    /// (`t_tire_k = T_opt`, `wear_mm = 0`), by construction. Zero-allocation.
+    #[must_use]
+    pub fn ay_boundary_at(
+        &self,
+        v: f64,
+        ax: f64,
+        g_normal: f64,
+        t_tire_k: f64,
+        wear_mm: f64,
+    ) -> f64 {
+        match &self.tire_axes {
+            Some(t) => {
+                let axn = t.normalize_ax(v, ax, g_normal, t_tire_k, wear_mm);
+                t.base.eval(&[v, axn, g_normal, t_tire_k, wear_mm])
+            }
+            None => self.ay_boundary(v, ax, g_normal),
+        }
+    }
+
+    /// The straight-line acceleration capability `a_x,cap⁺` at a live tyre state (the `â_x = +1`
+    /// shoulder for the boundary at `t_tire_k`/`wear_mm`), m/s². Frozen [`Self::accel_limit`] when the
+    /// envelope carries no tyre-state axes. Zero-allocation.
+    #[must_use]
+    pub fn accel_limit_at(&self, v: f64, g_normal: f64, t_tire_k: f64, wear_mm: f64) -> f64 {
+        match &self.tire_axes {
+            Some(t) => t
+                .accel_cap
+                .eval(&[v, g_normal, t_tire_k, wear_mm])
+                .max(CAP_FLOOR),
+            None => self.accel_limit(v, g_normal),
+        }
+    }
+
+    /// The straight-line braking capability magnitude `a_x,cap⁻` at a live tyre state, m/s² (positive).
+    /// Frozen [`Self::brake_limit`] when the envelope carries no tyre-state axes. Zero-allocation.
+    #[must_use]
+    pub fn brake_limit_at(&self, v: f64, g_normal: f64, t_tire_k: f64, wear_mm: f64) -> f64 {
+        match &self.tire_axes {
+            Some(t) => t
+                .brake_cap
+                .eval(&[v, g_normal, t_tire_k, wear_mm])
+                .max(CAP_FLOOR),
+            None => self.brake_limit(v, g_normal),
+        }
+    }
+
+    /// Whether the envelope carries the optional T_tire / wear grip axes (built via
+    /// [`Self::generate_with_tire_state`]). When `false`, [`Self::ay_boundary_at`] ignores tyre state.
+    #[must_use]
+    pub fn has_tire_axes(&self) -> bool {
+        self.tire_axes.is_some()
+    }
+
+    /// The `[(T_tire_lo, T_tire_hi) K, (wear_lo, wear_hi) mm]` breakpoints of the tyre-state axes, or
+    /// `None` when the envelope was built without them.
+    #[must_use]
+    pub fn tire_state_domain(&self) -> Option<[(f64, f64); 2]> {
+        self.tire_axes.as_ref().map(|t| [t.t_domain, t.w_domain])
+    }
+
     /// The reference straight-line aero drag as an acceleration `q_x(v)·v²/m` at speed `v` (m/s²) —
     /// the drag currency the base `a_x` boundary embeds. Below the lowest sampled speed the drag
     /// tapers as `v²` toward 0 (the interpolant would otherwise clamp to a small constant, applying a
@@ -553,6 +661,252 @@ struct FibreOut {
     /// `[s_mu_up, s_mu_dn, s_mass_up, s_mass_dn, s_cla_up, s_cla_dn]` per â_x node (0 where
     /// suppressed/unsampled).
     sens: Vec<[f64; 6]>,
+}
+
+/// Resolution of the optional g-g-g-v **tyre-state** grid axes (T_tire surface temperature and tread
+/// wear). Deliberately **not** a `sim.yaml` schema field: the tyre-state axes are an opt-in
+/// higher-fidelity build the tiers request, kept out of the envelope wire contract, so this is a
+/// plain builder parameter passed to [`GgvEnvelope::generate_with_tire_state`].
+#[derive(Clone, Copy, Debug)]
+pub struct TireStateRes {
+    /// Surface-temperature (T_tire) node count; forced **odd and ≥ 3** so `T_opt` is the exact centre
+    /// node (which makes the reference slice bit-identical to the frozen envelope).
+    pub t_points: usize,
+    /// Tread-wear node count (**≥ 2**); node 0 is exactly zero wear — the reference.
+    pub w_points: usize,
+}
+
+impl Default for TireStateRes {
+    fn default() -> Self {
+        Self {
+            t_points: N_T_STATE_DEFAULT,
+            w_points: N_W_STATE_DEFAULT,
+        }
+    }
+}
+
+/// The optional tyre-state grip axes (§7.2/§7.3; the amendment to Decision #31, D-M5-2): a 5-D
+/// velocity-frame lateral boundary over `(v, â_x, g_normal, T_tire, wear)` and the matching 4-D
+/// straight-line shoulders that normalise the `â_x` axis per tyre-state node. Built by
+/// [`GgvEnvelope::generate_with_tire_state`]; the reference slice `(T_opt, 0)` reproduces the
+/// frozen-tyre envelope bit-for-bit.
+#[derive(Clone, Debug)]
+struct TireStateAxes {
+    /// Base boundary `a_y,corr(v, â_x, g_normal, T_tire, wear)`, m/s² (5-D, normalised `â_x`).
+    base: GriddedMapN<f64>,
+    /// Straight-line acceleration capability `a_x,cap⁺(v, g_normal, T_tire, wear)`, m/s² (4-D).
+    accel_cap: GriddedMapN<f64>,
+    /// Straight-line braking capability magnitude `a_x,cap⁻(v, g_normal, T_tire, wear)`, m/s² (4-D).
+    brake_cap: GriddedMapN<f64>,
+    /// `(T_tire_lo, T_tire_hi)` breakpoints, K.
+    t_domain: (f64, f64),
+    /// `(wear_lo, wear_hi)` breakpoints, mm.
+    w_domain: (f64, f64),
+}
+
+impl TireStateAxes {
+    /// Normalise an actual longitudinal acceleration to `â_x ∈ [−1, 1]` at a live tyre state, using
+    /// that state's own straight-line capability (so the `â_x` interpolation is self-consistent
+    /// across the tyre-state axes).
+    fn normalize_ax(&self, v: f64, ax: f64, g_normal: f64, t_k: f64, w: f64) -> f64 {
+        let cap = if ax >= 0.0 {
+            self.accel_cap.eval(&[v, g_normal, t_k, w])
+        } else {
+            self.brake_cap.eval(&[v, g_normal, t_k, w])
+        }
+        .max(CAP_FLOOR);
+        (ax / cap).clamp(-1.0, 1.0)
+    }
+}
+
+/// One `(v, g_normal, T_tire, wear)` fibre's solved outputs for the tyre-state sweep: the ±â_x
+/// shoulders and the base boundary over the â_x nodes (no sensitivities — the Decision #31
+/// corrections are computed once, at the reference tyre state). Owned per fibre so the sweep runs
+/// serially or in parallel and merges in fixed order (bit-identical either way).
+struct TireFibreOut {
+    a_cap: f64,
+    b_cap: f64,
+    ay: Vec<f64>,
+}
+
+/// Solve one `(v, g_normal)` FIBRE's base boundary over the normalised `â_x` axis (no sensitivities):
+/// bracket the straight-line shoulders `a_x,cap±`, then march the max-lateral boundary outward from
+/// `â_x = 0`, warm-starting each node from its neighbour. Returns `(a_cap, b_cap, boundaries)`. Shared
+/// verbatim by the reference sweep ([`GgvEnvelope::generate_inner`]) and the tyre-state sweep
+/// ([`build_tire_axes`]) so both produce a bit-identical boundary at a given grip state.
+fn base_fibre(
+    car: &T1Vehicle,
+    v: f64,
+    gn: f64,
+    coupling: FzCoupling,
+    axn_axis: &[f64],
+    i0: usize,
+) -> (f64, f64, Vec<Boundary>) {
+    // Per-point longitudinal capability (the â_x = ±1 shoulders).
+    let a_cap = max_straight_ax(car, v, gn, coupling, 1.0).max(CAP_FLOOR);
+    let b_cap = (-max_straight_ax(car, v, gn, coupling, -1.0)).max(CAP_FLOOR);
+    let ax_of = |axn: f64| axn * if axn >= 0.0 { a_cap } else { b_cap };
+    let nax = axn_axis.len();
+    let mut fibre: Vec<Boundary> = vec![Boundary::zero(); nax];
+    fibre[i0] = max_lateral(car, v, ax_of(axn_axis[i0]), gn, coupling, None);
+    for iax in (i0 + 1)..nax {
+        fibre[iax] = max_lateral(
+            car,
+            v,
+            ax_of(axn_axis[iax]),
+            gn,
+            coupling,
+            fibre[iax - 1].hint(),
+        );
+    }
+    for iax in (0..i0).rev() {
+        fibre[iax] = max_lateral(
+            car,
+            v,
+            ax_of(axn_axis[iax]),
+            gn,
+            coupling,
+            fibre[iax + 1].hint(),
+        );
+    }
+    (a_cap, b_cap, fibre)
+}
+
+/// Build the T_tire axis (K): `n` (odd) nodes with `T_opt` at the **exact centre node**, spaced
+/// `band_lo_c` °C below and `band_hi_c` °C above. Placing `T_opt` exactly guarantees the reference
+/// slice's grip factor is `1.0` bit-for-bit (see [`build_tire_axes`]).
+fn t_state_axis(t_opt_k: f64, band_lo_c: f64, band_hi_c: f64, n: usize) -> Vec<f64> {
+    debug_assert!(
+        n >= 3 && n % 2 == 1,
+        "T_tire axis needs an odd node count ≥ 3"
+    );
+    let half = n / 2;
+    (0..n)
+        .map(|i| match i.cmp(&half) {
+            core::cmp::Ordering::Equal => t_opt_k,
+            core::cmp::Ordering::Less => t_opt_k - band_lo_c * (half - i) as f64 / half as f64,
+            core::cmp::Ordering::Greater => t_opt_k + band_hi_c * (i - half) as f64 / half as f64,
+        })
+        .collect()
+}
+
+/// Build the optional tyre-state axes: re-solve the boundary over a `(T_tire, wear)` grid at a uniform
+/// grip factor `g(T,w) = [λ_μ(T)/λ_μ(T_opt)]·[wear_grip(w)/wear_grip(0)]` per node (§7.2/§7.3). The
+/// factor is applied through the existing uniform-grip knob [`T1Vehicle::with_mu_scale`] (matching the
+/// isotropic `mu_scale_total` the T2 tier feeds the force call, PR3), and the boundary is re-solved in
+/// full — this is a *genuine* table dimension, not a multiplicative correction (D-M5-2).
+///
+/// At the reference node `(T_opt, wear = 0)` the factor is `1.0` exactly (`x/x = 1` in IEEE-754), so
+/// the re-solve is bit-identical to the frozen sweep and the reference slice matches the base table.
+#[allow(clippy::too_many_arguments)] // the base axes + geometry are all needed; a wrapper struct hurts clarity.
+fn build_tire_axes(
+    car: &T1Vehicle,
+    v_axis: &[f64],
+    axn_axis: &[f64],
+    gn_axis: &[f64],
+    i0: usize,
+    coupling: FzCoupling,
+    tr: &TireStateRes,
+    notes: &mut Vec<String>,
+) -> Result<TireStateAxes, T1Error> {
+    let (nv, nax, ngn) = (v_axis.len(), axn_axis.len(), gn_axis.len());
+    let ring = car.tire_thermal();
+    // T axis: odd node count so T_opt is the exact centre; wear axis: ≥ 2 nodes with 0 at index 0.
+    let nt = (tr.t_points.max(3)) | 1;
+    let nw = tr.w_points.max(2);
+    let t_axis = t_state_axis(ring.t_opt_k(), T_BAND_LO_C, T_BAND_HI_C, nt);
+    let w_hi = (ring.w_c_mm() + WEAR_PAST_CLIFF_SW * ring.s_w_mm()).min(ring.w_max_mm());
+    let w_axis = linspace(0.0, w_hi, nw);
+    let it_opt = nt / 2;
+
+    // Normalised grip factor per tyre-state node: temperature window relative to its peak, wear cliff
+    // relative to new. Both are 1.0 at the reference node, so g(it_opt, 0) = 1.0 exactly.
+    let lambda_ref = ring.grip_window(t_axis[it_opt]);
+    let wear_ref = ring.wear_grip_scale(w_axis[0]);
+    let grip = |it: usize, iw: usize| -> f64 {
+        (ring.grip_window(t_axis[it]) / lambda_ref) * (ring.wear_grip_scale(w_axis[iw]) / wear_ref)
+    };
+    // Perturbed cars: one clone per (T, wear) grip state, reused across the whole (v, â_x, g_normal)
+    // grid (nt·nw cold clones, not one per node).
+    let cars: Vec<T1Vehicle> = (0..nt)
+        .flat_map(|it| (0..nw).map(move |iw| (it, iw)))
+        .map(|(it, iw)| car.with_mu_scale(grip(it, iw)))
+        .collect();
+
+    // Fully independent (v, g_normal, T, wear) fibres; the ordered collect keeps the merge
+    // deterministic (serial == parallel, bit-for-bit).
+    let jobs: Vec<(usize, usize, usize, usize)> = (0..nv)
+        .flat_map(|iv| (0..ngn).map(move |ign| (iv, ign)))
+        .flat_map(|(iv, ign)| (0..nt).flat_map(move |it| (0..nw).map(move |iw| (iv, ign, it, iw))))
+        .collect();
+    let solve = |&(iv, ign, it, iw): &(usize, usize, usize, usize)| -> TireFibreOut {
+        let pcar = &cars[it * nw + iw];
+        let (a_cap, b_cap, fibre) =
+            base_fibre(pcar, v_axis[iv], gn_axis[ign], coupling, axn_axis, i0);
+        TireFibreOut {
+            a_cap,
+            b_cap,
+            ay: fibre.iter().map(|b| b.ay_corr).collect(),
+        }
+    };
+    #[cfg(feature = "parallel")]
+    let outs: Vec<TireFibreOut> = {
+        use rayon::prelude::*;
+        jobs.par_iter().map(solve).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let outs: Vec<TireFibreOut> = jobs.iter().map(solve).collect();
+
+    // Merge into the row-major (v, â_x, g_normal, T, wear) / (v, g_normal, T, wear) tensors.
+    let n5 = nv * nax * ngn * nt * nw;
+    let n4 = nv * ngn * nt * nw;
+    let mut base = vec![0.0; n5];
+    let mut accel = vec![CAP_FLOOR; n4];
+    let mut brake = vec![CAP_FLOOR; n4];
+    for (&(iv, ign, it, iw), out) in jobs.iter().zip(&outs) {
+        let cidx = ((iv * ngn + ign) * nt + it) * nw + iw;
+        accel[cidx] = out.a_cap;
+        brake[cidx] = out.b_cap;
+        for iax in 0..nax {
+            let sidx = (((iv * nax + iax) * ngn + ign) * nt + it) * nw + iw;
+            base[sidx] = out.ay[iax];
+        }
+    }
+
+    let modes5 = vec![OutOfDomain::Clamp; 5];
+    let modes4 = vec![OutOfDomain::Clamp; 4];
+    let axes5 = vec![
+        v_axis.to_vec(),
+        axn_axis.to_vec(),
+        gn_axis.to_vec(),
+        t_axis.clone(),
+        w_axis.clone(),
+    ];
+    let axes4 = vec![
+        v_axis.to_vec(),
+        gn_axis.to_vec(),
+        t_axis.clone(),
+        w_axis.clone(),
+    ];
+    notes.push(format!(
+        "tyre-state axes (D-M5-2): T_tire ∈ [{:.1}, {:.1}] K on {nt} nodes (T_opt = {:.1} K at node \
+         {it_opt}), wear ∈ [0, {:.2}] mm on {nw} nodes; the boundary is re-solved at {} extra grip \
+         states (× the {nv}×{nax}×{ngn} v/â_x/g_normal grid) — genuine table dimensions, not \
+         corrections; the (T_opt, 0) slice is bit-identical to the frozen envelope.",
+        t_axis[0],
+        t_axis[nt - 1],
+        t_axis[it_opt],
+        w_hi,
+        nt * nw,
+    ));
+    Ok(TireStateAxes {
+        base: GriddedMapN::from_gridded(axes5, base, modes5).map_err(T1Error::GgvEnvelope)?,
+        accel_cap: GriddedMapN::from_gridded(axes4.clone(), accel, modes4.clone())
+            .map_err(T1Error::GgvEnvelope)?,
+        brake_cap: GriddedMapN::from_gridded(axes4, brake, modes4).map_err(T1Error::GgvEnvelope)?,
+        t_domain: (t_axis[0], t_axis[nt - 1]),
+        w_domain: (0.0, w_hi),
+    })
 }
 
 /// A solved lateral-acceleration boundary at one `(v, a_x, g_normal)` node.
@@ -1144,5 +1498,137 @@ pub(crate) mod tests {
             max_shoulder < 0.20,
             "shoulder interpolation error {max_shoulder:.4} exceeds 20% of peak"
         );
+    }
+
+    /// The M5 tyre-state axes (D-M5-2): the reference `(T_opt, zero-wear)` slice reproduces the frozen
+    /// envelope, off-reference queries fall back to it when the axes are absent, and grip erodes
+    /// off-optimum-temperature and with wear.
+    #[test]
+    #[allow(clippy::float_cmp)] // bit-identity of the frozen slice is the invariant under test.
+    fn envelope_tire_state_axes() {
+        let car = sample_car();
+        let coupling = FzCoupling::OneStepLag;
+        // A deliberately tiny grid: this test exercises the tyre-state re-solve (t·w × the grid), so
+        // it keeps the debug-build node count small — the physics falloff is checked at axis nodes.
+        let res = EnvelopeRes {
+            v_points: 4,
+            ax_points: 5,
+            g_normal_points: 2,
+        };
+        let frozen = GgvEnvelope::generate(&car, &res, coupling).unwrap();
+        let ext = GgvEnvelope::generate_with_tire_state(
+            &car,
+            &res,
+            coupling,
+            TireStateRes {
+                t_points: 3,
+                w_points: 3,
+            },
+        )
+        .unwrap();
+
+        assert!(!frozen.has_tire_axes());
+        assert!(ext.has_tire_axes());
+        let [(t_lo, t_hi), (w_lo, w_hi)] = ext.tire_state_domain().unwrap();
+        let t_opt = car.tire_thermal().t_opt_k();
+        assert!(
+            t_lo < t_opt && t_opt < t_hi,
+            "T_opt {t_opt} must lie inside the T_tire axis [{t_lo}, {t_hi}]"
+        );
+        assert!(
+            w_lo.abs() < 1e-12 && w_hi > 0.0,
+            "wear axis must start at 0"
+        );
+
+        let [(v_lo, v_hi), _, (gn_lo, gn_hi)] = ext.domain();
+        let lerp = |lo: f64, hi: f64, f: f64| lo + f * (hi - lo);
+
+        // (1) The extended envelope's FROZEN queries are BIT-IDENTICAL to the plain envelope — this is
+        // what keeps every existing consumer + golden valid (the frozen slice is provably unchanged).
+        // (2) `ay_boundary_at` at the reference tyre state (T_opt, 0) reproduces the frozen boundary.
+        let mut max_ref_err = 0.0_f64;
+        for &fv in &[0.2, 0.55, 0.9] {
+            for &fa in &[-5.0, 0.0, 5.0] {
+                for &fg in &[0.1, 0.6, 0.95] {
+                    let (v, gn) = (lerp(v_lo, v_hi, fv), lerp(gn_lo, gn_hi, fg));
+                    assert_eq!(
+                        frozen.ay_boundary(v, fa, gn),
+                        ext.ay_boundary(v, fa, gn),
+                        "extended frozen query drifted from the plain envelope"
+                    );
+                    let at = ext.ay_boundary_at(v, fa, gn, t_opt, 0.0);
+                    max_ref_err = max_ref_err.max((ext.ay_boundary(v, fa, gn) - at).abs());
+                }
+            }
+        }
+        assert!(
+            max_ref_err < 1e-9,
+            "reference-slice identity broken: max |Δ| = {max_ref_err:e}"
+        );
+
+        // (3) With no tyre-state axes, `ay_boundary_at` ignores tyre state (falls back to frozen).
+        let vm = 0.5 * (v_lo + v_hi);
+        assert_eq!(
+            frozen.ay_boundary_at(vm, 0.0, G, t_opt - 100.0, 5.0),
+            frozen.ay_boundary(vm, 0.0, G),
+            "absent tyre axes must fall back to the frozen boundary"
+        );
+
+        // (4) Grip erodes off-optimum-temperature (grip window ≤ 1) and with wear (cliff), at pure
+        // lateral. Query at the axis endpoints so the effect is not smeared by interpolation.
+        let ay_opt = ext.ay_boundary_at(vm, 0.0, G, t_opt, 0.0);
+        let ay_cold = ext.ay_boundary_at(vm, 0.0, G, t_lo, 0.0);
+        let ay_hot = ext.ay_boundary_at(vm, 0.0, G, t_hi, 0.0);
+        assert!(
+            ay_cold < ay_opt,
+            "cold tyre must lose lateral grip: {ay_cold} !< {ay_opt}"
+        );
+        assert!(
+            ay_hot < ay_opt,
+            "overheated tyre must lose lateral grip: {ay_hot} !< {ay_opt}"
+        );
+        let ay_worn = ext.ay_boundary_at(vm, 0.0, G, t_opt, w_hi);
+        let ay_mid = ext.ay_boundary_at(vm, 0.0, G, t_opt, 0.5 * w_hi);
+        assert!(
+            ay_worn < ay_mid && ay_mid <= ay_opt,
+            "wear must erode grip monotonically: {ay_worn} < {ay_mid} <= {ay_opt}"
+        );
+        // The straight-line shoulders also shrink with lost grip.
+        assert!(
+            ext.brake_limit_at(vm, G, t_lo, 0.0) < ext.brake_limit_at(vm, G, t_opt, 0.0),
+            "a cold tyre must brake less hard"
+        );
+    }
+
+    /// The tyre-state sweep is deterministic: identical inputs build a bit-identical table (the
+    /// fixed-order fibre merge makes serial and parallel builds agree too).
+    #[test]
+    #[allow(clippy::float_cmp)] // exact reproducibility is the invariant under test.
+    fn envelope_tire_state_deterministic() {
+        let car = sample_car();
+        let res = EnvelopeRes {
+            v_points: 3,
+            ax_points: 3,
+            g_normal_points: 2,
+        };
+        let tr = TireStateRes {
+            t_points: 3,
+            w_points: 2,
+        };
+        let a =
+            GgvEnvelope::generate_with_tire_state(&car, &res, FzCoupling::OneStepLag, tr).unwrap();
+        let b =
+            GgvEnvelope::generate_with_tire_state(&car, &res, FzCoupling::OneStepLag, tr).unwrap();
+        let [(v_lo, v_hi), _, _] = a.domain();
+        let t_opt = car.tire_thermal().t_opt_k();
+        for i in 0..12 {
+            let v = v_lo + (v_hi - v_lo) * f64::from(i) / 12.0;
+            for &w in &[0.0, 1.0, 2.5] {
+                assert_eq!(
+                    a.ay_boundary_at(v, 0.0, G, t_opt - 20.0, w),
+                    b.ay_boundary_at(v, 0.0, G, t_opt - 20.0, w)
+                );
+            }
+        }
     }
 }

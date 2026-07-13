@@ -542,4 +542,51 @@ impl<T: Float> TireThermalRing<T> {
         let raw = T::one() - self.k_c * (tc_c - self.t_c_ref_c);
         raw.max(T::from(STIFFNESS_FLOOR).unwrap_or_else(T::zero))
     }
+
+    /// The compound's grip-optimum surface temperature `T_opt`, °C (the grip-window peak). Authored
+    /// in °C; node state is kelvin (see [`Self::t_opt_k`]).
+    #[inline]
+    #[must_use]
+    pub fn t_opt_c(&self) -> T {
+        self.t_opt_c
+    }
+
+    /// The compound's grip-optimum surface temperature `T_opt`, **K** (SI-internal). The peak of the
+    /// grip window `λ_μ(T_s)` — the reference the envelope's T_tire axis is centred on.
+    #[inline]
+    #[must_use]
+    pub fn t_opt_k(&self) -> T {
+        self.t_opt_c + T::from(CELSIUS_K).unwrap_or_else(T::zero)
+    }
+
+    /// The critical tread wear `w_c`, mm — the grip-cliff centre (§7.3).
+    #[inline]
+    #[must_use]
+    pub fn w_c_mm(&self) -> T {
+        self.w_c_mm
+    }
+
+    /// The grip-cliff sigmoid width `s_w`, mm (§7.3).
+    #[inline]
+    #[must_use]
+    pub fn s_w_mm(&self) -> T {
+        self.s_w_mm
+    }
+
+    /// The bald tread depth `w_max`, mm (§7.3).
+    #[inline]
+    #[must_use]
+    pub fn w_max_mm(&self) -> T {
+        self.w_max_mm
+    }
+
+    /// The thermal grip-window multiplier `λ_μ(T_s) ∈ (0, 1]` at a bare surface temperature `t_s_k`
+    /// (K), without constructing a full [`TireThermalState`] — a thin wrapper over [`Self::mu_scale`]
+    /// (which reads only `T_s`) for the g-g-g-v envelope's T_tire axis. Peaks at exactly `1` at
+    /// `T_opt`.
+    #[inline]
+    #[must_use]
+    pub fn grip_window(&self, t_s_k: T) -> T {
+        self.mu_scale(&TireThermalState::uniform(t_s_k))
+    }
 }
