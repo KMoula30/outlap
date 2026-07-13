@@ -155,3 +155,69 @@ and steady surface temperature landing in the broadcast-consistent operating ban
 F1-representative set; `λ_μ ∈ (0,1]` peaking at `T_opt`; monotone convection in speed; the calibrated
 gas law; carcass softening reducing stiffness; monotone warm-up; zero allocations per step; f32/f64
 parity; and bit-identical determinism.
+
+## T2 tier integration — wiring the ring into a transient lap (PR3)
+
+The ring above is a pure `step(dt, drivers)`; the transient (T2) solver owns the clock and drives it.
+`outlap-transient`'s **`TireThermalStack`** (`crates/outlap-transient/src/tire_thermal.rs`) is the
+per-wheel ring + wear advanced as a third *slow subsystem* (HANDOFF §6.1), alongside the battery pack
+and the shift FSM — a hand-rolled subsystem, not a generic trait (Decision D-M5-1). It couples back
+into the tyre force block through the per-wheel `mu_scale_{x,y}` (the total grip multiplier
+`λ_μ,total`) and the gas-law inflation pressure `p`, both held frozen across the fast RK sweep exactly
+like the shift-FSM torque scale and the battery regen ceiling.
+
+**The decimated slow-clock loop.** Every fast step the solver *accumulates* the per-wheel heat into
+the ring's window energies; on a slow-clock fire (every `slow_decimation` steps, ~20 ms) the ring
+advances one step over the window and refreshes the held grip/pressure override, which then drives
+every intervening fast step. The single ring step per window never touches the hot RK path.
+
+```text
+fast step:  couple Fz → relax (κ,α) → RK sweep → refresh Fz/accel
+            └─ accumulate per-wheel  Q_fric·dt (slip power)  and  Q_hyst·dt  into the window
+slow fire:  ring.step(window)  →  λ_μ,total, p per wheel  →  held on the Tire block
+force call (each fast step):  MF6.1 with  LMU·λ_μ,total  and  the held gas-law pressure p
+```
+
+**Driver formation** (the §7.2 exogenous inputs, from the T2 force solution):
+
+- **`Q_fric`** — the frictional sliding power `P_slide = |F_x·V_sx| + |F_y·V_sy|` (with `V_sx = κ·|V_cx|`
+  and `V_sy = V_wy`), accumulated per fast step and window-averaged, so the heat the ring deposits
+  closes to the frictional energy the patch actually dissipated (energy closure over the window).
+- **`Q_hyst`** — the rolling-deformation loss `Q_hyst = c_h·F_z·δ·Ω` with the deflection `δ = F_z/k_z`
+  and spin `Ω = v/R`, i.e. the standard load-squared rolling-hysteresis power. `c_h` is a documented
+  modelling constant (`HYSTERESIS_LOSS_FACTOR`); `k_z`/`W` come from the MF6.1 coefficients with
+  fallbacks (they set the deflection and external-tread-area scales, which calibration absorbs).
+- **contact fraction** `a_cp = A_cp/A_ext` with the patch area `A_cp = F_z/p` (load over inflation
+  pressure) and the external tread band `A_ext = 2π·R·W`; sampled at the window boundary.
+
+**Step-phase order.** The grip/pressure update is a *slow* boundary decision: it is computed after the
+fast step from the post-step force solution and held frozen through the next window's RK stages and
+the relaxation sub-step. The relaxation states `(κ, α)` advance every fast step on their own exact-
+exponential channel; they read the *held* grip/pressure, and the ring reads *their* forces one window
+later — a one-window explicit coupling, deterministic and A-stable (the ring is semi-implicit).
+
+**Parity-safe seed.** A T2 lap seeds every node warm at the grip optimum `T_s = T_c = T_opt` with the
+gas at the cold reference `T_g = T_cold` and zero wear, so `λ_μ(T_opt) = 1` and `p = p_cold` *exactly*
+at step 0 — the wired ring reproduces the frozen-tyre forces bit-for-bit at the start (the QSS↔T2
+hull-containment gate stays valid), then drifts physically as the surface leaves the window under load
+and the tyres wear. A cold seed reproduces the warm-up transient for the tests.
+
+**Opt-in until calibration.** The wiring is complete and exercised, but the reference `.tyr`
+thermal/wear parameters are still **synthetic placeholders** whose loaded steady-state sits below the
+grip window — so a *default-on* lap would under-report pace. The Python `solve_transient_lap` therefore
+gates the stack behind `tire_thermal=True` (default off ⇒ frozen tyres, byte-identical to pre-M5); the
+flag flips on by default once the FastF1 inverse calibration (M5 PR7/PR8) moves the steady-state into
+the window.
+
+![Tire thermal ring wired into the T2 lap](img/tire_thermal_lap.png)
+
+The figure is drawn from the real `TransientSolver` (`crates/outlap-transient/examples/tire_thermal_lap.rs`,
+plotted by `python/tools/plot_tire_thermal_lap.py`) on a skidpad of the `limebeer_2014_f1` car.
+**(a)** The outer (loaded) front tyre warms faster than the lightly-loaded inner one — the ring sees
+each contact patch's own sliding power. **(b)** The grip multiplier the force call uses rises as the
+tyres warm toward the window, outer ahead of inner. **(c)** A long stint: tread wear crosses the cliff
+onset `w_c` and the total grip collapses through the C¹ sigmoid. **(d)** The warm-up drawn as a
+trajectory on the static grip window `λ_μ(T_s)` — the tyre climbing the curve from a cold start.
+Integration tests (`crates/outlap-transient/tests/tire_thermal.rs`) assert the warm-up (thermal-only,
+wear held negligible), the wear cliff, exact energy closure across the slow-clock window, zero
+allocations per step, and bit-identical determinism; the frozen (no-stack) path is asserted unchanged.

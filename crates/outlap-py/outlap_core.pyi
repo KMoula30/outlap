@@ -181,6 +181,7 @@ def solve_transient_lap(
     sim: dict[str, object] | None = None,
     speed_margin: float = ...,
     initial_soc: float | None = None,
+    tire_thermal: bool = False,
 ) -> TransientLap: ...
 def vehicle_report(
     vehicle_dir: str,

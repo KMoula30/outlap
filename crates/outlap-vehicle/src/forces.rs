@@ -197,6 +197,28 @@ impl<T: Float> RelaxProvider<T> {
     }
 }
 
+/// Per-wheel thermal grip + pressure override, refreshed on the decimated slow clock by the T2
+/// tire-thermal subsystem (M5 PR3, `outlap_transient::TireThermalStack`) and held frozen across the
+/// intervening fast steps — exactly like the shift-FSM torque scale and the battery regen ceiling.
+///
+/// `None` on the [`Tire`] block ⇒ the static uniform [`Tire::mu_scale`] + per-axle cold pressures
+/// (the frozen-tire path, **bit-identical** to the pre-M5 behaviour). `Some` ⇒ the ring's total grip
+/// multiplier `λ_μ,total` (grip window × wear cliff × thermal-damage) per wheel and the gas-law hot
+/// inflation pressure per wheel feed the per-step force call.
+#[derive(Clone, Copy, Debug)]
+pub struct ThermalGrip<T> {
+    /// Per-wheel longitudinal friction multiplier `λ_μ,total` scaling `LMUX` (`[FL, FR, RL, RR]`).
+    pub mu_x: Wheels<T>,
+    /// Per-wheel lateral friction multiplier `λ_μ,total` scaling `LMUY`.
+    pub mu_y: Wheels<T>,
+    /// Per-wheel gas-law hot inflation pressure `p = p_cold·T_g/T_cold`, Pa (feeds `SlipState::p`).
+    pub p: Wheels<T>,
+}
+
+/// A per-wheel sample `[FL, FR, RL, RR]` (mirrors `outlap_transient::result::Wheels` without the
+/// dependency — this crate is upstream of the transient result surface).
+pub type Wheels<T> = [T; WHEELS];
+
 /// The steady-state slip targets and relaxation data for one wheel this step.
 #[derive(Clone, Copy, Debug)]
 pub struct RelaxTargets<T> {
@@ -225,7 +247,8 @@ pub struct Tire<T> {
     pub p_front: T,
     /// Rear inflation pressure, Pa.
     pub p_rear: T,
-    /// Uniform friction scale (1.0 until the M5 thermal grip model).
+    /// Uniform static friction scale (1.0 by default; the frozen-tire fallback when [`Self::thermal`]
+    /// is `None`). The M5 thermal grip window overrides this per wheel through [`Self::thermal`].
     pub mu_scale: T,
     /// Front relaxation provider.
     pub relax_front: RelaxProvider<T>,
@@ -233,9 +256,41 @@ pub struct Tire<T> {
     pub relax_rear: RelaxProvider<T>,
     /// Per-wheel geometry (positions, radii).
     pub wheels: WheelGeometry<T>,
+    /// Per-wheel thermal grip + gas-law pressure override (M5 PR3), refreshed on the decimated slow
+    /// clock and held frozen across the fast steps. `None` ⇒ the frozen-tire static path. See
+    /// [`ThermalGrip`].
+    pub thermal: Option<ThermalGrip<T>>,
 }
 
 impl<T: Float> Tire<T> {
+    /// Install the per-wheel thermal grip + pressure override the slow-clock ring produced (M5 PR3).
+    /// Held frozen until the next slow-clock refresh; clearing it (`None`) restores the static path.
+    pub fn set_thermal_grip(&mut self, grip: ThermalGrip<T>) {
+        self.thermal = Some(grip);
+    }
+
+    /// The per-wheel frictional sliding power `P_slide = |F_x·V_sx| + |F_y·V_sy|`, W — the heat the
+    /// contact patch generates by sliding (§7.2 `Q_fric` driver). The sliding velocities come from the
+    /// lagged slip that produced the current forces: `V_sx = κ·|V_cx|` (longitudinal) and the lateral
+    /// contact velocity `V_sy = V_wy`. Forces are read from the bus (post-force-block), so this is
+    /// called after the tyre block has run this step. Non-negative per wheel.
+    #[must_use]
+    pub fn wheel_slip_powers(&self, x: &StateView<T>, bus: &Bus<T>, lane: usize) -> Wheels<T> {
+        let steer = bus.get(CoreSignal::Steer, lane);
+        let vx_low = T::from(VX_LOW).unwrap_or_else(T::one);
+        let mut out = [T::zero(); WHEELS];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let (vwx, vwy) = self.contact_velocity(x, i, steer);
+            let v_abs = vwx.abs().max(vx_low);
+            let kappa = x.relax(outlap_core::state::RelaxState::Kappa, i);
+            let fx = bus.get_wheel(WheelSignal::TireFx, i, lane);
+            let fy = bus.get_wheel(WheelSignal::TireFy, i, lane);
+            let v_sx = kappa * v_abs;
+            *slot = (fx * v_sx).abs() + (fy * vwy).abs();
+        }
+        out
+    }
+
     fn axle(&self, wheel: usize) -> (&TireModel<T>, T, &RelaxProvider<T>) {
         if self.wheels.front[wheel] {
             (&self.front, self.p_front, &self.relax_front)
@@ -323,10 +378,16 @@ impl<T: Float> Block<T> for Tire<T> {
             // Lagged (relaxation) slip from the SoA state feeds the force model.
             let kappa = x.relax(outlap_core::state::RelaxState::Kappa, i);
             let alpha = x.relax(outlap_core::state::RelaxState::Alpha, i);
-            let (model, p, _) = self.axle(i);
+            let (model, p_static, _) = self.axle(i);
+            // Per-wheel thermal grip window + gas-law pressure when the ring is wired (M5 PR3); else
+            // the static uniform scale + cold axle pressure (frozen-tire path, bit-identical).
+            let (mu_x, mu_y, p) = match &self.thermal {
+                Some(g) => (g.mu_x[i], g.mu_y[i], g.p[i]),
+                None => (self.mu_scale, self.mu_scale, p_static),
+            };
             let mut slip = SlipState::new(kappa, alpha, T::zero(), fz, p, vwx);
-            slip.mu_scale_x = self.mu_scale;
-            slip.mu_scale_y = self.mu_scale;
+            slip.mu_scale_x = mu_x;
+            slip.mu_scale_y = mu_y;
             let f = model.forces(&slip);
             bus.set_wheel(WheelSignal::TireFx, i, lane, f.fx);
             bus.set_wheel(WheelSignal::TireFy, i, lane, f.fy);

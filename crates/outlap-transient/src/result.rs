@@ -79,6 +79,19 @@ pub struct TransientLap<T> {
     pub state_of_charge: Vec<T>,
     /// Pack temperature, °C (empty when no slow-state stack was attached).
     pub pack_temp_c: Vec<T>,
+    /// Per-wheel tread-surface temperature `T_s`, °C (empty when no tire-thermal stack was attached).
+    pub tire_surface_c: Vec<Wheels<T>>,
+    /// Per-wheel carcass/bulk temperature `T_c`, °C (empty without a tire-thermal stack).
+    pub tire_carcass_c: Vec<Wheels<T>>,
+    /// Per-wheel inflation-gas temperature `T_g`, °C (empty without a tire-thermal stack).
+    pub tire_gas_c: Vec<Wheels<T>>,
+    /// Per-wheel accumulated tread wear `w`, mm (empty without a tire-thermal stack).
+    pub tire_wear_mm: Vec<Wheels<T>>,
+    /// Per-wheel irreversible thermal damage `D ∈ [0,1]` (empty without a tire-thermal stack).
+    pub tire_damage: Vec<Wheels<T>>,
+    /// Per-wheel total grip multiplier `λ_μ,total` (grip window × wear cliff × thermal damage), the
+    /// factor scaling `LMUX`/`LMUY` this step (empty without a tire-thermal stack).
+    pub tire_grip: Vec<Wheels<T>>,
     /// Total lap time (last `t` on a completed lap), s.
     pub lap_time_s: T,
 }
@@ -116,6 +129,12 @@ impl<T: Float> Default for TransientLap<T> {
             regen_torque_rear_nm: Vec::new(),
             state_of_charge: Vec::new(),
             pack_temp_c: Vec::new(),
+            tire_surface_c: Vec::new(),
+            tire_carcass_c: Vec::new(),
+            tire_gas_c: Vec::new(),
+            tire_wear_mm: Vec::new(),
+            tire_damage: Vec::new(),
+            tire_grip: Vec::new(),
             lap_time_s: T::zero(),
         }
     }

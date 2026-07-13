@@ -21,6 +21,7 @@ pub mod control;
 pub mod lap;
 pub mod line_table;
 pub mod result;
+pub mod tire_thermal;
 
 // The solver's public API takes an interned channel table, so callers need the type without
 // depending on `outlap-core` directly (the Python extension module is itself named `outlap_core`).
@@ -30,3 +31,6 @@ pub use control::{ShiftEvent, Shifter, SlowStack, DOWNSHIFT_HYSTERESIS, SHIFT_CU
 pub use lap::{Provenance, SimConfig, T2Blocks, TransientSolver};
 pub use line_table::{LineSamples, LineTable, PreviewSample, RoadSample};
 pub use result::{TransientLap, Wheels};
+pub use tire_thermal::{AxleGeometry, TireThermalStack};
+// Re-export the force-block grip override so callers wiring the ring see one import surface.
+pub use outlap_vehicle::ThermalGrip;

@@ -1408,6 +1408,52 @@ impl outlap_transient::SlowStack for PackSlowStack {
     }
 }
 
+/// Build the per-wheel tire-thermal ring + wear stack for a T2 lap (M5 PR3) from the vehicle's
+/// front/rear `.tyr` thermal + wear blocks and the session air / track-surface temperatures.
+///
+/// The stack seeds **warm at the grip optimum** (so the first step reproduces the frozen-tyre forces
+/// bit-for-bit and the QSS↔T2 hull gate stays valid), then the tyres warm, wear, and degrade over the
+/// lap — the grip window `λ_μ`, the wear cliff, and the gas-law inflation pressure feed the per-step
+/// force call. Geometry the thermal block does not carry (external tread area, vertical stiffness)
+/// comes from the MF6.1 coefficients with documented fallbacks; `Q_hyst` uses a modelling hysteresis
+/// factor. The thermal/wear parameters are still synthetic pending the FastF1 calibration (PR7/PR8).
+fn build_tire_thermal(
+    resolved: &ResolvedVehicle,
+    conditions: &Conditions,
+    vl: &FsLoader,
+    notes: &mut Vec<String>,
+) -> PyResult<outlap_transient::TireThermalStack<f64>> {
+    let spec = &resolved.spec;
+    let (front, _) = load_tyr(spec.tires.front.as_str(), vl).map_err(schema_err)?;
+    let (rear, _) = load_tyr(spec.tires.rear.as_str(), vl).map_err(schema_err)?;
+    let axle_geom = |t: &outlap_schema::tyr::Tyr| {
+        let c = &t.mf61.0;
+        outlap_transient::AxleGeometry::new(
+            c.get("UNLOADED_RADIUS").copied().unwrap_or(0.33),
+            c.get("WIDTH").copied(),
+            c.get("VERTICAL_STIFFNESS").copied(),
+        )
+    };
+    notes.push(
+        "T2 tire-thermal stack (M5): a per-wheel reduced Farroni-TRT ring + Archard wear advanced on \
+         the decimated slow clock (the third slow subsystem). Tyres seed warm at the grip optimum \
+         (frozen-tyre forces at step 0), then warm, wear, and degrade over the lap — the grip window \
+         (λ_μ), the wear cliff, and the gas-law pressure feed the force call. Thermal/wear parameters \
+         are synthetic placeholders pending FastF1 inverse calibration (M5 PR7/PR8)."
+            .to_owned(),
+    );
+    Ok(outlap_transient::TireThermalStack::new(
+        &front.thermal,
+        &front.wear,
+        &rear.thermal,
+        &rear.wear,
+        axle_geom(&front),
+        axle_geom(&rear),
+        conditions.air.temperature_c,
+        conditions.track_surface_c,
+    ))
+}
+
 /// Build the transient [`LineTable`] from the (possibly raceline-offset) track, the T0 path, and the
 /// QSS speed profile the driver tracks.
 ///
@@ -1723,7 +1769,7 @@ impl TransientLap {
 ///
 /// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn solve_transient_lap(
     vehicle_dir: &str,
@@ -1737,6 +1783,12 @@ fn solve_transient_lap(
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
     speed_margin: f64,
     initial_soc: Option<f64>,
+    // Opt-in for the M5 tire-thermal ring + wear stack (default off). The physics is fully wired, but
+    // the reference `.tyr` thermal/wear params are still synthetic placeholders — their loaded
+    // steady-state sits below the grip window, so a default-on lap would under-report pace. The flag
+    // flips on by default once FastF1 inverse calibration (M5 PR7/PR8) sets the params so the
+    // steady-state lands in the window. Opt in to exercise the wired physics today.
+    tire_thermal: bool,
 ) -> PyResult<TransientLap> {
     check_ds(ds_m)?;
     if !(speed_margin > 0.0 && speed_margin <= 1.0) {
@@ -1924,6 +1976,14 @@ fn solve_transient_lap(
             upshift_speeds,
             shift_time_s,
         ));
+    }
+
+    // Attach the M5 tire-thermal ring + wear stack (per-wheel), opt-in for PR3, so the T2 lap responds
+    // to tyre temperature and wear. Seeded warm (parity-safe); the grip window + gas-law pressure feed
+    // the force call and drift over the lap as the tyres warm off the optimum and wear accumulates.
+    if tire_thermal {
+        solver =
+            solver.with_tire_thermal(build_tire_thermal(&resolved, &conditions, &vl, &mut notes)?);
     }
 
     let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
