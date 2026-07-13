@@ -13,6 +13,10 @@ re-verified against the physical text. Where a golden comparison disagrees with 
 transcription, check the published 3rd-edition errata first — the `SHy` shift (eq. 4.E27) is the
 documented hotspot.
 
+The `SlipState` inflation-pressure (`p`) and friction-scaling (`mu_scale_x/y`) hooks these equations
+read are held at 1.0 / cold-set values here; the [tire thermal ring](tire-thermal.md) computes the
+temperature-dependent pressure and grip-window multipliers that drive them over a stint.
+
 ## Symbols and sign conventions (ISO-W)
 
 | symbol | meaning |

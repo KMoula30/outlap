@@ -32,6 +32,7 @@ pub mod mf61;
 pub mod model;
 pub mod relax;
 pub mod slip;
+pub mod thermal;
 
 pub use brush::Brush;
 pub use mf61::params::{Mf61BuildError, Mf61Params};
@@ -40,6 +41,7 @@ pub use mf61::Mf61;
 pub use model::{TireBuildError, TireModel};
 pub use relax::{relax_step, Relaxation};
 pub use slip::{SlipState, TireForces};
+pub use thermal::{ThermalCouplings, ThermalDrivers, TireThermalRing, TireThermalState};
 
 // Re-export the brush schema block so `outlap_tire::TyrBrush` is a one-stop force-model import.
 pub use outlap_schema::tyr::TyrBrush;

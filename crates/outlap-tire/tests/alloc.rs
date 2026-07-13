@@ -7,7 +7,11 @@
 
 use std::collections::BTreeMap;
 
-use outlap_tire::{relax_step, Brush, Mf61, Mf61Params, Relaxation, SlipState};
+use outlap_schema::tyr::TyrThermal;
+use outlap_tire::{
+    relax_step, Brush, Mf61, Mf61Params, Relaxation, SlipState, ThermalDrivers, TireThermalRing,
+    TireThermalState,
+};
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -68,6 +72,7 @@ fn full_map() -> BTreeMap<String, f64> {
 /// `#[test]`s would race under the parallel test runner. Each path is measured in its own
 /// before/after window inside the single profiler.
 #[test]
+#[allow(clippy::too_many_lines)] // one profiler window over several hot paths; splitting races it.
 fn hot_paths_do_not_allocate() {
     let _profiler = dhat::Profiler::builder().testing().build();
 
@@ -152,6 +157,50 @@ fn hot_paths_do_not_allocate() {
         before,
         dhat::HeapStats::get().total_blocks,
         "relax_step / sigma queries allocated on the heap"
+    );
+
+    // --- Tire thermal ring: step + couplings ---
+    let thermal = TyrThermal {
+        c_s: 6000.0,
+        c_c: 18000.0,
+        c_g: 1300.0,
+        g_sc: 80.0,
+        g_cg: 35.0,
+        g_road: 220.0,
+        h0: 15.0,
+        h1: 5.5,
+        p_t: 0.65,
+        t_opt: 75.0,
+        c_t: 2.0,
+        k_c: 0.0015,
+        t_c_ref: 60.0,
+        p_cold: 220.0,
+        t_cold: 20.0,
+    };
+    let ring = TireThermalRing::<f64>::from_schema(&thermal);
+    let mut state = TireThermalState::uniform(293.15);
+    let mut drv = ThermalDrivers {
+        slip_power_w: 8000.0,
+        carcass_loss_w: 1400.0,
+        speed_mps: 40.0,
+        contact_fraction: 0.05,
+        ext_area_m2: 0.4,
+        t_air_k: 303.15,
+        t_road_k: 318.15,
+    };
+    let before = dhat::HeapStats::get().total_blocks;
+    for i in 0..16 {
+        #[allow(clippy::cast_precision_loss)]
+        let frac = f64::from(i) / 16.0;
+        drv.speed_mps = 5.0 + 60.0 * frac;
+        drv.slip_power_w = 2000.0 + 20_000.0 * frac;
+        let cpl = ring.step(&mut state, &drv, 0.05);
+        sink += cpl.pressure_pa + cpl.mu_scale + cpl.stiffness_scale;
+    }
+    assert_eq!(
+        before,
+        dhat::HeapStats::get().total_blocks,
+        "TireThermalRing::step allocated on the heap"
     );
 
     assert!(sink.is_finite() && x.is_finite());
