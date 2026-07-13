@@ -9,10 +9,12 @@ carries that state — three lumped nodes per tire, advanced segment-to-segment 
 This is the flagship physics of milestone M5 (HANDOFF §7.2): *no open-source tire thermal model
 exists in any language*, so it is implemented **clean-room from the published literature** cited below.
 
-This page documents the ring in isolation — the model, its discretization, and the three couplings it
-exposes back to the [Magic-Formula force model](mf61-steady-state.md). Wiring the ring into a lap (QSS
-`march_slow_states`; T2 `SlowStack`) and adding the wear/degradation states on top of it are separate
-milestone steps; here the physics is proven on its own.
+This page documents the ring itself — the model, its discretization, and the three couplings it
+exposes back to the [Magic-Formula force model](mf61-steady-state.md). The two degradation states that
+ride on it — tread wear and irreversible thermal damage, and the positive-feedback grip cliff — are
+documented in the companion [tire wear / thermal damage](tire-wear.md) page. Wiring both into a lap
+(QSS `march_slow_states`; T2 `SlowStack`) is a separate milestone step; here the physics is proven on
+its own.
 
 ## The three nodes
 
@@ -120,7 +122,7 @@ or lap-time-simulator tire code was **not** consulted as a source of derivation,
 - **F. Farroni, A. Sakhnevych, F. Timpone**, *"Physical modelling of tire wear for the analysis of the
   influence of thermal and frictional effects on vehicle performance"* (the TRT-EVO line), **Proc.
   IMechE Part L: Journal of Materials: Design and Applications**, 2017 — the thermal→grip/wear
-  coupling framing (the wear states themselves land in the next M5 step).
+  coupling framing (the wear states themselves are documented in [tire-wear](tire-wear.md)).
 - **K. A. Grosch**, *"The relation between the friction and visco-elastic properties of rubber"*,
   **Proc. R. Soc. Lond. A** 274(1356), 21–39, 1963 — the temperature/velocity dependence of rubber
   friction underlying the grip window.
