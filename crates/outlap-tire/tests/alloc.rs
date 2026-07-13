@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use outlap_schema::tyr::TyrThermal;
+use outlap_schema::tyr::{TyrThermal, TyrWear};
 use outlap_tire::{
     relax_step, Brush, Mf61, Mf61Params, Relaxation, SlipState, ThermalDrivers, TireThermalRing,
     TireThermalState,
@@ -203,5 +203,35 @@ fn hot_paths_do_not_allocate() {
         "TireThermalRing::step allocated on the heap"
     );
 
-    assert!(sink.is_finite() && x.is_finite());
+    // --- Tire wear/damage ring: step advancing temps + wear + damage together ---
+    let wear = TyrWear {
+        k_w: 1.0e-8,
+        w_max: 8.0,
+        w_c: 3.0,
+        tau_d: 400.0,
+        t_deg: 110.0,
+        delta_t_ref: 20.0,
+        beta: 2.0,
+        delta_c: 0.25,
+        s_w: 0.5,
+        delta_d: 0.25,
+    };
+    let wear_ring = TireThermalRing::<f64>::from_schema_with_wear(&thermal, &wear);
+    let mut wear_state = TireThermalState::uniform(363.15);
+    let before = dhat::HeapStats::get().total_blocks;
+    for i in 0..16 {
+        #[allow(clippy::cast_precision_loss)]
+        let frac = f64::from(i) / 16.0;
+        drv.speed_mps = 5.0 + 60.0 * frac;
+        drv.slip_power_w = 8000.0 + 14_000.0 * frac;
+        let cpl = wear_ring.step(&mut wear_state, &drv, 0.05);
+        sink += cpl.mu_scale_total + cpl.wear_grip_scale + cpl.damage_grip_scale;
+    }
+    assert_eq!(
+        before,
+        dhat::HeapStats::get().total_blocks,
+        "wear-capable TireThermalRing::step allocated on the heap"
+    );
+
+    assert!(sink.is_finite() && x.is_finite() && wear_state.wear_mm.is_finite());
 }
