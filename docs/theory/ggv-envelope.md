@@ -117,6 +117,53 @@ velocity-frame `−a_x·sinβ` term dominates and where a multiplicative factor 
 *move* the shoulder (`0 × factor = 0`) — the sensitivities are clamped and the correction is a bound,
 not an accurate value. The lap solver caps `a_x` and takes the powertrain `min` there anyway.
 
+## Tyre-state axes — T_tire and wear (M5; amendment to Decision #31)
+
+μ_tire, mass, and ClA above are separable multiplicative *corrections* — accurate near the peak, a
+bound elsewhere. The tyre's own thermal + wear state is different in kind: the grip window `λ_μ(T_s)`
+and the wear cliff move the *whole* boundary — including the longitudinal shoulders a multiplicative
+factor cannot touch — and they are the axes that make the QSS tier stint-capable (HANDOFF §6.1: *"the
+tyre-state axes are the differentiator"*). So M5 adds them as **genuine grid dimensions the boundary
+is re-solved across**, not corrections (Decision #31 amendment / D-M5-2):
+
+```
+  a_y,corr(v, a_x, g_normal, T_tire, wear)   — a 5-D table; the â_x shoulders gain the same two axes.
+```
+
+At each `(T_tire, wear)` node the boundary is re-solved in full at a uniform grip factor
+
+```
+  g(T_tire, wear) = λ_μ(T_tire) / λ_μ(T_opt)  ·  wear_grip(wear) / wear_grip(0)
+```
+
+applied through the same uniform grip knob (`T1Vehicle::with_mu_scale`) the tier feeds the force call
+per wheel (`mu_scale_total`, isotropic on `LMUX`/`LMUY`) — so the envelope's grip model is the
+identical thermal window `λ_μ(T_s) = exp(−c_T·((T_s−T_opt)/T_opt)²)` (`docs/theory/tire-thermal.md`)
+and the identical wear cliff `1 − Δ_c·σ((w−w_c)/s_w)` (`docs/theory/tire-wear.md`). The T_tire axis is
+the tread-surface temperature (the grip-window driver); the gas-law pressure and carcass-softening
+couplings depend on the *other* two node temperatures and stay at their reference here (on the
+reference tyres they carry no MF force effect anyway — no `PP*` pressure terms), so the envelope
+carries the dominant grip-magnitude effect and the tier composes the rest per step.
+
+![g-g-g-v tyre-state axes](img/ggv_tire_state.png)
+
+**The reference-slice invariant.** `T_opt` is placed at the exact centre node of the T_tire axis and
+`wear = 0` at node 0, so `g(T_opt, 0) = 1` *bit-for-bit* (`x/x = 1` in IEEE-754). The re-solve there
+is therefore identical to the frozen sweep, and the reference slice reproduces the pre-M5 envelope
+exactly (verified to `0.0` m/s² — panel showing `ident`). This is what keeps the QSS↔T2 parity gates
+and every golden green: the axes are **opt-in** (`GgvEnvelope::generate_with_tire_state`; the default
+`generate` is unchanged and cheap), so `ay_boundary` / `ay_boundary_corrected` and every existing
+consumer see the frozen boundary untouched, while the tiers index the live state through
+`ay_boundary_at(v, a_x, g_normal, T_tire, wear)` (QSS march: PR5). The cost is the trade: the boundary
+sweep runs `t_points × w_points` times (recorded in `GgvEnvelope::notes`) — a cold-assembly cost paid
+only when the axes are requested.
+
+The figure is drawn from the real generator by `crates/outlap-qss/examples/envelope_tire_state.rs`
+(→ `python/tools/plot_envelope_tire_state.py`): (1) the Farroni grip window and (2) the
+Archard/Grosch wear cliff the axes carry; (3, 4) peak lateral grip falling off-optimum-temperature and
+across the wear cliff, with the frozen envelope overlaid; (5) the g-g section breathing between cold,
+optimum and worn tyres; (6) the 2-D grip surface `a_y(T_tire, wear)`.
+
 ## Consumption by T0
 
 `solve_into_ggv` runs the same forward/backward velocity-profile passes as the constant-μ ellipse

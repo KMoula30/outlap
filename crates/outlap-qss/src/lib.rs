@@ -53,7 +53,7 @@ pub use solver::{solve_into, solve_into_ggv, solve_into_ggv_scaled, solve_lap, s
 pub use t1::{
     load_transfer, split_axle, AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint,
     GgvEnvelope, LoadTransferGeometry, MachineThermal, Pack, PackState, PrimaryDiff, StepOut,
-    T1Powertrain, T1Vehicle, TrimInput, TrimOutcome, TrimState,
+    T1Powertrain, T1Vehicle, TireStateRes, TrimInput, TrimOutcome, TrimState,
 };
 pub use vehicle::{T0Options, T0Vehicle};
 
