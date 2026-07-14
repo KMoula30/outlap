@@ -141,6 +141,7 @@ fn qss_t2_parity_report_limebeer_catalunya() {
         &t0v,
         env,
         None,
+        None,
         &path,
         LineDescriptor::MinCurvature {
             ds_m: RacelineOptions::default().ds_m,

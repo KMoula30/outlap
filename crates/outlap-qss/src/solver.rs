@@ -158,6 +158,12 @@ struct GgvGrip<'a> {
     /// marched along the previous pass; it multiplies the powertrain traction ceiling in the forward
     /// step. Braking is unaffected (it draws no drive power). See [`crate::qss`].
     traction_scale: Option<&'a [f64]>,
+    /// Optional per-station **tyre state** `(T_tire[i] in K, wear[i] in mm)` (`None` ⇒ the envelope is
+    /// queried at its frozen reference slice). The QSS tyre-thermal march ([`crate::tire`]) fills this
+    /// from the ring marched along the previous pass; the boundary + longitudinal shoulders are then
+    /// indexed on the envelope's tyre-state axes (`ay_boundary_at` / `accel_limit_at` / `brake_limit_at`)
+    /// so a hot / worn tyre solves a physically degraded lap. See [`crate::qss`].
+    tire_state: Option<(&'a [f64], &'a [f64])>,
 }
 
 impl<'a> GgvGrip<'a> {
@@ -166,15 +172,23 @@ impl<'a> GgvGrip<'a> {
             veh,
             env,
             traction_scale: None,
+            tire_state: None,
         }
     }
 
-    /// As [`Self::new`] but with a per-station traction scale (the slow-state coupling).
-    fn with_scale(veh: &'a T0Vehicle, env: &'a GgvEnvelope, scale: &'a [f64]) -> Self {
+    /// As [`Self::new`] but with the optional per-station couplings: the traction `scale` (machine /
+    /// battery) and the `tire` state `(T_tire[i], wear[i])` (the tyre-thermal march).
+    fn coupled(
+        veh: &'a T0Vehicle,
+        env: &'a GgvEnvelope,
+        scale: Option<&'a [f64]>,
+        tire: Option<(&'a [f64], &'a [f64])>,
+    ) -> Self {
         Self {
             veh,
             env,
-            traction_scale: Some(scale),
+            traction_scale: scale,
+            tire_state: tire,
         }
     }
 
@@ -183,30 +197,51 @@ impl<'a> GgvGrip<'a> {
         self.traction_scale.map_or(1.0, |s| s[i])
     }
 
-    /// The envelope's lateral-acceleration boundary at `(v, a_x, g_normal)`, scaled by the local
-    /// track **grip scale** `grip` (`T0Path::grip`, the surface `grip_scale`). Friction scales the
+    /// The envelope's lateral-acceleration boundary at station `i`'s `(v, a_x, g_normal)`, scaled by the
+    /// local track **grip scale** `grip` (`T0Path::grip`, the surface `grip_scale`). Friction scales the
     /// boundary linearly, exactly as the constant-μ ellipse scales its `μ` by `γ(s)` — so g-g-g-v laps
-    /// honour grip maps like the ellipse path does.
-    fn ay(&self, v: f64, ax: f64, gn: f64, grip: f64) -> f64 {
-        self.env.ay_boundary(v, ax, gn) * grip
+    /// honour grip maps like the ellipse path does. When a tyre state is coupled the boundary is indexed
+    /// on the envelope's `(T_tire, wear)` axes at that station; otherwise the frozen reference slice.
+    fn ay(&self, i: usize, v: f64, ax: f64, gn: f64, grip: f64) -> f64 {
+        let boundary = match self.tire_state {
+            Some((t, w)) => self.env.ay_boundary_at(v, ax, gn, t[i], w[i]),
+            None => self.env.ay_boundary(v, ax, gn),
+        };
+        boundary * grip
+    }
+
+    /// The envelope's positive-`a_x` shoulder at station `i` (tyre-state-indexed when coupled).
+    fn accel_shoulder(&self, i: usize, v: f64, gn: f64) -> f64 {
+        match self.tire_state {
+            Some((t, w)) => self.env.accel_limit_at(v, gn, t[i], w[i]),
+            None => self.env.accel_limit(v, gn),
+        }
+    }
+
+    /// The envelope's braking shoulder magnitude at station `i` (tyre-state-indexed when coupled).
+    fn brake_shoulder(&self, i: usize, v: f64, gn: f64) -> f64 {
+        match self.tire_state {
+            Some((t, w)) => self.env.brake_limit_at(v, gn, t[i], w[i]),
+            None => self.env.brake_limit(v, gn),
+        }
     }
 
     /// The maximum feasible **positive** longitudinal acceleration (net of the envelope's embedded
     /// drag) at which the tyre grip still meets the lateral demand `ay` (magnitude), m/s². Bisected
     /// on the envelope's `a_x` boundary (which decreases as `a_x` grows).
-    fn ax_forward(&self, v: f64, gn: f64, ay: f64, grip: f64) -> f64 {
-        if self.ay(v, 0.0, gn, grip) < ay {
+    fn ax_forward(&self, i: usize, v: f64, gn: f64, ay: f64, grip: f64) -> f64 {
+        if self.ay(i, v, 0.0, gn, grip) < ay {
             return 0.0; // the corner is already at/over the lateral limit — no accel budget
         }
-        let hi0 = self.env.accel_limit(v, gn);
-        if self.ay(v, hi0, gn, grip) >= ay {
+        let hi0 = self.accel_shoulder(i, v, gn);
+        if self.ay(i, v, hi0, gn, grip) >= ay {
             return hi0; // grip is not the limit here (the powertrain min caps it)
         }
         let mut lo = 0.0;
         let mut hi = hi0;
         for _ in 0..AX_INV_ITERS {
             let mid = 0.5 * (lo + hi);
-            if self.ay(v, mid, gn, grip) >= ay {
+            if self.ay(i, v, mid, gn, grip) >= ay {
                 lo = mid;
             } else {
                 hi = mid;
@@ -217,19 +252,19 @@ impl<'a> GgvGrip<'a> {
 
     /// The most-negative feasible longitudinal acceleration (braking, net of embedded drag) at which
     /// the tyre grip still meets the lateral demand `ay` (magnitude), m/s² (≤ 0).
-    fn ax_backward(&self, v: f64, gn: f64, ay: f64, grip: f64) -> f64 {
-        if self.ay(v, 0.0, gn, grip) < ay {
+    fn ax_backward(&self, i: usize, v: f64, gn: f64, ay: f64, grip: f64) -> f64 {
+        if self.ay(i, v, 0.0, gn, grip) < ay {
             return 0.0;
         }
-        let lo0 = -self.env.brake_limit(v, gn);
-        if self.ay(v, lo0, gn, grip) >= ay {
+        let lo0 = -self.brake_shoulder(i, v, gn);
+        if self.ay(i, v, lo0, gn, grip) >= ay {
             return lo0; // full braking grip available
         }
         let mut lo = lo0; // infeasible (most negative)
         let mut hi = 0.0; // feasible
         for _ in 0..AX_INV_ITERS {
             let mid = 0.5 * (lo + hi);
-            if self.ay(v, mid, gn, grip) >= ay {
+            if self.ay(i, v, mid, gn, grip) >= ay {
                 hi = mid;
             } else {
                 lo = mid;
@@ -254,7 +289,7 @@ impl<'a> GgvGrip<'a> {
     /// Whether speed `v` at station `i` is within the cornering grip limit (and the tyres are loaded).
     fn corner_feasible(&self, p: &T0Path, i: usize, v: f64) -> bool {
         let (ay_dem, gn) = demand_and_gn(p, i, v);
-        self.planted(v, gn) && ay_dem.abs() <= self.ay(v, 0.0, gn, p.grip[i])
+        self.planted(v, gn) && ay_dem.abs() <= self.ay(i, v, 0.0, gn, p.grip[i])
     }
 }
 
@@ -283,7 +318,7 @@ impl GripModel for GgvGrip<'_> {
         let u = v_i * v_i;
         let (ay_dem, gn) = demand_and_gn(p, i, v_i);
         let accel = if self.planted(v_i, gn) {
-            let ax_grip = self.ax_forward(v_i, gn, ay_dem.abs(), p.grip[i]);
+            let ax_grip = self.ax_forward(i, v_i, gn, ay_dem.abs(), p.grip[i]);
             // Slow-state coupling: the machine-thermal derate ∧ battery peak-power cap scale the
             // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1.
             let pt_net = self.veh.tractive_force(v_i) * self.scale(i) / self.veh.mass_kg
@@ -300,7 +335,7 @@ impl GripModel for GgvGrip<'_> {
         let u = v_ip1 * v_ip1;
         let (ay_dem, gn) = demand_and_gn(p, ip1, v_ip1);
         let a_dec = if self.planted(v_ip1, gn) {
-            let ax_brake = self.ax_backward(v_ip1, gn, ay_dem.abs(), p.grip[ip1]); // ≤ 0, net of drag
+            let ax_brake = self.ax_backward(ip1, v_ip1, gn, ay_dem.abs(), p.grip[ip1]); // ≤ 0, net of drag
             -ax_brake + G * p.sin_g[ip1]
         } else {
             self.env.drag_accel(v_ip1) + G * p.sin_g[ip1]
@@ -443,13 +478,49 @@ pub fn solve_into_ggv_scaled(
     path: &T0Path,
     ws: &mut T0Workspace,
 ) -> Result<f64, T0Error> {
-    if scale.len() != path.len() {
-        return Err(T0Error::WorkspaceMismatch {
-            workspace: scale.len(),
-            path: path.len(),
-        });
+    solve_into_ggv_coupled(veh, env, Some(scale), None, path, ws)
+}
+
+/// As [`solve_into_ggv`] but with the optional QSS slow-state couplings composed into one solve:
+///
+/// * `scale` — the per-station **traction scale** ∈ [0, 1] (machine-thermal derate ∧ battery
+///   peak-power cap), multiplying the powertrain traction ceiling in the forward step.
+/// * `tire` — the per-station **tyre state** `(T_tire[i] in K, wear[i] in mm)` the tyre-thermal march
+///   ([`crate::tire`]) fills; the tyre-grip boundary + longitudinal shoulders are indexed on the
+///   envelope's tyre-state axes so a hot / worn tyre solves a degraded lap.
+///
+/// Either may be `None` (uncoupled in that dimension). Both slices, when present, must be
+/// `path.len()` long. Zero-allocation.
+///
+/// # Errors
+/// As [`solve_into`]; also [`T0Error::WorkspaceMismatch`] if any supplied slice is not `path.len()`.
+pub fn solve_into_ggv_coupled(
+    veh: &T0Vehicle,
+    env: &GgvEnvelope,
+    scale: Option<&[f64]>,
+    tire: Option<(&[f64], &[f64])>,
+    path: &T0Path,
+    ws: &mut T0Workspace,
+) -> Result<f64, T0Error> {
+    let n = path.len();
+    let check = |len: usize| {
+        if len == n {
+            Ok(())
+        } else {
+            Err(T0Error::WorkspaceMismatch {
+                workspace: len,
+                path: n,
+            })
+        }
+    };
+    if let Some(s) = scale {
+        check(s.len())?;
     }
-    solve_generic(&GgvGrip::with_scale(veh, env, scale), path, ws)
+    if let Some((t, w)) = tire {
+        check(t.len())?;
+        check(w.len())?;
+    }
+    solve_generic(&GgvGrip::coupled(veh, env, scale, tire), path, ws)
 }
 
 /// Central segment longitudinal acceleration `(v_{i+1}² − v_i²)/2ds` at each station into `ax_out`

@@ -32,8 +32,9 @@ use outlap_schema::sim::{FzCoupling, Tier};
 use crate::error::{T0Error, T1Error};
 use crate::path::T0Path;
 use crate::result::{LapResult, LineDescriptor, T0Workspace};
-use crate::solver::{derive_ax, lap_result_from_ws, solve_into_ggv, solve_into_ggv_scaled};
+use crate::solver::{derive_ax, lap_result_from_ws, solve_into_ggv, solve_into_ggv_coupled};
 use crate::t1::{GgvEnvelope, MachineThermal, Pack, PackState, T1Vehicle, TrimInput, TrimOutcome};
+use crate::tire::{tire_slow_log, TireSlowLog, TireThermalMarch};
 use crate::vehicle::T0Vehicle;
 use crate::G;
 
@@ -122,6 +123,9 @@ pub struct QssLap {
     pub setup: Option<SetupLog>,
     /// Slow-state channels (present iff a coupled stack was supplied and active).
     pub slow: Option<SlowLog>,
+    /// Tyre-thermal slow-state channels (present iff a [`TireThermalMarch`] was supplied — the
+    /// representative front tyre's `T_s/T_c/T_g`, wear, damage, and grip multiplier).
+    pub tire: Option<TireSlowLog>,
     /// The g-g-g-v envelope the lap ran on (the returnable `lap.envelope`; `None` for the degenerate
     /// no-envelope path).
     pub envelope: Option<GgvEnvelope>,
@@ -234,44 +238,86 @@ fn march_slow_states(
 }
 
 /// Run the coupled (or uncoupled) velocity profile into `ws`, returning the lap time and — when a
-/// coupling is active — the filled `soc` / `temp_c` logs (else `None`).
+/// coupling is active — the filled slow-state logs (the electrified `SlowLog` and/or the tyre-thermal
+/// `TireSlowLog`; each `None` when its coupling was absent).
+///
+/// The electrified stack (`coupling`) and the tyre-thermal march (`tire`) both march along the
+/// previous pass and re-solve, composed into one outer iteration: each solve indexes the envelope on
+/// the marched `(T_tire, wear)` **and** scales the powertrain ceiling by the marched traction scale.
 fn solve_profile(
     t0: &T0Vehicle,
     env: &GgvEnvelope,
     coupling: Option<&SlowCoupling<'_>>,
+    tire: Option<&TireThermalMarch>,
     path: &T0Path,
     ws: &mut T0Workspace,
-) -> Result<(f64, Option<SlowLog>), T0Error> {
+) -> Result<(f64, Option<SlowLog>, Option<TireSlowLog>), T0Error> {
     let n = path.len();
-    let Some(c) = coupling else {
+    if coupling.is_none() && tire.is_none() {
         let lap_time = solve_into_ggv(t0, env, path, ws)?;
-        return Ok((lap_time, None));
-    };
-    let mut scale = vec![1.0; n];
+        return Ok((lap_time, None, None));
+    }
     let mut ax = vec![0.0; n];
+    // Electrified slow-state buffers (traction scale + SoC/temperature logs).
+    let mut scale = vec![1.0; n];
     let mut soc = vec![0.0; n];
     let mut temp_c = vec![0.0; n];
-    // Iteration 0: the uncoupled profile seeds the march.
+    // Tyre-thermal buffers: the envelope index `(T_tire, wear)` + the surfaced channels.
+    let mut t_tire_k = vec![tire.map_or(0.0, TireThermalMarch::seed_surface_k); n];
+    let mut wear_mm = vec![0.0; n];
+    let mut tire_log = tire_slow_log(n);
+
+    // Iteration 0: the uncoupled profile seeds the marches.
     let mut lap_time = solve_into_ggv(t0, env, path, ws)?;
     for _ in 0..OUTER_ITERS {
         derive_ax(path, &ws.v, &mut ax);
-        march_slow_states(c, env, path, &ws.v, &ax, &mut scale, &mut soc, &mut temp_c);
-        lap_time = solve_into_ggv_scaled(t0, env, &scale, path, ws)?;
+        if let Some(c) = coupling {
+            march_slow_states(c, env, path, &ws.v, &ax, &mut scale, &mut soc, &mut temp_c);
+        }
+        if let Some(tm) = tire {
+            tm.march(
+                t0,
+                env,
+                path,
+                &ws.v,
+                &ax,
+                &mut t_tire_k,
+                &mut wear_mm,
+                &mut tire_log,
+            );
+        }
+        let scale_ref = coupling.map(|_| scale.as_slice());
+        let tire_ref = tire.map(|_| (t_tire_k.as_slice(), wear_mm.as_slice()));
+        lap_time = solve_into_ggv_coupled(t0, env, scale_ref, tire_ref, path, ws)?;
     }
-    // Final march against the converged profile so the reported SoC / temperatures match it.
+    // Final marches against the converged profile so the reported channels match it.
     derive_ax(path, &ws.v, &mut ax);
-    march_slow_states(c, env, path, &ws.v, &ax, &mut scale, &mut soc, &mut temp_c);
-    // A coupling with no mapped units (`traction_energy` always `None`) leaves the states pinned —
-    // report it only when it actually did something (SoC moved or the winding heated). Station 0
-    // logs the ENTRY (initial) state, so any change shows up against it.
-    let active = soc.iter().any(|&s| (s - c.pack_state.soc).abs() > 0.0)
-        || temp_c.iter().any(|&t| (t - temp_c[0]).abs() > 0.0)
-        || scale.iter().any(|&s| s < 1.0);
-    let slow = active.then_some(SlowLog {
-        state_of_charge: soc,
-        machine_temp_c: temp_c,
+    let slow = coupling.and_then(|c| {
+        march_slow_states(c, env, path, &ws.v, &ax, &mut scale, &mut soc, &mut temp_c);
+        // A coupling with no mapped units (`traction_energy` always `None`) leaves the states pinned —
+        // report it only when it actually did something (SoC moved / winding heated / a scale applied).
+        let active = soc.iter().any(|&s| (s - c.pack_state.soc).abs() > 0.0)
+            || temp_c.iter().any(|&t| (t - temp_c[0]).abs() > 0.0)
+            || scale.iter().any(|&s| s < 1.0);
+        active.then(|| SlowLog {
+            state_of_charge: std::mem::take(&mut soc),
+            machine_temp_c: std::mem::take(&mut temp_c),
+        })
     });
-    Ok((lap_time, slow))
+    let tire_slow = tire.map(|tm| {
+        tm.march(
+            t0,
+            env,
+            path,
+            &ws.v,
+            &ax,
+            &mut t_tire_k,
+            &mut wear_mm,
+            &mut tire_log,
+        );
+        tire_log
+    });
+    Ok((lap_time, slow, tire_slow))
 }
 
 /// Solve a `t0` lap: the point-mass velocity profile on the envelope, with the slow-state coupling
@@ -284,6 +330,7 @@ pub fn solve_t0(
     t0: &T0Vehicle,
     env: GgvEnvelope,
     coupling: Option<&SlowCoupling<'_>>,
+    tire: Option<&TireThermalMarch>,
     path: &T0Path,
     line: LineDescriptor,
     resolved_hash: String,
@@ -292,7 +339,7 @@ pub fn solve_t0(
     flat_track: bool,
 ) -> Result<QssLap, QssError> {
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow) = solve_profile(t0, &env, coupling, path, &mut ws)?;
+    let (lap_time_s, slow, tire_slow) = solve_profile(t0, &env, coupling, tire, path, &mut ws)?;
     let lap = lap_result_from_ws(path, &ws, lap_time_s, line, resolved_hash, notes);
     Ok(QssLap {
         lap,
@@ -302,6 +349,7 @@ pub fn solve_t0(
         wheels: None,
         setup: None,
         slow,
+        tire: tire_slow,
         envelope: Some(env),
     })
 }
@@ -317,6 +365,7 @@ pub fn solve_t1(
     t0: &T0Vehicle,
     env: GgvEnvelope,
     coupling: Option<&SlowCoupling<'_>>,
+    tire: Option<&TireThermalMarch>,
     path: &T0Path,
     line: LineDescriptor,
     resolved_hash: String,
@@ -325,7 +374,7 @@ pub fn solve_t1(
     flat_track: bool,
 ) -> Result<QssLap, QssError> {
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow) = solve_profile(t0, &env, coupling, path, &mut ws)?;
+    let (lap_time_s, slow, tire_slow) = solve_profile(t0, &env, coupling, tire, path, &mut ws)?;
 
     // Re-trim at each solved station for the per-wheel channels + setup metrics.
     let n = path.len();
@@ -364,6 +413,7 @@ pub fn solve_t1(
             aero_front_share,
         }),
         slow,
+        tire: tire_slow,
         envelope: Some(env),
     })
 }

@@ -39,6 +39,7 @@ pub mod qss;
 pub mod result;
 pub mod solver;
 pub mod t1;
+pub mod tire;
 pub mod vehicle;
 
 pub use error::{T0Error, T1Error};
@@ -49,12 +50,16 @@ pub use qss::{
     WheelLog, WHEEL_ORDER,
 };
 pub use result::{LapResult, LineDescriptor, T0Workspace};
-pub use solver::{solve_into, solve_into_ggv, solve_into_ggv_scaled, solve_lap, solve_lap_ggv};
+pub use solver::{
+    solve_into, solve_into_ggv, solve_into_ggv_coupled, solve_into_ggv_scaled, solve_lap,
+    solve_lap_ggv,
+};
 pub use t1::{
     load_transfer, split_axle, AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint,
     GgvEnvelope, LoadTransferGeometry, MachineThermal, Pack, PackState, PrimaryDiff, StepOut,
     T1Powertrain, T1Vehicle, TireStateRes, TrimInput, TrimOutcome, TrimState,
 };
+pub use tire::{TireSlowLog, TireThermalMarch};
 pub use vehicle::{T0Options, T0Vehicle};
 
 /// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];

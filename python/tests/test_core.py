@@ -272,6 +272,39 @@ def test_t0_dataset_stays_s_only(catalunya: Track) -> None:
     assert "vertical_load_n" not in lap
 
 
+def test_tire_thermal_default_off_is_byte_identical(catalunya: Track) -> None:
+    # The tyre-thermal march (M5 PR5) is opt-in: the default lap must be byte-identical to a lap
+    # solved without the flag (the frozen envelope path is untouched).
+    base = solve_fast(F1_DIR, catalunya)
+    off = solve_fast(F1_DIR, catalunya, tire_thermal=False)
+    assert base.attrs["lap_time_s"] == off.attrs["lap_time_s"]
+    assert np.array_equal(base.v.to_numpy(), off.v.to_numpy())
+    assert "tire_surface_c" not in base
+
+
+def test_tire_thermal_opt_in_surfaces_channels_and_degrades(catalunya: Track) -> None:
+    # With the march opted in, the tyre slow-state channels appear and the lap is not faster than
+    # the frozen one (a hot/worn tyre never gains grip). The synthetic .tyr params are
+    # pre-calibration, so the effect's magnitude is not asserted — only its presence + direction.
+    frozen = solve_fast(F1_DIR, catalunya)
+    tt = solve_fast(F1_DIR, catalunya, tire_thermal=True)
+    for var in (
+        "tire_surface_c",
+        "tire_carcass_c",
+        "tire_gas_c",
+        "tire_wear_mm",
+        "tire_damage",
+        "tire_grip",
+    ):
+        assert var in tt, f"missing tyre channel {var}"
+    # Wear is monotone non-decreasing along the lap, and grip never exceeds 1.
+    wear = tt["tire_wear_mm"].to_numpy()
+    assert np.all(np.diff(wear) >= -1e-9)
+    assert float(tt["tire_grip"].to_numpy().max()) <= 1.0 + 1e-9
+    # A degrading tyre does not lap faster than the frozen reference.
+    assert tt.attrs["lap_time_s"] >= frozen.attrs["lap_time_s"] - 1e-6
+
+
 def test_fz_coupling_settable_via_sim_dict(catalunya: Track) -> None:
     # Regression: `fz_coupling` is Option<FzCoupling> (unset = tier-resolved), so it is absent
     # from the serialized sim base — the strict merge must still accept the documented override

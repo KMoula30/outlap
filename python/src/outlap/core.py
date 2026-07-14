@@ -181,6 +181,41 @@ def lap_dataset(lap: Lap) -> xr.Dataset:
             {"units": "°C", "long_name": "machine winding temperature"},
         )
 
+    # Tyre-thermal slow-state channels (only when `tire_thermal=True` opted the march in). The
+    # representative front tyre's reduced Farroni-TRT ring + Archard wear marched along the profile.
+    tire_surface = lap.tire_surface_c()
+    if tire_surface is not None:
+        data["tire_surface_c"] = (
+            "s",
+            tire_surface,
+            {"units": "°C", "long_name": "tyre tread-surface temperature T_s"},
+        )
+        data["tire_carcass_c"] = (
+            "s",
+            lap.tire_carcass_c(),
+            {"units": "°C", "long_name": "tyre carcass (bulk) temperature T_c"},
+        )
+        data["tire_gas_c"] = (
+            "s",
+            lap.tire_gas_c(),
+            {"units": "°C", "long_name": "tyre inflation-gas temperature T_g"},
+        )
+        data["tire_wear_mm"] = (
+            "s",
+            lap.tire_wear_mm(),
+            {"units": "mm", "long_name": "tyre tread wear depth w"},
+        )
+        data["tire_damage"] = (
+            "s",
+            lap.tire_damage(),
+            {"units": "1", "long_name": "tyre irreversible thermal damage D"},
+        )
+        data["tire_grip"] = (
+            "s",
+            lap.tire_grip(),
+            {"units": "1", "long_name": "tyre total grip multiplier λ_μ,total"},
+        )
+
     return xr.Dataset(
         data,
         coords=coords,
@@ -207,6 +242,7 @@ def solve_lap_dataset(
     sim: dict[str, object] | None = None,
     overrides: dict[str, bool | int | float | str] | None = None,
     conditions: dict[str, object] | None = None,
+    tire_thermal: bool = False,
 ) -> xr.Dataset:
     """Solve a QSS lap and return it directly as a labelled dataset (see :func:`lap_dataset`).
 
@@ -257,6 +293,7 @@ def solve_lap_dataset(
         conditions=conditions,
         tier=tier,
         sim=sim,
+        tire_thermal=tire_thermal,
     )
     return lap_dataset(lap)
 
