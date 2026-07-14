@@ -1184,9 +1184,10 @@ pub(crate) mod tests {
 
     const SLICK: &str = include_str!("../../../outlap-schema/tests/fixtures/tyr/slick.tyr.yaml");
 
-    /// Assemble a rear-driven downforce car from an in-memory fixture (constant aero — the envelope
-    /// generator does not need a ride-height map to exercise the trim boundary search).
-    pub(crate) fn sample_car() -> T1Vehicle {
+    /// The in-memory fixture loader shared by the T1/T0 sample builders (rear-driven downforce car,
+    /// constant aero — the envelope generator does not need a ride-height map to exercise the trim
+    /// boundary search).
+    pub(crate) fn sample_loader() -> MemLoader {
         // Rev-limited at ≈12 000 rpm with a 9:1 ratio → a realistic ≈45 m/s top speed (so the v axis
         // does not span an implausible flat-torque range).
         let ptm = "schema: ptm/1.0\nkind: drive_unit\n\
@@ -1201,12 +1202,30 @@ pub(crate) mod tests {
             tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
             drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{fixed_ratio: 9.0}], wheels: [RL, RR]}]}\n\
             brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}, rear: {thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}}}\n";
-        let loader = MemLoader::new()
+        MemLoader::new()
             .with("vehicle.yaml", veh)
             .with("ptm/u.ptm.yaml", ptm)
-            .with("tyr/slick.tyr.yaml", SLICK);
+            .with("tyr/slick.tyr.yaml", SLICK)
+    }
+
+    /// Assemble the sample T1 vehicle from [`sample_loader`].
+    pub(crate) fn sample_car() -> T1Vehicle {
+        let loader = sample_loader();
         let rv = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
         T1Vehicle::assemble(&rv, &Conditions::default(), &loader, false).unwrap()
+    }
+
+    /// Assemble the point-mass T0 reduction of the same sample vehicle (for the tyre-march tests).
+    pub(crate) fn sample_t0() -> crate::vehicle::T0Vehicle {
+        let loader = sample_loader();
+        let rv = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default()).unwrap();
+        crate::vehicle::T0Vehicle::assemble(
+            &rv,
+            &Conditions::default(),
+            &loader,
+            &crate::vehicle::T0Options::default(),
+        )
+        .unwrap()
     }
 
     pub(crate) fn small_res() -> EnvelopeRes {

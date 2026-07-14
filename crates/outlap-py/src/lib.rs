@@ -35,7 +35,7 @@ use pyo3::prelude::*;
 use outlap_qss::{
     solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, MachineThermal, Pack,
     PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle,
-    WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
+    TireSlowLog, TireStateRes, TireThermalMarch, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
 };
 use outlap_raceline::{
     min_curvature_line, min_curvature_line_weighted, raceline_stations, RacelineOptions,
@@ -533,6 +533,7 @@ fn time_weighted(
             &t0v,
             env.clone(),
             None,
+            None,
             &path,
             LineDescriptor::Centerline,
             hash.clone(),
@@ -661,6 +662,14 @@ pub struct Lap {
     // Slow-state channels (per station); `None` unless a coupled electrified stack was active.
     state_of_charge: Option<Vec<f64>>,
     machine_temp_c: Option<Vec<f64>>,
+    // Tyre-thermal slow-state channels (per station, the representative front tyre); `None` unless
+    // the tyre-thermal march was opted in (`tire_thermal=True`).
+    tire_surface_c: Option<Vec<f64>>,
+    tire_carcass_c: Option<Vec<f64>>,
+    tire_gas_c: Option<Vec<f64>>,
+    tire_wear_mm: Option<Vec<f64>>,
+    tire_damage: Option<Vec<f64>>,
+    tire_grip: Option<Vec<f64>>,
     envelope: Option<GgvEnvelope>,
     /// Total lap time, s.
     #[pyo3(get)]
@@ -772,6 +781,39 @@ impl Lap {
         self.machine_temp_c
             .as_ref()
             .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Representative front-tyre tread-surface temperature per station (°C), or `None` unless the
+    /// tyre-thermal march was opted in (`tire_thermal=True`).
+    fn tire_surface_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.tire_surface_c
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Representative front-tyre carcass (bulk) temperature per station (°C), or `None`.
+    fn tire_carcass_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.tire_carcass_c
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Representative front-tyre inflation-gas temperature per station (°C), or `None`.
+    fn tire_gas_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.tire_gas_c.as_ref().map(|v| v.clone().into_pyarray(py))
+    }
+    /// Representative front-tyre tread wear per station (mm, monotone), or `None`.
+    fn tire_wear_mm<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.tire_wear_mm
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Representative front-tyre irreversible thermal damage per station (0..1), or `None`.
+    fn tire_damage<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.tire_damage
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Representative front-tyre total grip multiplier `λ_μ,total` per station, or `None`.
+    fn tire_grip<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.tire_grip.as_ref().map(|v| v.clone().into_pyarray(py))
     }
     /// The g-g-g-v envelope this lap ran on (queryable), or `None` for the degenerate path.
     #[getter]
@@ -1171,7 +1213,7 @@ fn flat4(v: &[[f64; 4]]) -> Vec<f64> {
 /// The call holds the GIL for its duration (envelope generation is a seconds-scale cold step in a
 /// debug build); releasing it is deferred to the batch/sweep API milestone.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = false))]
 #[allow(clippy::too_many_arguments)]
 fn solve_lap(
     vehicle_dir: &str,
@@ -1184,6 +1226,7 @@ fn solve_lap(
     conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
     tier: Option<&str>,
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tire_thermal: bool,
 ) -> PyResult<Lap> {
     check_ds(ds_m)?;
     let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
@@ -1230,7 +1273,21 @@ fn solve_lap(
             // Native-edge sidecar decode: the aero map + `.ptm` tables (skipped with a note when
             // the files are not present).
             let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
-            let env = cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?;
+            // With the tyre-thermal march opted in the envelope needs the (T_tire, wear) axes (a
+            // full re-solve across the axis product — not cached; see PR4's recorded build cost).
+            // Otherwise the cheap frozen envelope (bit-identical to pre-M5).
+            let env = if tire_thermal {
+                let coupling = sim_cfg.resolved_fz_coupling();
+                GgvEnvelope::generate_with_tire_state(
+                    &t1v,
+                    &sim_cfg.envelope,
+                    coupling,
+                    TireStateRes::default(),
+                )
+                .map_err(err)?
+            } else {
+                cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?
+            };
             let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
             notes.extend(t0v.notes().iter().cloned());
             notes.extend(t1v.notes().iter().cloned());
@@ -1244,11 +1301,19 @@ fn solve_lap(
                 pack: pack.clone(),
                 pack_state: *state,
             });
+            // Tyre-thermal march (M5 PR5): opt-in, so the default lap stays bit-identical to pre-M5
+            // (the synthetic .tyr params are pre-calibration — the default flips on at PR8).
+            let tire_march = if tire_thermal {
+                Some(build_tire_march(&t1v, &resolved, &conditions, &vl, &mut notes)?)
+            } else {
+                None
+            };
             if wanted == Tier::T0 {
                 solve_t0(
                     &t0v,
                     env,
                     coupling.as_ref(),
+                    tire_march.as_ref(),
                     &path,
                     line,
                     hash,
@@ -1263,6 +1328,7 @@ fn solve_lap(
                     &t0v,
                     env,
                     coupling.as_ref(),
+                    tire_march.as_ref(),
                     &path,
                     line,
                     hash,
@@ -1296,6 +1362,7 @@ fn qss_lap_to_py(qss: QssLap, track: &Track) -> Lap {
     let wheels: Option<&WheelLog> = qss.wheels.as_ref();
     let setup: Option<&SetupLog> = qss.setup.as_ref();
     let slow: Option<&SlowLog> = qss.slow.as_ref();
+    let tire: Option<&TireSlowLog> = qss.tire.as_ref();
     Lap {
         s: lap.s,
         v: lap.v,
@@ -1314,6 +1381,12 @@ fn qss_lap_to_py(qss: QssLap, track: &Track) -> Lap {
         aero_front_share: setup.map(|s| s.aero_front_share.clone()),
         state_of_charge: slow.map(|s| s.state_of_charge.clone()),
         machine_temp_c: slow.map(|s| s.machine_temp_c.clone()),
+        tire_surface_c: tire.map(|t| t.surface_temp_c.clone()),
+        tire_carcass_c: tire.map(|t| t.carcass_temp_c.clone()),
+        tire_gas_c: tire.map(|t| t.gas_temp_c.clone()),
+        tire_wear_mm: tire.map(|t| t.wear_mm.clone()),
+        tire_damage: tire.map(|t| t.damage.clone()),
+        tire_grip: tire.map(|t| t.grip_scale.clone()),
         envelope: qss.envelope,
         lap_time_s: lap.lap_time_s,
         tier: format!("{:?}", qss.tier).to_lowercase(),
@@ -1449,6 +1522,42 @@ fn build_tire_thermal(
         &rear.wear,
         axle_geom(&front),
         axle_geom(&rear),
+        conditions.air.temperature_c,
+        conditions.track_surface_c,
+    ))
+}
+
+/// Build the QSS tyre-thermal march (M5 PR5) — the representative front-tyre reduced Farroni-TRT ring
+/// with Archard wear the T0/T1 slow-state coupling advances segment-to-segment along the velocity
+/// profile, producing the per-station `(T_tire, wear)` the envelope's tyre-state axes index. Uses the
+/// same representative front ring the tyre-state envelope is built from (`T1Vehicle::tire_thermal`) and
+/// the front-tyre geometry (with the documented racing-slick fallbacks). Seeds warm at the grip optimum
+/// so the reference slice reproduces the frozen-tyre lap bit-for-bit, then warms and wears over the lap.
+fn build_tire_march(
+    t1v: &T1Vehicle,
+    resolved: &ResolvedVehicle,
+    conditions: &Conditions,
+    vl: &FsLoader,
+    notes: &mut Vec<String>,
+) -> PyResult<TireThermalMarch> {
+    let (front, _) = load_tyr(resolved.spec.tires.front.as_str(), vl).map_err(schema_err)?;
+    let c = &front.mf61.0;
+    notes.push(
+        "QSS tyre-thermal march (M5 PR5): a representative front-tyre reduced Farroni-TRT ring + \
+         Archard wear advanced segment-to-segment along the velocity profile (the third QSS slow \
+         subsystem). The evolving (T_tire, wear) index the g-g-g-v envelope's tyre-state axes, so a \
+         QSS lap responds to tyre temperature + wear. Seeds warm at the grip optimum (reference slice \
+         reproduces the frozen-tyre lap); thermal/wear parameters are synthetic pending FastF1 inverse \
+         calibration (M5 PR7/PR8)."
+            .to_owned(),
+    );
+    Ok(TireThermalMarch::new(
+        t1v.tire_thermal().clone(),
+        c.get("UNLOADED_RADIUS").copied(),
+        c.get("WIDTH").copied(),
+        c.get("VERTICAL_STIFFNESS").copied(),
+        front.thermal.t_opt,
+        front.thermal.t_cold,
         conditions.air.temperature_c,
         conditions.track_surface_c,
     ))
@@ -1865,6 +1974,7 @@ fn solve_transient_lap(
     let reference = solve_t0(
         &t0v,
         env,
+        None,
         None,
         &path,
         line_descriptor,

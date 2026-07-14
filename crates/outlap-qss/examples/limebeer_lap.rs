@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &t0,
         env,
         None,
+        None,
         &path,
         LineDescriptor::MinCurvature {
             ds_m: RacelineOptions::default().ds_m,

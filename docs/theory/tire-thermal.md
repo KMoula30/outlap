@@ -221,3 +221,56 @@ trajectory on the static grip window `λ_μ(T_s)` — the tyre climbing the curv
 Integration tests (`crates/outlap-transient/tests/tire_thermal.rs`) assert the warm-up (thermal-only,
 wear held negligible), the wear cliff, exact energy closure across the slow-clock window, zero
 allocations per step, and bit-identical determinism; the frozen (no-stack) path is asserted unchanged.
+
+## QSS tier integration — marching the ring along the velocity profile (PR5)
+
+The same pure `step(dt, drivers)` ring drives the quasi-static (T0/T1) tier, but the QSS solve has no
+fast loop and no per-wheel slip solution — it is a point-mass forward/backward velocity sweep on the
+g-g-g-v envelope. So the QSS coupling (`crates/outlap-qss/src/tire.rs`, `TireThermalMarch`) advances a
+**single representative tyre** (the front-tyre ring the envelope's tyre-state axes are built from)
+**segment-to-segment** along the solved profile (§6.1 explicit Euler over the quasi-static solution),
+and the evolving `(T_tire, wear)` **index the envelope's tyre-state axes** (`ay_boundary_at`,
+`accel_limit_at`, `brake_limit_at`) so the re-solve sees a physically degraded lap. This is the
+[Decision #49 (D-M5-2)][dec49] tyre-state axes in action — the differentiator that makes the QSS
+tier stint-capable. The coupling reuses the existing bounded outer march (solve → march → re-solve,
+`OUTER_ITERS` times) that the electrified slow-states already run.
+
+**Reduced-slip frictional-power closure.** `Q_fric = p_t·(|F_x·V_sx| + |F_y·V_sy|)` needs the
+contact-patch sliding velocities `V_s`, which the T2 tier reads from the tyre model but the point-mass
+QSS solve does not resolve. The QSS march closes it with the standard reduced form `V_s = κ_ref·v·ρ`,
+where `ρ = F/F_cap ∈ [0, 1]` is the friction-circle **utilisation** (the tyre force
+`F = √(F_x² + F_y²)` demanded to hold the station's `(a_x, a_y)` over the envelope's local grip
+capacity `F_cap = m·a_y,boundary`) and `κ_ref` (`SLIP_REFERENCE`) is a reference slip at the grip limit.
+The frictional power then reads `P_slide = F·V_s = κ_ref·v·F²/F_cap` — rising with speed, force, and
+utilisation, zero when coasting straight. Like the carcass `HYSTERESIS_LOSS_FACTOR`, `κ_ref` is a
+documented modelling constant; the absolute frictional-heat magnitude is set by the FastF1 inverse
+calibration (M5 PR7/PR8). The carcass heat `Q_hyst = c_h·F_z·(F_z/k_z)·(v/R)` and the contact fraction
+`a_cp = F_z/(p·A_ext)` are formed exactly as in the T2 tier, on the representative tyre's `¼` share of
+the point-mass normal load.
+
+**Reference-slice bit-identity.** Seeded warm at the grip optimum (`T_s = T_c = T_opt`,
+`T_g = T_cold`), the march starts at the envelope's reference `(T_opt, wear = 0)` slice, which
+reproduces the frozen-tyre envelope bit-for-bit (the PR4 invariant) — so a lap that never leaves the
+reference is byte-identical to the pre-M5 QSS lap, and the coupling is **opt-in** (`tire_thermal=True`)
+until calibration, exactly like the T2 stack. Under load the surface drifts within the window and the
+tread wears, and the re-solve indexes the degraded grip. Property tests
+(`crates/outlap-qss/src/tire.rs`) assert the cold-seed warm-up, monotone wear along the lap, the
+reference-slice bit-identity through the solver, that a hot/worn tyre never laps faster than the frozen
+reference, and bit-identical determinism.
+
+![QSS tyre-thermal march on a real lap](img/tire_march_lap.png)
+
+The figure is drawn from the real T0 solver (`crates/outlap-qss/examples/tire_march_lap.rs`, plotted by
+`python/tools/plot_tire_march.py`) on the `limebeer_2014_f1` car at Catalunya. **(a)** The tyre-thermal
+lap diverges from the frozen envelope as the tyres degrade. **(b)** The 3-node ring warms
+segment-to-segment — the gas heats from cold, the surface drifts within the window under load.
+**(c)** Archard tread wear crosses the cliff onset `w_c` (drawn at an illustrative `k_w`, since the
+reference `.tyr` wear coefficient is a pre-calibration placeholder). **(d)** The total grip multiplier
+`λ_μ,total` the re-solve indexes, declining through the grip window and wear cliff.
+
+![The tyre-state grip surface the QSS lap indexes](img/tire_march_axes.png)
+
+The grip surface the marched `(T_tire, wear)` index: **(a)** peak lateral grip `a_y(T_tire, wear)`,
+**(b)** the grip window (peak at `T_opt`), **(c)** the wear cliff through the C¹ sigmoid at `w_c`.
+
+[dec49]: ../HANDOFF.md
