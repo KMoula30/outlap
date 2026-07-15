@@ -264,6 +264,56 @@ fn the_wired_lap_is_deterministic() {
 }
 
 #[test]
+fn run_laps_carries_the_tyre_state_across_lap_boundaries() {
+    // A multi-lap skidpad stint (M5 PR6): the per-wheel ring keeps warming and wearing across each
+    // lap boundary in one continuous run — no re-seed — so end-of-lap wear grows lap over lap and the
+    // tyres warm out of the 60 °C cold seed over the stint.
+    let r = 100.0;
+    let lap_length = 2.0 * PI * r;
+    let n_laps = 3usize;
+    let mut solver = skidpad_solver(60.0, 2.0e-6, r, 28.0);
+    let (lap, lap_end_idx) = solver.run_laps(lap_length, n_laps, 200_000);
+
+    assert_eq!(lap_end_idx.len(), n_laps, "all requested laps completed");
+    assert!(
+        !lap.tire_wear_mm.is_empty(),
+        "tyre-thermal channels recorded"
+    );
+    // Lap boundaries strictly increase and index into the recorded trace.
+    for pair in lap_end_idx.windows(2) {
+        assert!(pair[1] > pair[0], "lap boundaries strictly increase");
+    }
+    assert!(
+        *lap_end_idx.last().unwrap() < lap.len(),
+        "boundaries index into the trace"
+    );
+    // End-of-lap wear grows lap over lap (the state carries; no reset).
+    let wear_at = |i: usize| lap.tire_wear_mm[i].iter().sum::<f64>() / 4.0;
+    let mut prev = 0.0;
+    for &idx in &lap_end_idx {
+        let w = wear_at(idx);
+        assert!(
+            w >= prev - 1e-9,
+            "end-of-lap wear never falls across the stint"
+        );
+        prev = w;
+    }
+    assert!(
+        wear_at(*lap_end_idx.last().unwrap()) > wear_at(lap_end_idx[0]),
+        "later laps wear more than the first (continuity, no reset)"
+    );
+    // The tyres warm out of the 60 °C cold seed over the stint (warm-up carries across laps too).
+    let surf_end = {
+        let row = lap.tire_surface_c[*lap_end_idx.last().unwrap()];
+        row.iter().sum::<f64>() / 4.0
+    };
+    assert!(
+        surf_end > 63.0,
+        "the tyres warmed over the stint: {surf_end:.1} °C"
+    );
+}
+
+#[test]
 fn the_frozen_default_is_unchanged_by_the_thermal_seam() {
     // A solver *without* a stack attached records no tyre-thermal channels and runs the frozen-tyre
     // path — the parity/alloc/throughput baselines depend on this being byte-identical to pre-M5.

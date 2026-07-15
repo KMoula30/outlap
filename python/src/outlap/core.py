@@ -19,13 +19,17 @@ from outlap_core import (
     DEFAULT_DS_M,
     Envelope,
     Lap,
+    QssStint,
     Raceline,
     Track,
     TransientLap,
+    TransientStint,
     Tyre,
     min_curvature,
     solve_lap,
+    solve_stint,
     solve_transient_lap,
+    solve_transient_stint,
     time_weighted,
     vehicle_report,
 )
@@ -34,19 +38,26 @@ __all__ = [
     "DEFAULT_DS_M",
     "Envelope",
     "Lap",
+    "QssStint",
     "Raceline",
     "Track",
     "TransientLap",
+    "TransientStint",
     "TyreForces",
     "Tyre",
     "lap_dataset",
     "min_curvature",
     "solve_lap",
     "solve_lap_dataset",
+    "solve_stint",
+    "solve_stint_dataset",
     "solve_transient_lap",
+    "solve_transient_stint",
+    "stint_dataset",
     "time_weighted",
     "track_dataset",
     "transient_lap_dataset",
+    "transient_stint_dataset",
     "tyre_forces",
     "vehicle_report",
 ]
@@ -445,6 +456,41 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
             {"units": "°C", "long_name": "pack temperature"},
         )
 
+    # Per-wheel tyre-thermal channels (only when the M5 tyre-thermal stack was attached,
+    # `tire_thermal=True`): the reduced Farroni-TRT ring + Archard wear stepped on the slow clock.
+    tire_surface = lap.tire_surface_c()
+    if tire_surface is not None:
+        data["tire_surface_c"] = (
+            ("time", "wheel"),
+            tire_surface,
+            {"units": "°C", "long_name": "tyre tread-surface temperature T_s"},
+        )
+        data["tire_carcass_c"] = (
+            ("time", "wheel"),
+            lap.tire_carcass_c(),
+            {"units": "°C", "long_name": "tyre carcass (bulk) temperature T_c"},
+        )
+        data["tire_gas_c"] = (
+            ("time", "wheel"),
+            lap.tire_gas_c(),
+            {"units": "°C", "long_name": "tyre inflation-gas temperature T_g"},
+        )
+        data["tire_wear_mm"] = (
+            ("time", "wheel"),
+            lap.tire_wear_mm(),
+            {"units": "mm", "long_name": "tyre tread wear depth w"},
+        )
+        data["tire_damage"] = (
+            ("time", "wheel"),
+            lap.tire_damage(),
+            {"units": "1", "long_name": "tyre irreversible thermal damage D"},
+        )
+        data["tire_grip"] = (
+            ("time", "wheel"),
+            lap.tire_grip(),
+            {"units": "1", "long_name": "tyre total grip multiplier λ_μ,total"},
+        )
+
     return xr.Dataset(
         data,
         coords=coords,
@@ -490,4 +536,250 @@ def track_dataset(track: Track, ds_m: float = 10.0) -> xr.Dataset:
             # int, not bool: netCDF attrs have no bool type.
             "closed": int(track.is_closed()),
         },
+    )
+
+
+def stint_dataset(stint: QssStint) -> xr.Dataset:
+    """Convert a solved QSS stint into a labelled ``(lap, s)`` :class:`xarray.Dataset`.
+
+    Every lap shares the arc-length station grid (the same line), so the whole stint is one clean
+    ``(lap, s)`` block. The per-lap ``lap_time_s`` is the headline — monotone pace loss as the tyres
+    wear — and, when the tyre march was on, the representative front tyre's ``T_s``/``T_c``/``T_g``,
+    wear, damage, and total grip multiplier evolve over both axes: warm-up along ``s`` on lap 1, and
+    degradation across ``lap`` as wear accumulates with no reset at the lap boundary.
+    """
+    laps = np.arange(1, stint.n_laps + 1)
+    data: dict[str, object] = {
+        "lap_time_s": (
+            "lap",
+            stint.lap_time_s(),
+            {"units": "s", "long_name": "lap time"},
+        ),
+        "v": (("lap", "s"), stint.v(), {"units": "m/s", "long_name": "speed"}),
+    }
+    coords: dict[str, object] = {
+        "lap": ("lap", laps, {"long_name": "lap number"}),
+        "s": ("s", stint.s(), {"units": "m", "long_name": "arc length"}),
+    }
+
+    tire_surface = stint.tire_surface_c()
+    if tire_surface is not None:
+        data["tire_surface_c"] = (
+            ("lap", "s"),
+            tire_surface,
+            {"units": "°C", "long_name": "tyre tread-surface temperature T_s"},
+        )
+        data["tire_carcass_c"] = (
+            ("lap", "s"),
+            stint.tire_carcass_c(),
+            {"units": "°C", "long_name": "tyre carcass (bulk) temperature T_c"},
+        )
+        data["tire_gas_c"] = (
+            ("lap", "s"),
+            stint.tire_gas_c(),
+            {"units": "°C", "long_name": "tyre inflation-gas temperature T_g"},
+        )
+        data["tire_wear_mm"] = (
+            ("lap", "s"),
+            stint.tire_wear_mm(),
+            {"units": "mm", "long_name": "tyre tread wear depth w"},
+        )
+        data["tire_damage"] = (
+            ("lap", "s"),
+            stint.tire_damage(),
+            {"units": "1", "long_name": "tyre irreversible thermal damage D"},
+        )
+        data["tire_grip"] = (
+            ("lap", "s"),
+            stint.tire_grip(),
+            {"units": "1", "long_name": "tyre total grip multiplier λ_μ,total"},
+        )
+
+    return xr.Dataset(
+        data,
+        coords=coords,
+        attrs={
+            "tier": stint.tier,
+            "resolved_hash": stint.resolved_hash,
+            "fz_coupling": stint.fz_coupling,
+            # int, not bool: netCDF attrs have no bool type.
+            "flat_track": int(stint.flat_track),
+            "n_laps": stint.n_laps,
+            "notes": tuple(stint.notes),
+        },
+    )
+
+
+def transient_stint_dataset(stint: TransientStint) -> xr.Dataset:
+    """Convert a solved transient (T2) stint into a ``lap``-indexed summary :class:`xarray.Dataset`.
+
+    A T2 stint integrates continuously — a variable number of fixed steps per lap — so it surfaces
+    per-lap **summaries** rather than a time series: the per-lap ``lap_time_s``, the per-wheel
+    end-of-lap and peak tyre state, and the end-of-lap pack state. The slow states (per-wheel
+    tyre-thermal ring + wear, battery SoC) carry across the start/finish line with no reset.
+    """
+    laps = np.arange(1, stint.n_laps + 1)
+    data: dict[str, object] = {
+        "lap_time_s": (
+            "lap",
+            stint.lap_time_s(),
+            {"units": "s", "long_name": "lap time"},
+        ),
+    }
+    coords: dict[str, object] = {"lap": ("lap", laps, {"long_name": "lap number"})}
+
+    tire_surface = stint.tire_surface_c()
+    if tire_surface is not None:
+        coords["wheel"] = (
+            "wheel",
+            list(stint.wheels),
+            {"long_name": "wheel (FL, FR, RL, RR)"},
+        )
+        data["tire_surface_c"] = (
+            ("lap", "wheel"),
+            tire_surface,
+            {
+                "units": "°C",
+                "long_name": "end-of-lap tyre tread-surface temperature T_s",
+            },
+        )
+        data["tire_peak_surface_c"] = (
+            ("lap", "wheel"),
+            stint.tire_peak_surface_c(),
+            {
+                "units": "°C",
+                "long_name": "peak tyre tread-surface temperature over the lap",
+            },
+        )
+        data["tire_carcass_c"] = (
+            ("lap", "wheel"),
+            stint.tire_carcass_c(),
+            {"units": "°C", "long_name": "end-of-lap tyre carcass temperature T_c"},
+        )
+        data["tire_gas_c"] = (
+            ("lap", "wheel"),
+            stint.tire_gas_c(),
+            {
+                "units": "°C",
+                "long_name": "end-of-lap tyre inflation-gas temperature T_g",
+            },
+        )
+        data["tire_wear_mm"] = (
+            ("lap", "wheel"),
+            stint.tire_wear_mm(),
+            {"units": "mm", "long_name": "end-of-lap tyre tread wear depth w"},
+        )
+        data["tire_damage"] = (
+            ("lap", "wheel"),
+            stint.tire_damage(),
+            {
+                "units": "1",
+                "long_name": "end-of-lap tyre irreversible thermal damage D",
+            },
+        )
+        data["tire_grip"] = (
+            ("lap", "wheel"),
+            stint.tire_grip(),
+            {
+                "units": "1",
+                "long_name": "end-of-lap tyre total grip multiplier λ_μ,total",
+            },
+        )
+
+    soc = stint.state_of_charge()
+    if soc is not None:
+        data["state_of_charge"] = (
+            "lap",
+            soc,
+            {"units": "1", "long_name": "end-of-lap pack state of charge"},
+        )
+        data["pack_temp_c"] = (
+            "lap",
+            stint.pack_temp_c(),
+            {"units": "°C", "long_name": "end-of-lap pack temperature"},
+        )
+
+    return xr.Dataset(
+        data,
+        coords=coords,
+        attrs={
+            "tier": stint.tier,
+            "resolved_hash": stint.resolved_hash,
+            "fz_coupling": stint.fz_coupling,
+            "dt_s": stint.dt_s,
+            "integrator_order": stint.integrator_order,
+            "speed_margin": stint.speed_margin,
+            # int, not bool: netCDF attrs have no bool type.
+            "flat_track": int(stint.flat_track),
+            "completed": int(stint.completed),
+            "requested_laps": stint.requested_laps,
+            "n_laps": stint.n_laps,
+            "notes": tuple(stint.notes),
+        },
+    )
+
+
+def solve_stint_dataset(
+    vehicle_dir: str,
+    line: Track | Raceline,
+    *,
+    n_laps: int,
+    ds_m: float = DEFAULT_DS_M,
+    tier: str | None = None,
+    sim: dict[str, object] | None = None,
+    overrides: dict[str, bool | int | float | str] | None = None,
+    conditions: dict[str, object] | None = None,
+    tire_thermal: bool = True,
+    initial_tire_temp_c: float | None = None,
+) -> xr.Dataset:
+    """Solve a multi-lap **stint** and return it as a labelled dataset.
+
+    The tyre-thermal slow state (and, for ``tier="t2"``, the battery SoC) carries across every lap
+    boundary, so the tyres warm, wear, and degrade over the run. ``initial_tire_temp_c`` seeds the
+    tyres cold-uniform (the out-lap warm-up); the default seeds warm at the grip optimum.
+
+    ``tier="t2"`` runs the transient tier and returns the per-lap summary of
+    :func:`transient_stint_dataset` (dims ``lap``/``wheel``); the QSS tiers (``"t0"``/``"t1"``) return
+    the ``(lap, s)`` dataset of :func:`stint_dataset`. ``line`` may be a :class:`Track` (centerline)
+    or a generated :class:`Raceline`.
+    """
+    if isinstance(line, Raceline):
+        track, raceline_ds_m = line.line(), line.ds_m
+        raceline_generator, raceline_iterations = line.generator, line.iterations
+    else:
+        track, raceline_ds_m = line, None
+        raceline_generator, raceline_iterations = None, None
+    if tier == "t2":
+        return transient_stint_dataset(
+            solve_transient_stint(
+                vehicle_dir,
+                track,
+                n_laps,
+                ds_m=ds_m,
+                raceline_ds_m=raceline_ds_m,
+                raceline_generator=raceline_generator,
+                raceline_iterations=raceline_iterations,
+                overrides=overrides,
+                conditions=conditions,
+                sim=sim,
+                tire_thermal=tire_thermal,
+                initial_tire_temp_c=initial_tire_temp_c,
+            )
+        )
+    return stint_dataset(
+        solve_stint(
+            vehicle_dir,
+            track,
+            n_laps,
+            ds_m=ds_m,
+            raceline_ds_m=raceline_ds_m,
+            raceline_generator=raceline_generator,
+            raceline_iterations=raceline_iterations,
+            overrides=overrides,
+            conditions=conditions,
+            tier=tier,
+            sim=sim,
+            tire_thermal=tire_thermal,
+            initial_tire_temp_c=initial_tire_temp_c,
+        )
     )

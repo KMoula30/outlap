@@ -273,4 +273,45 @@ reference `.tyr` wear coefficient is a pre-calibration placeholder). **(d)** The
 The grip surface the marched `(T_tire, wear)` index: **(a)** peak lateral grip `a_y(T_tire, wear)`,
 **(b)** the grip window (peak at `T_opt`), **(c)** the wear cliff through the C¹ sigmoid at `w_c`.
 
+## Multi-lap stints (PR6)
+
+A single lap seeds the tyre state fresh; a **stint** runs `n_laps` laps back-to-back and carries the
+slow state across every lap boundary — the §6.1 continuity that makes the tiers stint-capable. The two
+tiers reach it differently, matching their structure:
+
+- **QSS (T0/T1).** Each lap is its own forward/backward velocity-profile solve, so the stint loops the
+  solve `n_laps` times, re-seeding the representative-tyre march from the previous lap's **terminal**
+  state (`TireThermalMarch::with_state`, fed the `QssLap::tire_terminal` the profile solver now
+  returns). The tyre-state g-g-g-v envelope is built **once** and reused, so a stint costs one envelope
+  build plus `n_laps` cheap re-solves. The result is a clean `(lap, s)` block — every lap shares the
+  station grid — with the per-lap lap time as the headline.
+- **Transient (T2).** The closed-loop tier integrates in time, so a stint is **one continuous run** of
+  `n_laps · L` arc length (`TransientSolver::run_laps`). The target-line table wraps `s` into `[0, L]`,
+  so the road geometry and speed reference repeat each lap while the per-wheel ring + wear and the
+  battery SoC keep integrating across the start/finish line — no re-seed. Per-lap summaries (lap time,
+  per-wheel end-of-lap + peak tyre state, end-of-lap pack state) are read off the recorded trace at
+  each lap-completion crossing.
+
+The continuity invariant is exact by construction: lap N+1 begins at lap N's terminal `(T_s, T_c, T_g,
+w, D)`. On a closed line station 0 is the start/finish, so the last recorded station sits one march
+segment short of the boundary — continuity holds to within that one segment (a *reset* would fling
+every lap-start back to the seed, a large jump the property tests rule out).
+
+![Multi-lap stint on a real lap](img/stint.png)
+
+Both stints on the `limebeer_2014_f1` car at Catalunya (the tyre thermal/wear parameters are still the
+committed **synthetic** placeholders — calibration is PR7/PR8 — so the *magnitude* of the decay is not
+physical yet; the *machinery* is). **(a)** A warm-seeded QSS stint loses pace lap over lap as the tyres
+degrade; **(b)** the grip multiplier `λ_μ,total` declines with it. **(c)** A cold-seeded stint warms up
+out of a 20 °C out-lap seed toward the window, plotted continuously over the whole stint's arc length —
+the heating in corners and cooling on straights ride on a rising trend that carries across lap
+boundaries. **(d)** The same surface temperature against a per-lap *reset* reference (dashed): the
+carried state settles to a lower equilibrium while a reset would re-trace lap 1 from the seed every lap.
+**(e)** Tread wear accumulates monotonically (saturating at `w_max` under the pre-calibration `k_w`).
+**(f)** The T2 transient stint — per-lap lap time and per-wheel end-of-lap wear from one continuous run.
+
+The stint drivers surface through Python as `outlap.core.solve_stint_dataset(..., n_laps=…, tier=…)`
+(the `lap`-axis dataset builders `stint_dataset` / `transient_stint_dataset`); the figure is drawn by
+`python/tools/plot_stint.py`.
+
 [dec49]: ../HANDOFF.md

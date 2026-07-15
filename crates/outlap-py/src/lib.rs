@@ -35,7 +35,8 @@ use pyo3::prelude::*;
 use outlap_qss::{
     solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, MachineThermal, Pack,
     PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle,
-    TireSlowLog, TireStateRes, TireThermalMarch, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
+    TireSlowLog, TireStateRes, TireThermalMarch, TireThermalState, WheelLog, DEFAULT_DS_M,
+    WHEEL_ORDER,
 };
 use outlap_raceline::{
     min_curvature_line, min_curvature_line_weighted, raceline_stations, RacelineOptions,
@@ -1669,6 +1670,14 @@ pub struct TransientLap {
     // Slow states; `None` when the car has no battery (or its files are absent).
     state_of_charge: Option<Vec<f64>>,
     pack_temp_c: Option<Vec<f64>>,
+    // Per-wheel tyre-thermal channels (row-major `n × 4`, FL/FR/RL/RR); `None` unless the M5
+    // tyre-thermal stack was attached (`tire_thermal=True`).
+    tire_surface_c: Option<Vec<f64>>,
+    tire_carcass_c: Option<Vec<f64>>,
+    tire_gas_c: Option<Vec<f64>>,
+    tire_wear_mm: Option<Vec<f64>>,
+    tire_damage: Option<Vec<f64>>,
+    tire_grip: Option<Vec<f64>>,
     /// Total lap time, s.
     #[pyo3(get)]
     lap_time_s: f64,
@@ -1863,24 +1872,69 @@ impl TransientLap {
     fn pack_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.pack_temp_c.clone().map(|v| v.into_pyarray(py))
     }
+    /// Per-wheel tyre tread-surface temperature `T_s`, °C (`time × wheel`) — `None` unless the M5
+    /// tyre-thermal stack was attached (`tire_thermal=True`).
+    fn tire_surface_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.tire_surface_c.as_ref())
+    }
+    /// Per-wheel carcass (bulk) temperature `T_c`, °C (`time × wheel`), or `None`.
+    fn tire_carcass_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.tire_carcass_c.as_ref())
+    }
+    /// Per-wheel inflation-gas temperature `T_g`, °C (`time × wheel`), or `None`.
+    fn tire_gas_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.tire_gas_c.as_ref())
+    }
+    /// Per-wheel tread wear depth `w`, mm (`time × wheel`, monotone), or `None`.
+    fn tire_wear_mm<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.tire_wear_mm.as_ref())
+    }
+    /// Per-wheel irreversible thermal damage `D` (`time × wheel`, 0..1), or `None`.
+    fn tire_damage<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.tire_damage.as_ref())
+    }
+    /// Per-wheel total grip multiplier `λ_μ,total` (`time × wheel`) the force call used, or `None`.
+    fn tire_grip<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.tire_grip.as_ref())
+    }
     /// The number of recorded steps.
     fn __len__(&self) -> usize {
         self.t.len()
     }
 }
 
-/// Solve a **transient (T2)** lap: the 7-DOF chassis + tyre relaxation closed loop, driven by the
-/// ideal driver along the QSS speed profile.
-///
-/// The T2 tier is a *closed-loop* simulation, so it needs a reference to follow: the point-mass QSS
-/// profile for this car on this line, scaled by `speed_margin`. The lap is seeded at the straightest
-/// station (a cold transient dropped into a corner is unphysical) and runs one full lap of arc length.
-///
-/// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
-#[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false))]
+/// Everything a transient run needs, assembled once through the shared pipeline: the block set +
+/// interned bus, the sampled target line, the numerics, and the optional slow subsystems (battery
+/// pack, per-wheel tyre-thermal ring, gear-shift FSM). Owned values only — the caller constructs the
+/// [`TransientSolver`] over them (which borrows the interner) and runs one lap or a multi-lap stint,
+/// so [`solve_transient_lap`] and [`solve_transient_stint`] share one assembly path (byte-identical
+/// single-lap numerics).
+struct PreparedTransient {
+    blocks: outlap_transient::T2Blocks<f64>,
+    line: outlap_transient::LineTable<f64>,
+    interner: outlap_transient::ChannelInterner,
+    cfg: outlap_transient::SimConfig<f64>,
+    /// One-lap arc length (the finish line), m.
+    length: f64,
+    /// Whether the run is flat-track (grade/banking/κ_v zeroed).
+    flat: bool,
+    /// The corner-scaled speed-profile fraction the driver tracked.
+    speed_margin: f64,
+    resolved_hash: String,
+    notes: Vec<String>,
+    /// The vehicle's battery pack + its seeded state (`None` when the car carries no battery).
+    pack: Option<(Pack, PackState)>,
+    /// The per-wheel tyre-thermal ring + wear stack (`None` unless `tire_thermal` opted in).
+    tire_stack: Option<outlap_transient::TireThermalStack<f64>>,
+    /// The gear-shift FSM (`None` for a single-speed car or one declaring no shift time).
+    shifter: Option<outlap_transient::Shifter<f64>>,
+}
+
+/// Assemble the transient block set + target line + slow subsystems for a T2 run (one lap or a
+/// stint). This is the entire `solve_transient_lap` prologue factored out so the stint driver reuses
+/// the identical assembly; only the run (one lap vs. `n_laps`) and the result surface differ.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn solve_transient_lap(
+fn prepare_transient(
     vehicle_dir: &str,
     track: &Track,
     ds_m: f64,
@@ -1892,13 +1946,9 @@ fn solve_transient_lap(
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
     speed_margin: f64,
     initial_soc: Option<f64>,
-    // Opt-in for the M5 tire-thermal ring + wear stack (default off). The physics is fully wired, but
-    // the reference `.tyr` thermal/wear params are still synthetic placeholders — their loaded
-    // steady-state sits below the grip window, so a default-on lap would under-report pace. The flag
-    // flips on by default once FastF1 inverse calibration (M5 PR7/PR8) sets the params so the
-    // steady-state lands in the window. Opt in to exercise the wired physics today.
     tire_thermal: bool,
-) -> PyResult<TransientLap> {
+    initial_tire_temp_c: Option<f64>,
+) -> PyResult<PreparedTransient> {
     check_ds(ds_m)?;
     if !(speed_margin > 0.0 && speed_margin <= 1.0) {
         return Err(PyValueError::new_err(format!(
@@ -1926,11 +1976,6 @@ fn solve_transient_lap(
     let hash = resolved.report.resolved_hash.clone();
     let mut notes = Vec::new();
 
-    // The transient tier honours `flat_track` like the QSS tiers (PR7.5): the 7-DOF chassis carries
-    // grade/banking/vertical-curvature terms and the driver is stabilised against the grade
-    // disturbance (grade-aware speed reference + grade-scaled yaw recovery, `outlap-vehicle`), so a
-    // real elevated circuit no longer spins the car out. The default stays 3-D (`flat_track` unset ⇒
-    // full geometry); pass `flat_track: true` for a flat-plane analysis lap.
     let flat = sim_cfg.flat_track;
     if flat {
         notes.push(
@@ -1986,7 +2031,7 @@ fn solve_transient_lap(
     .map_err(err)?;
 
     // --- The T2 block set, through the shared assembly pipeline. ----------------------------------
-    let pack = load_pack(&resolved, &vl, &mut notes)?;
+    let mut pack = load_pack(&resolved, &vl, &mut notes)?;
     let mut interner = outlap_transient::ChannelInterner::new();
     let t2_opts = outlap_vehicle::T2Options {
         battery_present: pack.is_some(),
@@ -1996,9 +2041,6 @@ fn solve_transient_lap(
         outlap_vehicle::assemble_t2(&t1v, &resolved.spec, &mut interner, &t2_opts, &mut notes)
             .into();
 
-    // Corner-scaled speed targets (outlap_qss::margin): full profile speed where lateral demand is
-    // low (straights), `speed_margin` at the lateral grip limit, and a margined braking feasibility
-    // pass so the shaped reference is dynamically reachable at every corner entry.
     let v_target = outlap_qss::corner_scaled_targets(
         &env_shape,
         &path,
@@ -2016,12 +2058,10 @@ fn solve_transient_lap(
         start_s,
         ..outlap_transient::SimConfig::default()
     };
-    let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
-    if let Some((pack, mut state)) = pack {
-        // A pack seeded at the top of its SoC window accepts no charge, so it would recover nothing
-        // however hard the car brakes. That is correct physics and a useless default for a lap, so a
-        // stint starts mid-window unless the caller says otherwise — and the choice is surfaced.
-        let [lo, hi] = pack.soc_window();
+
+    // Seed the pack mid-window (a pack at the top of its SoC accepts no charge — useless for a lap).
+    if let Some((pack_ref, state)) = pack.as_mut() {
+        let [lo, hi] = pack_ref.soc_window();
         state.soc = initial_soc.unwrap_or_else(|| {
             let mid = 0.5 * (lo + hi);
             notes.push(format!(
@@ -2047,7 +2087,6 @@ fn solve_transient_lap(
              drive power)"
                 .to_owned(),
         );
-        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
     }
     notes.push(format!(
         "T2 driver tracks a corner-scaled speed reference: the full QSS profile where lateral \
@@ -2057,19 +2096,18 @@ fn solve_transient_lap(
         speed_margin * 100.0,
         speed_margin * speed_margin * 100.0
     ));
-    // Attach the gear-shift FSM: the crossover speeds where the best gear changes, and the gearbox's
-    // own shift time. A single-speed (direct-drive) car has no up-shift speeds, so the FSM is a no-op
-    // and the lap runs the best-gear envelope uninterrupted. The traction ceiling stays the best-gear
-    // envelope either way; the FSM only adds the torque-cut interruption at each shift.
+
+    // The gear-shift FSM: the crossover speeds where the best gear changes + the gearbox shift time.
     let upshift_speeds = t1v.upshift_speeds();
     let gear_count = t1v.gear_count();
     let shift_time_s = t1v.shift_time_s();
-    if upshift_speeds.is_empty() || shift_time_s <= 0.0 {
+    let shifter = if upshift_speeds.is_empty() || shift_time_s <= 0.0 {
         notes.push(
             "T2 gear-shift FSM inert: the car is single-speed (direct drive) or declares no shift \
              time, so the lap runs the best-gear envelope with no torque interruption"
                 .to_owned(),
         );
+        None
     } else {
         notes.push(format!(
             "T2 gear-shift FSM: {gear_count} gears, {shift_time_s:.3} s shift, up-shift speeds \
@@ -2081,19 +2119,113 @@ fn solve_transient_lap(
                 .collect::<Vec<_>>()
                 .join("/")
         ));
-        solver = solver.with_shifter(outlap_transient::Shifter::new(
+        Some(outlap_transient::Shifter::new(
             gear_count,
             upshift_speeds,
             shift_time_s,
-        ));
-    }
+        ))
+    };
 
-    // Attach the M5 tire-thermal ring + wear stack (per-wheel), opt-in for PR3, so the T2 lap responds
-    // to tyre temperature and wear. Seeded warm (parity-safe); the grip window + gas-law pressure feed
-    // the force call and drift over the lap as the tyres warm off the optimum and wear accumulates.
-    if tire_thermal {
-        solver =
-            solver.with_tire_thermal(build_tire_thermal(&resolved, &conditions, &vl, &mut notes)?);
+    // The M5 per-wheel tyre-thermal ring + wear stack (opt-in). Seeded warm (parity-safe) by default;
+    // an explicit `initial_tire_temp_c` gives a uniform cold start (the warm-up transient).
+    let tire_stack = if tire_thermal {
+        let mut stack = build_tire_thermal(&resolved, &conditions, &vl, &mut notes)?;
+        if let Some(t) = initial_tire_temp_c {
+            stack.seed_uniform(t);
+            notes.push(format!(
+                "T2 tyres seeded cold-uniform at {t:.0} °C (the warm-up transient): the grip window \
+                 starts off the optimum, so lap 1 warms up into the window before it settles"
+            ));
+        }
+        Some(stack)
+    } else {
+        None
+    };
+
+    Ok(PreparedTransient {
+        blocks,
+        line,
+        interner,
+        cfg,
+        length,
+        flat,
+        speed_margin,
+        resolved_hash: hash,
+        notes,
+        pack,
+        tire_stack,
+        shifter,
+    })
+}
+
+/// Solve a **transient (T2)** lap: the 7-DOF chassis + tyre relaxation closed loop, driven by the
+/// ideal driver along the QSS speed profile.
+///
+/// The T2 tier is a *closed-loop* simulation, so it needs a reference to follow: the point-mass QSS
+/// profile for this car on this line, scaled by `speed_margin`. The lap is seeded at the straightest
+/// station (a cold transient dropped into a corner is unphysical) and runs one full lap of arc length.
+///
+/// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
+#[pyfunction]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false))]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_transient_lap(
+    vehicle_dir: &str,
+    track: &Track,
+    ds_m: f64,
+    raceline_ds_m: Option<f64>,
+    raceline_generator: Option<&str>,
+    raceline_iterations: Option<usize>,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+    speed_margin: f64,
+    initial_soc: Option<f64>,
+    // Opt-in for the M5 tire-thermal ring + wear stack (default off). The physics is fully wired, but
+    // the reference `.tyr` thermal/wear params are still synthetic placeholders — their loaded
+    // steady-state sits below the grip window, so a default-on lap would under-report pace. The flag
+    // flips on by default once FastF1 inverse calibration (M5 PR7/PR8) sets the params so the
+    // steady-state lands in the window. Opt in to exercise the wired physics today.
+    tire_thermal: bool,
+) -> PyResult<TransientLap> {
+    let PreparedTransient {
+        blocks,
+        line,
+        interner,
+        cfg,
+        length,
+        flat,
+        speed_margin,
+        resolved_hash,
+        mut notes,
+        pack,
+        tire_stack,
+        shifter,
+    } = prepare_transient(
+        vehicle_dir,
+        track,
+        ds_m,
+        raceline_ds_m,
+        raceline_generator,
+        raceline_iterations,
+        overrides,
+        conditions,
+        sim,
+        speed_margin,
+        initial_soc,
+        tire_thermal,
+        None,
+    )?;
+    let start_s = cfg.start_s;
+    let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
+    if let Some((pack, state)) = pack {
+        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    if let Some(shifter) = shifter {
+        solver = solver.with_shifter(shifter);
+    }
+    if let Some(stack) = tire_stack {
+        solver = solver.with_tire_thermal(stack);
     }
 
     let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
@@ -2117,6 +2249,7 @@ fn solve_transient_lap(
     }
 
     let has_slow = !lap.state_of_charge.is_empty();
+    let has_tire = !lap.tire_surface_c.is_empty();
     Ok(TransientLap {
         t: lap.t,
         s: lap.s,
@@ -2148,6 +2281,12 @@ fn solve_transient_lap(
         force_lat_n: flat4(&lap.fy),
         state_of_charge: has_slow.then(|| lap.state_of_charge.clone()),
         pack_temp_c: has_slow.then(|| lap.pack_temp_c.clone()),
+        tire_surface_c: has_tire.then(|| flat4(&lap.tire_surface_c)),
+        tire_carcass_c: has_tire.then(|| flat4(&lap.tire_carcass_c)),
+        tire_gas_c: has_tire.then(|| flat4(&lap.tire_gas_c)),
+        tire_wear_mm: has_tire.then(|| flat4(&lap.tire_wear_mm)),
+        tire_damage: has_tire.then(|| flat4(&lap.tire_damage)),
+        tire_grip: has_tire.then(|| flat4(&lap.tire_grip)),
         lap_time_s: lap.lap_time_s,
         tier: "t2".to_owned(),
         fz_coupling: fz_coupling_str(provenance.fz_coupling),
@@ -2158,7 +2297,615 @@ fn solve_transient_lap(
         completed,
         wheels: WHEEL_ORDER.iter().map(|s| (*s).to_owned()).collect(),
         notes,
-        resolved_hash: hash,
+        resolved_hash,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multi-lap stints (M5 PR6): carry the tyre-thermal (and, in T2, the battery) slow state lap-to-lap.
+// ---------------------------------------------------------------------------------------------
+
+/// Hard cap on stint length, so a typo cannot launch an unbounded run. Far beyond any real dry stint
+/// (a full F1 race is ~60 laps); each QSS lap is a sub-second re-solve, each T2 lap seconds.
+const MAX_STINT_LAPS: usize = 200;
+
+/// Build a `rows × cols` numpy array (row-major) from a flat channel.
+fn array2d<'py>(
+    py: Python<'py>,
+    flat: &[f64],
+    rows: usize,
+    cols: usize,
+) -> Bound<'py, PyArray2<f64>> {
+    numpy::ndarray::Array2::from_shape_vec((rows, cols), flat.to_vec())
+        .expect("rows×cols stint channel")
+        .into_pyarray(py)
+}
+
+/// A solved **QSS stint**: `n_laps` T0/T1 laps run back-to-back with the representative-tyre thermal
+/// ring + wear **state carried across every lap boundary** (§6.1 segment-to-segment march, extended
+/// across laps — lap N+1's march seeds from lap N's terminal `(T_s/T_c/T_g, wear, damage)`, no reset).
+/// All laps share the arc-length station grid (the same line), so the stint is one clean
+/// `(lap, station)` block; `lap_time_s` is the per-lap headline.
+#[pyclass(frozen)]
+pub struct QssStint {
+    /// Number of laps run.
+    #[pyo3(get)]
+    n_laps: usize,
+    /// Shared arc-length stations, m (n_stations).
+    s: Vec<f64>,
+    /// Per-lap lap time, s (n_laps).
+    lap_time_s: Vec<f64>,
+    /// Per-`(lap × station)` speed, m/s (row-major).
+    v: Vec<f64>,
+    // Per-`(lap × station)` representative-tyre channels; `None` when the tyre march was off.
+    tire_surface_c: Option<Vec<f64>>,
+    tire_carcass_c: Option<Vec<f64>>,
+    tire_gas_c: Option<Vec<f64>>,
+    tire_wear_mm: Option<Vec<f64>>,
+    tire_damage: Option<Vec<f64>>,
+    tire_grip: Option<Vec<f64>>,
+    /// The resolved solver tier (`"t0"`/`"t1"`).
+    #[pyo3(get)]
+    tier: String,
+    /// The recorded normal-load coupling mode.
+    #[pyo3(get)]
+    fz_coupling: String,
+    /// Whether the stint ran in flat-track analysis mode.
+    #[pyo3(get)]
+    flat_track: bool,
+    /// blake3 hash of the resolved vehicle spec.
+    #[pyo3(get)]
+    resolved_hash: String,
+    /// Simplification/degradation notes (nothing silent).
+    #[pyo3(get)]
+    notes: Vec<String>,
+}
+
+impl QssStint {
+    fn n_stations(&self) -> usize {
+        self.s.len()
+    }
+}
+
+#[pymethods]
+impl QssStint {
+    /// Shared arc-length stations, m.
+    fn s<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.s.clone().into_pyarray(py)
+    }
+    /// Per-lap lap time, s (shape `n_laps`).
+    fn lap_time_s<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.lap_time_s.clone().into_pyarray(py)
+    }
+    /// Speed, m/s (shape `n_laps × station`).
+    fn v<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        array2d(py, &self.v, self.n_laps, self.n_stations())
+    }
+    /// Representative-tyre tread-surface temperature `T_s`, °C (`n_laps × station`), or `None`.
+    fn tire_surface_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.tire_surface_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Representative-tyre carcass temperature `T_c`, °C (`n_laps × station`), or `None`.
+    fn tire_carcass_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.tire_carcass_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Representative-tyre inflation-gas temperature `T_g`, °C (`n_laps × station`), or `None`.
+    fn tire_gas_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.tire_gas_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Representative-tyre tread wear `w`, mm (`n_laps × station`, monotone), or `None`.
+    fn tire_wear_mm<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.tire_wear_mm
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Representative-tyre irreversible thermal damage `D` (`n_laps × station`), or `None`.
+    fn tire_damage<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.tire_damage
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Representative-tyre total grip multiplier `λ_μ,total` (`n_laps × station`), or `None`.
+    fn tire_grip<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.tire_grip
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    fn __len__(&self) -> usize {
+        self.n_laps
+    }
+}
+
+/// Solve a **QSS stint** — `n_laps` T0/T1 laps of `track`, carrying the tyre-thermal slow state across
+/// each lap boundary so the tyres warm, wear, and degrade over the run (the T0/T1 tier's
+/// stint-capability, §6.1). The tyre-state g-g-g-v envelope is built once and reused across laps; each
+/// lap re-seeds the representative-tyre march from the previous lap's terminal state.
+///
+/// `tire_thermal` (default **on** — degradation is the point of a stint) drives the tyre-state axes;
+/// with it off every lap is identical (a frozen-tyre stint). `initial_tire_temp_c` seeds the tyres
+/// cold-uniform (the out-lap warm-up); the default seeds warm at the grip optimum. The electrified
+/// slow stack (pack SoC / machine temperature), where present, is **not** carried lap-to-lap in the
+/// QSS stint (it re-seeds each lap — recovery arrives with the ERS energy manager in M6); the tyre
+/// state is what carries.
+#[pyfunction]
+#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = true, initial_tire_temp_c = None))]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_stint(
+    vehicle_dir: &str,
+    track: &Track,
+    n_laps: usize,
+    ds_m: f64,
+    raceline_ds_m: Option<f64>,
+    raceline_generator: Option<&str>,
+    raceline_iterations: Option<usize>,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tier: Option<&str>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tire_thermal: bool,
+    initial_tire_temp_c: Option<f64>,
+) -> PyResult<QssStint> {
+    check_ds(ds_m)?;
+    if !(1..=MAX_STINT_LAPS).contains(&n_laps) {
+        return Err(PyValueError::new_err(format!(
+            "n_laps must lie in 1..={MAX_STINT_LAPS}, got {n_laps}"
+        )));
+    }
+    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
+    let sim_cfg = build_sim(&vl, sim, tier)?;
+    let base_conditions = match load_conditions("conditions.yaml", &vl) {
+        Ok(c) => c,
+        Err(e) if is_not_found(&e) => Conditions::default(),
+        Err(e) => return Err(schema_err(e)),
+    };
+    let conditions = match conditions {
+        Some(patch) => merge_conditions(base_conditions, &py_to_json(patch.as_any())?)?,
+        None => base_conditions,
+    };
+    let opts = T0Options {
+        ds_m,
+        allow_degraded: sim_cfg.allow_degraded,
+        ..T0Options::default()
+    };
+    let path = if sim_cfg.flat_track {
+        T0Path::from_track_flat(&track.inner, ds_m)
+    } else {
+        T0Path::from_track(&track.inner, ds_m)
+    };
+    let hash = resolved.report.resolved_hash.clone();
+    let fzc = sim_cfg.resolved_fz_coupling();
+    let flat = sim_cfg.flat_track;
+
+    let wanted = match sim_cfg.tier {
+        Tier::T2 => {
+            return Err(PyValueError::new_err(
+                "the transient tier (t2) integrates in time: call \
+                 `outlap.solve_transient_stint(...)` (or `outlap.solve_stint_dataset(..., \
+                 tier=\"t2\")`) for a T2 stint",
+            ))
+        }
+        tier @ Tier::T3 => return Err(err(tier_not_implemented(tier))),
+        wanted => wanted,
+    };
+
+    let mut t1v =
+        T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
+    let mut notes = Vec::new();
+    let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
+    // With the tyre march on the envelope needs the (T_tire, wear) axes (built once, reused across
+    // laps); otherwise the cheap frozen envelope (a frozen-tyre stint — every lap identical).
+    let env = if tire_thermal {
+        GgvEnvelope::generate_with_tire_state(&t1v, &sim_cfg.envelope, fzc, TireStateRes::default())
+            .map_err(err)?
+    } else {
+        cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?
+    };
+    let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
+    notes.extend(t0v.notes().iter().cloned());
+    notes.extend(t1v.notes().iter().cloned());
+    notes.extend(env.notes().iter().cloned());
+    // The electrified coupling (inert unless the car's stack files are present). It re-seeds per lap in
+    // the QSS stint (SoC is not carried across laps here); the tyre state is what carries.
+    let stack = build_slow_stack(&resolved, &vl, &conditions, &mut notes)?;
+    let base_march = if tire_thermal {
+        Some(build_tire_march(
+            &t1v,
+            &resolved,
+            &conditions,
+            &vl,
+            &mut notes,
+        )?)
+    } else {
+        None
+    };
+    notes.push(format!(
+        "QSS stint: {n_laps} laps run back-to-back with the representative-tyre thermal ring + wear \
+         state carried across each lap boundary (§6.1 explicit-Euler march, extended across laps — no \
+         reset); the tyre-state g-g-g-v envelope is built once and reused. Per-lap lap time responds \
+         to the evolving tyre state."
+    ));
+
+    // The seed lap 1 starts from: an explicit cold-uniform temperature (the out-lap warm-up), else the
+    // march's parity-safe warm-at-optimum default.
+    let mut seed_state: Option<TireThermalState<f64>> = if tire_thermal {
+        Some(match initial_tire_temp_c {
+            Some(t) => TireThermalState::uniform(t + 273.15),
+            None => base_march
+                .as_ref()
+                .expect("march built when tire_thermal")
+                .seed(),
+        })
+    } else {
+        None
+    };
+
+    let n_stations = path.len();
+    let mut s_grid: Vec<f64> = Vec::new();
+    let mut lap_time_s = Vec::with_capacity(n_laps);
+    let mut v_flat = Vec::with_capacity(n_laps * n_stations);
+    let (mut surf, mut carc, mut gas) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut wear, mut dmg, mut grip) = (Vec::new(), Vec::new(), Vec::new());
+    let mut have_tire = false;
+    let (mut tier_out, mut fz_out, mut hash_out) = (String::new(), String::new(), String::new());
+
+    for lap_idx in 0..n_laps {
+        let march_lap = base_march.as_ref().map(|bm| {
+            bm.clone()
+                .with_state(seed_state.expect("seed set when tire_thermal"))
+        });
+        let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
+            vehicle: &t1v,
+            thermal: thermal.clone(),
+            pack: pack.clone(),
+            pack_state: *state,
+        });
+        let line = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
+        let qss: QssLap = if wanted == Tier::T0 {
+            solve_t0(
+                &t0v,
+                env.clone(),
+                coupling.as_ref(),
+                march_lap.as_ref(),
+                &path,
+                line,
+                hash.clone(),
+                Vec::new(),
+                fzc,
+                flat,
+            )
+            .map_err(err)?
+        } else {
+            solve_t1(
+                &t1v,
+                &t0v,
+                env.clone(),
+                coupling.as_ref(),
+                march_lap.as_ref(),
+                &path,
+                line,
+                hash.clone(),
+                Vec::new(),
+                fzc,
+                flat,
+            )
+            .map_err(err)?
+        };
+        if lap_idx == 0 {
+            s_grid.clone_from(&qss.lap.s);
+            tier_out = format!("{:?}", qss.tier).to_lowercase();
+            fz_out = fz_coupling_str(qss.fz_coupling);
+            hash_out.clone_from(&qss.lap.resolved_hash);
+        }
+        lap_time_s.push(qss.lap.lap_time_s);
+        v_flat.extend_from_slice(&qss.lap.v);
+        if let Some(t) = &qss.tire {
+            surf.extend_from_slice(&t.surface_temp_c);
+            carc.extend_from_slice(&t.carcass_temp_c);
+            gas.extend_from_slice(&t.gas_temp_c);
+            wear.extend_from_slice(&t.wear_mm);
+            dmg.extend_from_slice(&t.damage);
+            grip.extend_from_slice(&t.grip_scale);
+            have_tire = true;
+        }
+        // Carry the terminal tyre state into the next lap's seed (the stint's whole point).
+        seed_state = qss.tire_terminal.or(seed_state);
+    }
+
+    Ok(QssStint {
+        n_laps,
+        s: s_grid,
+        lap_time_s,
+        v: v_flat,
+        tire_surface_c: have_tire.then_some(surf),
+        tire_carcass_c: have_tire.then_some(carc),
+        tire_gas_c: have_tire.then_some(gas),
+        tire_wear_mm: have_tire.then_some(wear),
+        tire_damage: have_tire.then_some(dmg),
+        tire_grip: have_tire.then_some(grip),
+        tier: tier_out,
+        fz_coupling: fz_out,
+        flat_track: flat,
+        resolved_hash: hash_out,
+        notes,
+    })
+}
+
+/// A solved **transient (T2) stint**: `n_laps` laps integrated **continuously** (one run, no re-seed),
+/// so the per-wheel tyre-thermal ring + wear and the battery SoC carry across the start/finish line
+/// with no reset (§6.1 slow-state continuity). Surfaced as per-lap summaries over a `lap` axis: the
+/// per-lap lap time, and the per-wheel end-of-lap + peak tyre state (and end-of-lap pack state).
+#[pyclass(frozen)]
+pub struct TransientStint {
+    /// Number of laps that completed within the step / divergence budget.
+    #[pyo3(get)]
+    n_laps: usize,
+    /// Number of laps requested (may exceed `n_laps` if the closed loop diverged early).
+    #[pyo3(get)]
+    requested_laps: usize,
+    /// Per-lap lap time, s (n_laps).
+    lap_time_s: Vec<f64>,
+    // Per-`(lap × wheel)` end-of-lap tyre state; `None` unless the tyre-thermal stack was attached.
+    tire_surface_c: Option<Vec<f64>>,
+    tire_carcass_c: Option<Vec<f64>>,
+    tire_gas_c: Option<Vec<f64>>,
+    tire_wear_mm: Option<Vec<f64>>,
+    tire_damage: Option<Vec<f64>>,
+    tire_grip: Option<Vec<f64>>,
+    /// Per-`(lap × wheel)` peak tread-surface temperature over the lap (the warm-up marker).
+    tire_peak_surface_c: Option<Vec<f64>>,
+    /// Per-lap end-of-lap pack state of charge (n_laps); `None` when the car carries no battery.
+    state_of_charge: Option<Vec<f64>>,
+    /// Per-lap end-of-lap pack temperature, °C (n_laps); `None` when no battery.
+    pack_temp_c: Option<Vec<f64>>,
+    /// The resolved tier (always `"t2"`).
+    #[pyo3(get)]
+    tier: String,
+    /// The recorded normal-load coupling mode.
+    #[pyo3(get)]
+    fz_coupling: String,
+    /// Whether the stint ran flat-track.
+    #[pyo3(get)]
+    flat_track: bool,
+    /// Resolved fixed step, s.
+    #[pyo3(get)]
+    dt_s: f64,
+    /// Resolved integrator order.
+    #[pyo3(get)]
+    integrator_order: u32,
+    /// The QSS-profile fraction the driver tracked.
+    #[pyo3(get)]
+    speed_margin: f64,
+    /// Whether all `requested_laps` completed.
+    #[pyo3(get)]
+    completed: bool,
+    /// The wheel-channel order (`["FL","FR","RL","RR"]`).
+    #[pyo3(get)]
+    wheels: Vec<String>,
+    /// blake3 hash of the resolved vehicle spec.
+    #[pyo3(get)]
+    resolved_hash: String,
+    /// Simplification/degradation notes (nothing silent).
+    #[pyo3(get)]
+    notes: Vec<String>,
+}
+
+#[pymethods]
+impl TransientStint {
+    /// Per-lap lap time, s (shape `n_laps`).
+    fn lap_time_s<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.lap_time_s.clone().into_pyarray(py)
+    }
+    /// Per-wheel end-of-lap tread-surface temperature `T_s`, °C (`n_laps × wheel`), or `None`.
+    fn tire_surface_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_surface_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-wheel end-of-lap carcass temperature `T_c`, °C (`n_laps × wheel`), or `None`.
+    fn tire_carcass_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_carcass_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-wheel end-of-lap inflation-gas temperature `T_g`, °C (`n_laps × wheel`), or `None`.
+    fn tire_gas_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_gas_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-wheel end-of-lap tread wear `w`, mm (`n_laps × wheel`, monotone), or `None`.
+    fn tire_wear_mm<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_wear_mm
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-wheel end-of-lap irreversible thermal damage `D` (`n_laps × wheel`), or `None`.
+    fn tire_damage<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_damage
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-wheel end-of-lap total grip multiplier `λ_μ,total` (`n_laps × wheel`), or `None`.
+    fn tire_grip<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_grip
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-wheel peak tread-surface temperature over each lap, °C (`n_laps × wheel`), or `None`.
+    fn tire_peak_surface_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        self.tire_peak_surface_c
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, 4))
+    }
+    /// Per-lap end-of-lap pack state of charge (shape `n_laps`), or `None` without a battery.
+    fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.state_of_charge.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Per-lap end-of-lap pack temperature, °C (shape `n_laps`), or `None` without a battery.
+    fn pack_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.pack_temp_c.clone().map(|v| v.into_pyarray(py))
+    }
+    fn __len__(&self) -> usize {
+        self.n_laps
+    }
+}
+
+/// Solve a **transient (T2) stint** — `n_laps` laps integrated in one continuous run, so the per-wheel
+/// tyre-thermal ring + wear and the battery SoC carry across the start/finish line with no reset (the
+/// line table wraps `s`, so the geometry + reference profile repeat every lap). Returns per-lap
+/// summaries: lap time, per-wheel end-of-lap + peak tyre state, and end-of-lap pack state.
+#[pyfunction]
+#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = true, initial_tire_temp_c = None))]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_transient_stint(
+    vehicle_dir: &str,
+    track: &Track,
+    n_laps: usize,
+    ds_m: f64,
+    raceline_ds_m: Option<f64>,
+    raceline_generator: Option<&str>,
+    raceline_iterations: Option<usize>,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+    speed_margin: f64,
+    initial_soc: Option<f64>,
+    tire_thermal: bool,
+    initial_tire_temp_c: Option<f64>,
+) -> PyResult<TransientStint> {
+    if !(1..=MAX_STINT_LAPS).contains(&n_laps) {
+        return Err(PyValueError::new_err(format!(
+            "n_laps must lie in 1..={MAX_STINT_LAPS}, got {n_laps}"
+        )));
+    }
+    let PreparedTransient {
+        blocks,
+        line,
+        interner,
+        cfg,
+        length,
+        flat,
+        speed_margin,
+        resolved_hash,
+        mut notes,
+        pack,
+        tire_stack,
+        shifter,
+    } = prepare_transient(
+        vehicle_dir,
+        track,
+        ds_m,
+        raceline_ds_m,
+        raceline_generator,
+        raceline_iterations,
+        overrides,
+        conditions,
+        sim,
+        speed_margin,
+        initial_soc,
+        tire_thermal,
+        initial_tire_temp_c,
+    )?;
+    notes.push(format!(
+        "T2 stint: {n_laps} laps integrated continuously (one run, no re-seed) — the per-wheel \
+         tyre-thermal ring + wear and the battery SoC carry across the start/finish line with no \
+         reset (the line table wraps s, so the road geometry + speed reference repeat each lap)."
+    ));
+    let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
+    if let Some((pack, state)) = pack {
+        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    if let Some(shifter) = shifter {
+        solver = solver.with_shifter(shifter);
+    }
+    if let Some(stack) = tire_stack {
+        solver = solver.with_tire_thermal(stack);
+    }
+
+    let (lap, lap_end_idx) = solver.run_laps(length, n_laps, MAX_TRANSIENT_STEPS);
+    let diverged = solver.diverged();
+    let provenance = solver.provenance();
+    let laps_done = lap_end_idx.len();
+    let completed = laps_done == n_laps && !diverged;
+    if diverged {
+        notes.push(format!(
+            "T2 stint diverged after {laps_done} of {n_laps} laps: the closed loop left the physical \
+             envelope (a spin the driver could not catch). Only the completed laps are reported. Try \
+             a lower `speed_margin`"
+        ));
+    } else if !completed {
+        notes.push(format!(
+            "T2 stint reached only {laps_done} of {n_laps} laps within {MAX_TRANSIENT_STEPS} steps"
+        ));
+    }
+
+    let has_slow = !lap.state_of_charge.is_empty();
+    let has_tire = !lap.tire_surface_c.is_empty();
+    let mut lap_time_s = Vec::with_capacity(laps_done);
+    let (mut surf, mut carc, mut gas) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut wear, mut dmg, mut grip, mut peak) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut soc, mut temp) = (Vec::new(), Vec::new());
+    let mut prev_t = 0.0;
+    for (k, &end_idx) in lap_end_idx.iter().enumerate() {
+        let start_idx = if k == 0 { 0 } else { lap_end_idx[k - 1] };
+        lap_time_s.push(lap.t[end_idx] - prev_t);
+        prev_t = lap.t[end_idx];
+        if has_tire {
+            surf.extend_from_slice(&lap.tire_surface_c[end_idx]);
+            carc.extend_from_slice(&lap.tire_carcass_c[end_idx]);
+            gas.extend_from_slice(&lap.tire_gas_c[end_idx]);
+            wear.extend_from_slice(&lap.tire_wear_mm[end_idx]);
+            dmg.extend_from_slice(&lap.tire_damage[end_idx]);
+            grip.extend_from_slice(&lap.tire_grip[end_idx]);
+            let mut lap_peak = [f64::MIN; 4];
+            for row in &lap.tire_surface_c[start_idx..=end_idx] {
+                for (w, &val) in row.iter().enumerate() {
+                    lap_peak[w] = lap_peak[w].max(val);
+                }
+            }
+            peak.extend_from_slice(&lap_peak);
+        }
+        if has_slow {
+            soc.push(lap.state_of_charge[end_idx]);
+            temp.push(lap.pack_temp_c[end_idx]);
+        }
+    }
+
+    Ok(TransientStint {
+        n_laps: laps_done,
+        requested_laps: n_laps,
+        lap_time_s,
+        tire_surface_c: has_tire.then_some(surf),
+        tire_carcass_c: has_tire.then_some(carc),
+        tire_gas_c: has_tire.then_some(gas),
+        tire_wear_mm: has_tire.then_some(wear),
+        tire_damage: has_tire.then_some(dmg),
+        tire_grip: has_tire.then_some(grip),
+        tire_peak_surface_c: has_tire.then_some(peak),
+        state_of_charge: has_slow.then_some(soc),
+        pack_temp_c: has_slow.then_some(temp),
+        tier: "t2".to_owned(),
+        fz_coupling: fz_coupling_str(provenance.fz_coupling),
+        flat_track: flat,
+        dt_s: provenance.dt_s,
+        integrator_order: provenance.integrator_order,
+        speed_margin,
+        completed,
+        wheels: WHEEL_ORDER.iter().map(|s| (*s).to_owned()).collect(),
+        resolved_hash,
+        notes,
     })
 }
 
@@ -2170,11 +2917,15 @@ fn outlap_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Raceline>()?;
     m.add_class::<Lap>()?;
     m.add_class::<TransientLap>()?;
+    m.add_class::<QssStint>()?;
+    m.add_class::<TransientStint>()?;
     m.add_class::<Envelope>()?;
     m.add_function(wrap_pyfunction!(min_curvature, m)?)?;
     m.add_function(wrap_pyfunction!(time_weighted, m)?)?;
     m.add_function(wrap_pyfunction!(solve_lap, m)?)?;
     m.add_function(wrap_pyfunction!(solve_transient_lap, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_stint, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_transient_stint, m)?)?;
     m.add_function(wrap_pyfunction!(vehicle_report, m)?)?;
     m.add("DEFAULT_DS_M", DEFAULT_DS_M)?;
     Ok(())

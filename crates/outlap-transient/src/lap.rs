@@ -689,13 +689,21 @@ impl<T: Float> TransientSolver<T> {
                 break;
             }
         }
-        // Flush the final partial slow window so recovered regen energy between the last slow-clock
-        // fire and the finish line is Coulomb-counted (energy closure at the lap boundary).
+        // Flush the final partial slow windows so the recovered regen energy and the tyre heat between
+        // the last slow-clock fire and the finish line reach the states (energy closure at the lap
+        // boundary), then re-stamp the last recorded row so the end-of-lap values reflect the whole lap.
         self.advance_slow(self.cfg.dt);
-        // Flush the tire-thermal ring's final partial window too (idempotent — no-op on an empty
-        // window), then re-stamp the last recorded tire row with the flushed state below.
         self.advance_tire_slow();
-        // Re-stamp the last recorded SoC/temperature with the flushed slow state.
+        self.restamp_final_row(&mut lap);
+        lap.lap_time_s = self.t;
+        lap
+    }
+
+    /// Re-stamp the last recorded row with the flushed slow state after the final-window flush, so the
+    /// end-of-lap summary reflects the whole lap — symmetric for the pack (SoC/temperature) and the
+    /// per-wheel tyres (the ring's final partial window is otherwise lost from the *recorded* trace,
+    /// though it is retained in the internal state that carries lap-to-lap).
+    fn restamp_final_row(&self, lap: &mut TransientLap<T>) {
         if let Some(slow) = self.slow.as_ref() {
             if let Some(last) = lap.state_of_charge.last_mut() {
                 *last = T::from(slow.soc()).unwrap_or(*last);
@@ -704,8 +712,89 @@ impl<T: Float> TransientSolver<T> {
                 *last = T::from(slow.temp_c()).unwrap_or(*last);
             }
         }
+        if let Some(stack) = self.tire_thermal.as_ref() {
+            let celsius = T::from(273.15).unwrap_or_else(T::zero);
+            for wheel in 0..WHEELS {
+                let st = stack.state(wheel);
+                if let Some(last) = lap.tire_surface_c.last_mut() {
+                    last[wheel] = st.t_s_k - celsius;
+                }
+                if let Some(last) = lap.tire_carcass_c.last_mut() {
+                    last[wheel] = st.t_c_k - celsius;
+                }
+                if let Some(last) = lap.tire_gas_c.last_mut() {
+                    last[wheel] = st.t_g_k - celsius;
+                }
+                if let Some(last) = lap.tire_wear_mm.last_mut() {
+                    last[wheel] = st.wear_mm;
+                }
+                if let Some(last) = lap.tire_damage.last_mut() {
+                    last[wheel] = st.damage;
+                }
+                if let Some(last) = lap.tire_grip.last_mut() {
+                    last[wheel] = stack.grip(wheel);
+                }
+            }
+        }
+    }
+
+    /// Run a multi-lap **stint**: integrate continuously for `n_laps` laps of `lap_length` arc length,
+    /// recording every step and the recorded-step index at which each lap completes.
+    ///
+    /// Unlike calling [`Self::run`] once per lap, the solver never re-seeds between laps — the line
+    /// table wraps `s` into `[0, L]`, so the road geometry and the reference speed profile repeat every
+    /// lap while the **slow states carry across the start/finish line with no reset**: the per-wheel
+    /// tyre-thermal ring keeps warming/wearing and the battery keeps Coulomb-counting, exactly as a
+    /// real stint. This is the §6.1 slow-state continuity the QSS tier gets from re-seeding its march;
+    /// the transient tier gets it for free from one continuous integration.
+    ///
+    /// Returns `(lap, lap_end_idx)`, where `lap_end_idx[k]` is the recorded-step index at which lap
+    /// `k` first reaches `start_s + (k+1)·lap_length`. It has one entry per lap that completed within
+    /// the `max_steps` / divergence budget (fewer than `n_laps` if the closed loop diverged).
+    #[must_use]
+    pub fn run_laps(
+        &mut self,
+        lap_length: T,
+        n_laps: usize,
+        max_steps: usize,
+    ) -> (TransientLap<T>, Vec<usize>) {
+        let mut lap = TransientLap::default();
+        let mut lap_end_idx = Vec::with_capacity(n_laps);
+        let start_s = self.cfg.start_s;
+        // Populate the bus for the initial record (the entry-speed F_z), like `run`.
+        self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        self.eval_rhs();
+        self.record(&mut lap);
+        let mut next_lap = 1usize; // the next lap-completion threshold index (1..=n_laps)
+        let s_end = start_s + lap_length * T::from(n_laps).unwrap_or_else(T::one);
+        for _ in 0..max_steps {
+            self.step();
+            if self.diverged {
+                break;
+            }
+            self.record(&mut lap);
+            let s = self.get_fast(ChassisState::S);
+            // Mark every lap boundary this step crossed (a single fixed step never spans two full laps
+            // at any modelled speed/dt, but loop to stay correct if it ever did).
+            while next_lap <= n_laps
+                && s >= start_s + lap_length * T::from(next_lap).unwrap_or_else(T::one)
+            {
+                lap_end_idx.push(lap.len() - 1);
+                next_lap += 1;
+            }
+            if s >= s_end {
+                break;
+            }
+        }
+        // Flush the final partial slow windows (idempotent) so the recovered regen energy and the tyre
+        // heat between the last slow-clock fire and the finish reach the states (energy closure), then
+        // re-stamp the last recorded row — the last lap's end-of-lap summary the stint exists to report
+        // must reflect the whole lap, symmetric for the pack and the tyres.
+        self.advance_slow(self.cfg.dt);
+        self.advance_tire_slow();
+        self.restamp_final_row(&mut lap);
         lap.lap_time_s = self.t;
-        lap
+        (lap, lap_end_idx)
     }
 
     /// Access the full fast-state buffer (tests/diagnostics).

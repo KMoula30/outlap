@@ -62,6 +62,10 @@ pub use t1::{
 pub use tire::{TireSlowLog, TireThermalMarch};
 pub use vehicle::{T0Options, T0Vehicle};
 
+// Re-export the tyre ring state so callers can name the terminal state a QSS stint carries lap-to-lap
+// ([`QssLap::tire_terminal`]) without depending on `outlap-tire` directly.
+pub use outlap_tire::TireThermalState;
+
 /// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];
 /// no `sim.yaml` field carries it in M1 (that would be a MINOR schema bump — deferred).
 pub const DEFAULT_DS_M: f64 = 2.0;
