@@ -28,6 +28,7 @@
 //! energy manager in M6.
 
 use outlap_schema::sim::{FzCoupling, Tier};
+use outlap_tire::TireThermalState;
 
 use crate::error::{T0Error, T1Error};
 use crate::path::T0Path;
@@ -126,6 +127,10 @@ pub struct QssLap {
     /// Tyre-thermal slow-state channels (present iff a [`TireThermalMarch`] was supplied — the
     /// representative front tyre's `T_s/T_c/T_g`, wear, damage, and grip multiplier).
     pub tire: Option<TireSlowLog>,
+    /// The **terminal** representative-tyre state at the end of the lap (present iff a
+    /// [`TireThermalMarch`] was supplied) — the `(T_s/T_c/T_g, wear, damage)` a stint carries into the
+    /// next lap's seed so the tyre state continues across the lap boundary with no reset.
+    pub tire_terminal: Option<TireThermalState<f64>>,
     /// The g-g-g-v envelope the lap ran on (the returnable `lap.envelope`; `None` for the degenerate
     /// no-envelope path).
     pub envelope: Option<GgvEnvelope>,
@@ -244,6 +249,9 @@ fn march_slow_states(
 /// The electrified stack (`coupling`) and the tyre-thermal march (`tire`) both march along the
 /// previous pass and re-solve, composed into one outer iteration: each solve indexes the envelope on
 /// the marched `(T_tire, wear)` **and** scales the powertrain ceiling by the marched traction scale.
+// The 4-tuple return is the internal profile-solve contract (lap time + the two slow-state logs +
+// the tyre terminal state a stint carries); a struct would just rename the fields.
+#[allow(clippy::type_complexity)]
 fn solve_profile(
     t0: &T0Vehicle,
     env: &GgvEnvelope,
@@ -251,11 +259,19 @@ fn solve_profile(
     tire: Option<&TireThermalMarch>,
     path: &T0Path,
     ws: &mut T0Workspace,
-) -> Result<(f64, Option<SlowLog>, Option<TireSlowLog>), T0Error> {
+) -> Result<
+    (
+        f64,
+        Option<SlowLog>,
+        Option<TireSlowLog>,
+        Option<TireThermalState<f64>>,
+    ),
+    T0Error,
+> {
     let n = path.len();
     if coupling.is_none() && tire.is_none() {
         let lap_time = solve_into_ggv(t0, env, path, ws)?;
-        return Ok((lap_time, None, None));
+        return Ok((lap_time, None, None, None));
     }
     let mut ax = vec![0.0; n];
     // Electrified slow-state buffers (traction scale + SoC/temperature logs).
@@ -304,8 +320,9 @@ fn solve_profile(
             machine_temp_c: std::mem::take(&mut temp_c),
         })
     });
+    let mut tire_terminal = None;
     let tire_slow = tire.map(|tm| {
-        tm.march(
+        tire_terminal = Some(tm.march(
             t0,
             env,
             path,
@@ -314,10 +331,10 @@ fn solve_profile(
             &mut t_tire_k,
             &mut wear_mm,
             &mut tire_log,
-        );
+        ));
         tire_log
     });
-    Ok((lap_time, slow, tire_slow))
+    Ok((lap_time, slow, tire_slow, tire_terminal))
 }
 
 /// Solve a `t0` lap: the point-mass velocity profile on the envelope, with the slow-state coupling
@@ -339,7 +356,8 @@ pub fn solve_t0(
     flat_track: bool,
 ) -> Result<QssLap, QssError> {
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow, tire_slow) = solve_profile(t0, &env, coupling, tire, path, &mut ws)?;
+    let (lap_time_s, slow, tire_slow, tire_terminal) =
+        solve_profile(t0, &env, coupling, tire, path, &mut ws)?;
     let lap = lap_result_from_ws(path, &ws, lap_time_s, line, resolved_hash, notes);
     Ok(QssLap {
         lap,
@@ -350,6 +368,7 @@ pub fn solve_t0(
         setup: None,
         slow,
         tire: tire_slow,
+        tire_terminal,
         envelope: Some(env),
     })
 }
@@ -374,7 +393,8 @@ pub fn solve_t1(
     flat_track: bool,
 ) -> Result<QssLap, QssError> {
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow, tire_slow) = solve_profile(t0, &env, coupling, tire, path, &mut ws)?;
+    let (lap_time_s, slow, tire_slow, tire_terminal) =
+        solve_profile(t0, &env, coupling, tire, path, &mut ws)?;
 
     // Re-trim at each solved station for the per-wheel channels + setup metrics.
     let n = path.len();
@@ -414,6 +434,7 @@ pub fn solve_t1(
         }),
         slow,
         tire: tire_slow,
+        tire_terminal,
         envelope: Some(env),
     })
 }

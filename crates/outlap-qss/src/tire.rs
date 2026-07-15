@@ -182,6 +182,21 @@ impl TireThermalMarch {
         self
     }
 
+    /// Override the seed with an explicit full state — the **stint continuity** path: seed lap N+1's
+    /// march from lap N's terminal `(T_s/T_c/T_g, wear, damage)` so the tyre state carries across the
+    /// lap boundary with no reset (§6.1 segment-to-segment march, extended across laps).
+    #[must_use]
+    pub fn with_state(mut self, state: TireThermalState<f64>) -> Self {
+        self.seed = state;
+        self
+    }
+
+    /// The seed state every march starts from (the state lap N+1 inherits from lap N in a stint).
+    #[must_use]
+    pub fn seed(&self) -> TireThermalState<f64> {
+        self.seed
+    }
+
     /// The seed surface temperature (K) — the reference `T_tire` the first (pre-march) solve indexes.
     #[must_use]
     pub fn seed_surface_k(&self) -> f64 {
@@ -190,8 +205,10 @@ impl TireThermalMarch {
 
     /// March the representative tyre state forward along a solved profile `(v, ax)`, filling the
     /// per-station envelope index `t_tire_k` / `wear_mm` (the state the car carries **into** station
-    /// `i`) and the telemetry `log`. Restarts from the seed each call, so every outer iteration marches
-    /// the whole lap from the reference state (deterministic). Zero heap allocation.
+    /// `i`) and the telemetry `log`, and returning the **terminal** state (the end-of-lap
+    /// `(T_s/T_c/T_g, wear, damage)` a stint carries into the next lap's seed). Restarts from the seed
+    /// each call, so every outer iteration marches the whole lap from the reference state
+    /// (deterministic). Zero heap allocation.
     #[allow(clippy::too_many_arguments)]
     pub fn march(
         &self,
@@ -203,7 +220,7 @@ impl TireThermalMarch {
         t_tire_k: &mut [f64],
         wear_mm: &mut [f64],
         log: &mut TireSlowLog,
-    ) {
+    ) -> TireThermalState<f64> {
         let mut st = self.seed;
         let m = veh.mass_kg;
         let n = path.len();
@@ -221,6 +238,7 @@ impl TireThermalMarch {
         if !path.closed && n > 0 {
             self.record(n - 1, &st, t_tire_k, wear_mm, log);
         }
+        st
     }
 
     /// Record station `i`'s envelope index + telemetry from the entry state.
@@ -453,6 +471,50 @@ mod tests {
         assert!(
             lt_deg > lt_frozen,
             "a hot, worn tyre should not lap faster: {lt_deg:.4} vs {lt_frozen:.4}"
+        );
+    }
+
+    /// Stint continuity (M5 PR6): the terminal state a march returns, fed into the next lap's seed
+    /// via `with_state`, makes lap N+1 start **exactly** where lap N ended — no reset — and wear stays
+    /// monotone non-decreasing across the lap boundary (Archard: sliding energy only ever adds; it may
+    /// saturate at `w_max`, but never falls). A cold-seeded first lap also warms the surface, and that
+    /// warmed state carries into lap 2's seed.
+    #[test]
+    fn stint_continuity_carries_state_across_laps() {
+        let (t0, env, path, v, ax) = solved();
+        let n = path.len();
+        let march = sample_march().with_seed(25.0);
+        // Lap 1 from the cold seed.
+        let (mut t1, mut w1) = (vec![0.0; n], vec![0.0; n]);
+        let mut log1 = tire_slow_log(n);
+        let term1 = march.march(&t0, &env, &path, &v, &ax, &mut t1, &mut w1, &mut log1);
+        assert!(term1.wear_mm > 0.0, "lap 1 wore the tread");
+        assert!(
+            term1.t_s_k > 25.0 + CELSIUS_K,
+            "lap 1 warmed the surface off the 25 °C cold seed"
+        );
+        // Lap 2 seeded from lap 1's terminal state.
+        let march2 = march.with_state(term1);
+        let (mut t2, mut w2) = (vec![0.0; n], vec![0.0; n]);
+        let mut log2 = tire_slow_log(n);
+        let term2 = march2.march(&t0, &env, &path, &v, &ax, &mut t2, &mut w2, &mut log2);
+        // Lap 2 starts exactly where lap 1 ended (the envelope-index buffers + telemetry logs).
+        assert_eq!(
+            w2[0].to_bits(),
+            term1.wear_mm.to_bits(),
+            "lap 2 wear seed = lap 1 terminal wear (no reset)"
+        );
+        assert_eq!(
+            log2.surface_temp_c[0].to_bits(),
+            (term1.t_s_k - CELSIUS_K).to_bits(),
+            "lap 2 surface seed = lap 1 terminal surface (no reset)"
+        );
+        // Wear is monotone non-decreasing across the lap boundary (never falls; may cap at w_max).
+        assert!(
+            term2.wear_mm >= term1.wear_mm - 1e-12,
+            "wear never falls across the lap boundary: {} -> {}",
+            term1.wear_mm,
+            term2.wear_mm
         );
     }
 
