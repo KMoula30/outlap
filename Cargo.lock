@@ -1400,6 +1400,13 @@ dependencies = [
 [[package]]
 name = "outlap-powertrain"
 version = "0.3.0"
+dependencies = [
+ "dhat",
+ "num-traits",
+ "outlap-core",
+ "outlap-schema",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "outlap-py"

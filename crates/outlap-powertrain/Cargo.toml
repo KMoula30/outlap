@@ -5,6 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+outlap-core = { path = "../outlap-core" }
+# default-features = false keeps outlap-powertrain wasm-clean; tests bring the std FsLoader.
+outlap-schema = { path = "../outlap-schema", default-features = false }
+num-traits = { workspace = true, features = ["libm"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+outlap-schema = { path = "../outlap-schema" }
+dhat = { workspace = true }
 
 [lints]
 workspace = true
