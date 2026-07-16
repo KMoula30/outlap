@@ -337,3 +337,102 @@ fn battery_doc(derate: &str) -> String {
          thermal: {{mass_kg: 400.0, cp_j_per_kgk: 900.0, thermal_resistance_k_per_w: 0.02, coolant_temp_c: 25.0}}\n"
     )
 }
+
+// --- vehicle/1.7 ERS block validation (M6/PR1: the consumer lands the checks) --------------------
+
+/// A rising `power_frac` grants MORE power at higher speed than the declared limit — always
+/// meaningless for a de-rate curve, so it is rejected (the `SpeedTaper` doc-comment promise,
+/// enforced since the rulebook consumes the taper).
+#[test]
+fn a_rising_taper_power_frac_is_rejected() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    let l = loader();
+    let base = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    let mut broken = base;
+    broken
+        .ers
+        .as_mut()
+        .expect("f1_2026 has ers")
+        .deployment
+        .taper_vs_speed
+        .power_frac = vec![0.5, 1.0, 0.0];
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("a rising taper must be rejected");
+    assert!(
+        format!("{err}").contains("monotone non-increasing"),
+        "message should name the property: {err}"
+    );
+}
+
+/// A `recharge_target_soc` outside the usable `soc_window` can never be reached — rejected with
+/// the window bounds in the message.
+#[test]
+fn a_recharge_target_outside_the_soc_window_is_rejected() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    let l = loader();
+    let base = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    let mut broken = base;
+    broken.ers.as_mut().unwrap().recovery.recharge_target_soc = Some(0.95); // window is [0.2, 0.9]
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("a target outside the window must be rejected");
+    assert!(
+        format!("{err}").contains("recharge_target_soc"),
+        "message should name the field: {err}"
+    );
+}
+
+/// `per_lap_deploy_mj` is never estimated (M6/PR1, D-M6-5): an absent value means "unbounded"
+/// — the old `= capacity_mj` heuristic would become a phantom cap once budgets are enforced.
+#[test]
+fn per_lap_deploy_budget_is_not_estimated() {
+    let l = loader();
+    let resolved = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves");
+    assert!(
+        resolved
+            .spec
+            .ers
+            .as_ref()
+            .expect("f1_2026 has ers")
+            .deployment
+            .per_lap_deploy_mj
+            .is_none(),
+        "an absent deploy budget must stay absent"
+    );
+    assert!(
+        !resolved
+            .report
+            .estimated
+            .iter()
+            .any(|e| e.pointer.contains("per_lap_deploy")),
+        "no estimation row for the deploy budget"
+    );
+}
+
+/// The new optional vehicle/1.7 ERS fields load, validate, and round-trip.
+#[test]
+fn the_new_ers_recovery_fields_load() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    let l = loader();
+    let base = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    let mut spec = base;
+    {
+        let ers = spec.ers.as_mut().unwrap();
+        ers.elec_mech_factor = Some(0.97);
+        ers.recovery.recharge_target_soc = Some(0.55);
+        ers.recovery.ramp_initial_step_kw = Some(150.0);
+        ers.recovery.ramp_rate_kw_per_s = Some(50.0);
+        ers.recovery.ramp_total_kw = Some(700.0);
+    }
+    let resolved = resolve_vehicle(&spec, &Overrides::default(), &l, &LoadOptions::default())
+        .expect("the new optional fields validate");
+    let ers = resolved.spec.ers.expect("ers present");
+    assert_eq!(ers.recovery.recharge_target_soc, Some(0.55));
+    assert_eq!(ers.elec_mech_factor, Some(0.97));
+}

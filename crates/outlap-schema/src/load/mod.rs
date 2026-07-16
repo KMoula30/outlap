@@ -116,7 +116,7 @@ pub fn resolve_vehicle(
     finish(
         &merged,
         root_id,
-        crate::SCHEMA_MINOR,
+        crate::current_minor(schema_name::VEHICLE),
         provenance,
         loader,
         &mut sources,
@@ -145,6 +145,7 @@ fn finish(
         sources,
         root_id,
         root_minor,
+        crate::current_minor(schema_name::VEHICLE),
         &mut report.warnings,
     )?;
     unknown::capture_top_level_extensions(&mut value);
@@ -235,7 +236,15 @@ fn load_typed<T: DeserializeOwned + schemars::JsonSchema>(
     let version = version_gate(&tree, expected_schema, id, sources)?;
     let (value, index) = tree::to_value(&tree);
     let mut warnings = Vec::new();
-    unknown::check::<T>(&value, &index, sources, id, version.minor, &mut warnings)?;
+    unknown::check::<T>(
+        &value,
+        &index,
+        sources,
+        id,
+        version.minor,
+        crate::current_minor(expected_schema),
+        &mut warnings,
+    )?;
     let typed: T = deserialize(&value, &index, sources, id)?;
     Ok((typed, id, index, value))
 }

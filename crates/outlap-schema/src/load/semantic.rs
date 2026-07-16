@@ -129,22 +129,119 @@ pub fn check_vehicle(
         check_driver(driver, &s, sources)?;
     }
 
-    // ERS.
+    // ERS (range-check the FULL block — the consumer lands the checks, M6/PR1).
     if let Some(ers) = &spec.ers {
         check_soc_window(ers.es.soc_window, "/ers/es/soc_window", &s, sources)?;
+        positive(
+            ers.es.capacity_mj,
+            "capacity_mj",
+            "/ers/es/capacity_mj",
+            &s,
+            sources,
+        )?;
+        positive(
+            ers.deployment.power_limit_kw,
+            "power_limit_kw",
+            "/ers/deployment/power_limit_kw",
+            &s,
+            sources,
+        )?;
         check_taper(
             &ers.deployment.taper_vs_speed,
             "/ers/deployment/taper_vs_speed",
             &s,
             sources,
         )?;
+        if let Some(b) = ers.deployment.per_lap_deploy_mj {
+            positive(
+                b,
+                "per_lap_deploy_mj",
+                "/ers/deployment/per_lap_deploy_mj",
+                &s,
+                sources,
+            )?;
+        }
         if let Some(om) = &ers.override_mode {
+            positive(
+                om.power_limit_kw,
+                "power_limit_kw",
+                "/ers/override_mode/power_limit_kw",
+                &s,
+                sources,
+            )?;
             check_taper(
                 &om.taper_vs_speed,
                 "/ers/override_mode/taper_vs_speed",
                 &s,
                 sources,
             )?;
+            if let Some(e) = om.extra_energy_per_lap_mj {
+                non_negative(
+                    e,
+                    "extra_energy_per_lap_mj",
+                    "/ers/override_mode/extra_energy_per_lap_mj",
+                    &s,
+                    sources,
+                )?;
+            }
+        }
+        positive(
+            ers.recovery.braking_power_limit_kw,
+            "braking_power_limit_kw",
+            "/ers/recovery/braking_power_limit_kw",
+            &s,
+            sources,
+        )?;
+        non_negative(
+            ers.recovery.per_lap_harvest_mj,
+            "per_lap_harvest_mj",
+            "/ers/recovery/per_lap_harvest_mj",
+            &s,
+            sources,
+        )?;
+        if let Some(t) = ers.recovery.recharge_target_soc {
+            let [lo, hi] = ers.es.soc_window;
+            if !(lo..=hi).contains(&t) {
+                return Err(SchemaError::semantic(
+                    sources,
+                    s.at("/ers/recovery/recharge_target_soc"),
+                    format!(
+                        "`recharge_target_soc` must lie inside `es.soc_window` [{lo}, {hi}], got {t}"
+                    ),
+                    None,
+                ));
+            }
+        }
+        for (v, label, ptr) in [
+            (
+                ers.recovery.ramp_initial_step_kw,
+                "ramp_initial_step_kw",
+                "/ers/recovery/ramp_initial_step_kw",
+            ),
+            (
+                ers.recovery.ramp_rate_kw_per_s,
+                "ramp_rate_kw_per_s",
+                "/ers/recovery/ramp_rate_kw_per_s",
+            ),
+            (
+                ers.recovery.ramp_total_kw,
+                "ramp_total_kw",
+                "/ers/recovery/ramp_total_kw",
+            ),
+        ] {
+            if let Some(v) = v {
+                positive(v, label, ptr, &s, sources)?;
+            }
+        }
+        if let Some(f) = ers.elec_mech_factor {
+            if !(f > 0.0 && f <= 1.0 && f.is_finite()) {
+                return Err(SchemaError::semantic(
+                    sources,
+                    s.at("/ers/elec_mech_factor"),
+                    "`elec_mech_factor` must lie in (0, 1]",
+                    None,
+                ));
+            }
         }
     }
 
@@ -344,6 +441,16 @@ fn check_taper(
                 None,
             ));
         }
+    }
+    // A speed taper de-rates power at speed; a rising fraction is always meaningless (it would
+    // grant MORE power at higher speed than the declared limit). Matches the `SpeedTaper` promise.
+    if let Some(i) = taper.power_frac.windows(2).position(|w| w[1] > w[0]) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at(&format!("{ptr}/power_frac/{}", i + 1)),
+            "`power_frac` must be monotone non-increasing with speed",
+            None,
+        ));
     }
     Ok(())
 }

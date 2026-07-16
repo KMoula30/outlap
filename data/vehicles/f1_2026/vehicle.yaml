@@ -2,7 +2,7 @@
 # Reference topology: F1 2026 hybrid (ICE + MGU-K on the same shaft -> gearbox -> rear diff -> RL+RR).
 # NOTE: ERS/energy figures are approximate 2026-regulation values for testing — verify against the
 # published FIA 2026 Technical Regulations before shipping this as reference data.
-schema: vehicle/1.0
+schema: vehicle/1.6
 name: "Reference F1 2026 hybrid"
 chassis:
   mass_kg: 768.0
