@@ -60,12 +60,12 @@ fn f1_ers() -> Ers {
 
 /// (duration s, v_start kph, v_end kph, demand, brake MW, ICE surplus kW) per lap phase.
 const PHASES: &[(f64, f64, f64, f64, f64, f64)] = &[
-    (9.0, 80.0, 330.0, 1.0, 0.0, 0.0),    // pit straight: launch to near top speed
-    (2.5, 330.0, 90.0, 0.0, 1.6e6, 0.0),  // T1 heavy braking
+    (9.0, 80.0, 330.0, 1.0, 0.0, 0.0), // pit straight: launch to near top speed
+    (2.5, 330.0, 90.0, 0.0, 1.6e6, 0.0), // T1 heavy braking
     (3.0, 90.0, 110.0, 0.55, 0.0, 180e3), // medium corner, part throttle
     (8.0, 110.0, 320.0, 1.0, 0.0, 150e3), // back straight (SoC low → super-clip at the end)
     (2.0, 320.0, 120.0, 0.0, 1.2e6, 0.0), // chicane braking
-    (5.0, 120.0, 250.0, 1.0, 0.0, 0.0),   // final sector
+    (5.0, 120.0, 250.0, 1.0, 0.0, 0.0), // final sector
 ];
 
 fn main() {
@@ -77,7 +77,9 @@ fn main() {
     let mut ramp_reduced = 0.0_f64;
     let mut t = 0.0_f64;
 
-    println!("t_s,v_kph,demand,brake_w,soc,mode,deploy_w,harvest_w,ledger_deploy_j,ledger_harvest_j");
+    println!(
+        "t_s,v_kph,demand,brake_w,soc,mode,deploy_w,harvest_w,ledger_deploy_j,ledger_harvest_j"
+    );
     for &(dur, v0, v1, demand, brake_w, surplus_w) in PHASES {
         let steps = (dur / DT) as usize;
         for i in 0..steps {
