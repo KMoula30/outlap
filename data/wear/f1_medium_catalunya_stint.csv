@@ -1,0 +1,26 @@
+# outlap.wearcal derived stint-delta fixture — F1 medium-compound, Catalunya-like, 22 laps.
+# Derived/anonymised per-lap pace curve (NOT raw telemetry; HANDOFF §15): representative of a
+# medium tyre with ~0.05-0.08 s/lap early decay accelerating into a cliff near lap ~18.
+lap,lap_time_s
+1,85.8
+2,85.829
+3,85.846
+4,85.869
+5,85.921
+6,85.963
+7,86.05
+8,86.155
+9,86.215
+10,86.329
+11,86.489
+12,86.649
+13,86.832
+14,87.028
+15,87.289
+16,87.572
+17,87.822
+18,88.146
+19,88.433
+20,88.763
+21,89.063
+22,89.392
