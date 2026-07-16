@@ -8,6 +8,13 @@
 //! throttle (part-throttle recharge), a second straight starting SoC-poor (super-clip ramp), and
 //! a final braking zone. The pack is a trivial integrator here — PR2/PR4 wire the real Thevenin
 //! pack; this example only exercises the manager itself.
+// Example-only: phase-table doc shorthand and coarse step-count casts are fine here.
+#![allow(
+    clippy::doc_markdown,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 
 use outlap_powertrain::{
     DecideInput, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger, Policy,
