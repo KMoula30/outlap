@@ -51,11 +51,15 @@ def catalunya() -> Track:
 
 @pytest.fixture(scope="module")
 def qss_stint(catalunya: Track) -> xr.Dataset:
-    """A warm-seeded 5-lap QSS stint: the tyres degrade over the run (wear + thermal)."""
+    """A warm-seeded 8-lap QSS stint: the tyres degrade over the run (wear + thermal).
+
+    Eight laps (not five) so the realistically-gentle calibrated wear (M5 PR8) accumulates a clear
+    degradation signal past the small early thermal-settling transient.
+    """
     return solve_stint_dataset(
         LIMEBEER,
         catalunya,
-        n_laps=5,
+        n_laps=8,
         tier="t1",
         ds_m=8.0,
         sim=FLAT_COARSE,
@@ -67,8 +71,8 @@ def qss_stint(catalunya: Track) -> xr.Dataset:
 
 
 def test_qss_stint_has_a_lap_axis(qss_stint: xr.Dataset) -> None:
-    assert qss_stint.sizes["lap"] == 5
-    assert list(qss_stint["lap"].values) == [1, 2, 3, 4, 5]
+    assert qss_stint.sizes["lap"] == 8
+    assert list(qss_stint["lap"].values) == [1, 2, 3, 4, 5, 6, 7, 8]
     assert qss_stint["lap_time_s"].dims == ("lap",)
     assert qss_stint["v"].dims == ("lap", "s")
     for name in (
@@ -81,7 +85,7 @@ def test_qss_stint_has_a_lap_axis(qss_stint: xr.Dataset) -> None:
     ):
         assert qss_stint[name].dims == ("lap", "s"), name
     assert qss_stint.attrs["tier"] == "t1"
-    assert qss_stint.attrs["n_laps"] == 5
+    assert qss_stint.attrs["n_laps"] == 8
     assert isinstance(qss_stint.attrs["notes"], tuple) and qss_stint.attrs["notes"]
     assert any("stint" in n.lower() for n in qss_stint.attrs["notes"])
 
@@ -113,12 +117,16 @@ def test_qss_stint_wear_is_monotone_and_pace_degrades(qss_stint: xr.Dataset) -> 
     # Wear never falls anywhere along the concatenated stint (Archard: sliding energy only adds).
     wear_flat = qss_stint["tire_wear_mm"].values.reshape(-1)
     assert (np.diff(wear_flat) >= -1e-9).all(), "wear is monotone non-decreasing"
-    # Warm-seeded, the tyres degrade: pace is lost monotonically and grip does not rise.
+    # Warm-seeded and realistically (gently) calibrated (M5 PR8), the tyres degrade: net pace is
+    # lost over the stint. A small early thermal-settling transient competes with wear lap-to-lap,
+    # so the invariant is the trend (late laps slower than early), not strict lap-to-lap monotonicity.
     lap_time = qss_stint["lap_time_s"].values
     assert lap_time[-1] > lap_time[0], (
         "the warm-seeded stint loses pace as the tyres degrade"
     )
-    assert (np.diff(lap_time) >= -1e-2).all(), "pace loss is monotone (within noise)"
+    assert lap_time[-3:].mean() > lap_time[:3].mean() + 1e-3, (
+        "pace degrades over the stint (the late laps are slower than the early ones)"
+    )
     grip_end = qss_stint["tire_grip"].values[:, -1]
     assert grip_end[-1] <= grip_end[0] + 1e-9, "grip does not rise on a degrading stint"
 

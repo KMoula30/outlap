@@ -113,7 +113,8 @@ mf61:
   # Rolling resistance (My) — only qsy1 is tabulated for this tyre.
   QSY1: 0.01
 thermal:
-  # SYNTHETIC placeholder (passenger-car band) — the thermal ring model lands in M5.
+  # Physically-plausible passenger-car thermal ring (M5 PR1): lower optimal temperature and heat
+  # capacities than a racing slick; higher cold inflation pressure.
   c_s: 6000.0
   c_c: 18000.0
   c_g: 1300.0
@@ -130,18 +131,20 @@ thermal:
   p_cold: 220.0
   t_cold: 20.0
 wear:
-  # SYNTHETIC placeholder (passenger-car band) — the wear/cliff model lands in M5.
-  k_w: 0.0006
+  # CALIBRATED (passenger-car band, M5 PR7/PR8): harder, slower-wearing than a racing slick — a
+  # smaller k_w and a later, gentler cliff (higher w_c, wider s_w, shallower delta_c). Wear grows
+  # gradually over a long run instead of the saturating synthetic placeholder (k_w was 0.0006).
+  k_w: 1.5e-9
   w_max: 8.0
-  w_c: 2.0
+  w_c: 3.0
   tau_d: 900.0
   t_deg: 110.0
   delta_t_ref: 20.0
   beta: 2.0
-  delta_c: 0.20
-  s_w: 0.5
+  delta_c: 0.10
+  s_w: 0.6
   delta_d: 0.25
 provenance:
   citation: "H. B. Pacejka, Tyre and Vehicle Dynamics, 2nd ed. (2006), Appendix 3, Table A3.1 (205/60R15 91V, 2.2 bar, ISO sign)"
-  source: "MF6.1 force/moment coefficients transcribed verbatim from the book table; 2nd-edition set (no PP* pressure terms; Mx=0; My via qsy1). thermal/wear blocks are synthetic placeholders pending the M5 models."
+  source: "MF6.1 force/moment coefficients transcribed verbatim from the book table; 2nd-edition set (no PP* pressure terms; Mx=0; My via qsy1). Thermal ring physically-plausible passenger-car band (M5 PR1); wear/cliff calibrated to a slower-wearing road-tyre band via the outlap.wearcal methodology (M5 PR7/PR8)."
   synthetic: false

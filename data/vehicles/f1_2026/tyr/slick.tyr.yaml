@@ -37,17 +37,20 @@ thermal:
   p_cold: 138.0
   t_cold: 20.0
 wear:
-  k_w: 0.0009
+  # CALIBRATED (racing-slick "medium" band, M5 PR7/PR8): k_w + cliff recovered by outlap.wearcal
+  # from a representative medium-compound stint-decay curve. Distinct soft/medium/hard compound
+  # presets live in data/tires/f1_2026_compounds/; this default slick is the medium baseline.
+  k_w: 4.4e-9
   w_max: 8.0
   w_c: 2.0
   tau_d: 600.0
   t_deg: 120.0
   delta_t_ref: 20.0
   beta: 2.0
-  delta_c: 0.25
+  delta_c: 0.12
   s_w: 0.5
   delta_d: 0.30
 provenance:
   citation: "Pacejka, Tire and Vehicle Dynamics, 3rd ed. (2012)"
-  source: "synthetic — generic racing slick"
+  source: "synthetic generic racing slick (MF6.1 core); thermal ring physically-plausible (M5 PR1); wear/cliff inverse-calibrated by outlap.wearcal from a medium stint-decay curve (M5 PR7/PR8)"
   synthetic: true

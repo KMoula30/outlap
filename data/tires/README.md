@@ -24,12 +24,17 @@ clean-room (no third-party source code consulted).
 
 ## Blocks that aren't published
 
-`Tyr` requires `thermal` and `wear` blocks, but those models are M5 and the published sources give
-only force/moment coefficients. Each dataset therefore carries **synthetic, clearly-labelled**
-thermal/wear placeholders (physically-plausible for the tyre class), noted in `provenance.source`
-and in a `# SYNTHETIC` comment on the block. `synthetic: false` on a dataset means the load-bearing
-force/moment coefficients are the published measured set — the placeholder blocks are the documented
-exception.
+`Tyr` requires `thermal` and `wear` blocks, but the published sources give only force/moment
+coefficients. The thermal ring (M5 PR1) is a physically-plausible lumped-node set for the tyre
+class; the wear/cliff block is **inverse-calibrated by `outlap.wearcal`** (M5 PR7/PR8) from a
+representative stint-decay curve — a realistic gradual wear + cliff rather than the earlier
+saturating placeholder — noted in `provenance.source` and in a `# CALIBRATED` comment on the block.
+`synthetic: false` on a dataset means the load-bearing force/moment coefficients are the published
+measured set; the thermal/wear blocks are the documented modelled exception.
+
+Soft/medium/hard **compound presets** built on the racing-slick core live in
+`f1_2026_compounds/` — see its README. They differentiate the calibrated baseline by peak grip,
+temperature window, and wear rate for the multi-compound strategy demo.
 
 ## Validation
 
