@@ -3,9 +3,9 @@
 
 Drives every panel from the **real** stint drivers through the public API
 (`outlap.core.solve_stint_dataset`) — nothing here re-implements the physics; it only runs the
-solvers and plots their datasets. The tyre thermal/wear parameters are still the committed *synthetic*
-placeholders (calibration is PR7/PR8), so the point of the figure is the *machinery*: the slow state
-carrying lap-to-lap, and pace + tyre state responding to it.
+solvers and plots their datasets. The tyre thermal/wear parameters are the `outlap.wearcal`-calibrated
+values (M5 PR7/PR8), so the figure shows the *machinery* — the slow state carrying lap-to-lap — with
+physically-realistic degradation: gradual wear and a cliff, not the earlier saturating placeholder.
 
 Six panels:
   (a) QSS pace over a warm-seeded stint — lap time climbs as the tyres degrade (wear + thermal);
@@ -14,7 +14,8 @@ Six panels:
       length (continuous, laps concatenated), climbing out of the 20 °C cold seed toward the window;
   (d) slow-state continuity — the surface temperature at each lap boundary carries with no reset (a
       per-lap *reset* reference, dashed, shows what "start every lap fresh" would look like);
-  (e) tread wear accumulating across the stint (monotone, saturating at w_max with the synthetic k_w);
+  (e) tread wear accumulating gradually across the stint (monotone; below the cliff onset w_c over
+      these few laps, with the calibrated k_w);
   (f) the T2 transient stint — per-lap lap time + per-wheel end-of-lap wear, one continuous run.
 
 Run from anywhere:  python python/tools/plot_stint.py
@@ -166,8 +167,8 @@ def main() -> None:
     ax2.grid(False)
 
     fig.suptitle(
-        "M5 PR6 — multi-lap stint: the tyre-thermal slow state carries lap-to-lap "
-        "(limebeer_2014_f1, Catalunya; synthetic tyre params pending PR7/PR8 calibration)",
+        "M5 — multi-lap stint: the tyre-thermal slow state carries lap-to-lap "
+        "(limebeer_2014_f1, Catalunya; outlap.wearcal-calibrated tyre params)",
         fontsize=12.5,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.96))
