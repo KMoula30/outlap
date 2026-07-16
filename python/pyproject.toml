@@ -36,6 +36,14 @@ track-import = [
 tire-fit = [
     "scipy>=1.14",
 ]
+# The stint-pace inverse calibrator (`outlap.wearcal`). scipy drives the fit; FastF1 is the opt-in
+# live pace-data loader (never in the hot path, never in CI). Enable with `uv sync --extra wear-cal`.
+# The offline round-trip recovery test needs only scipy (present via `tire-fit`); the live FastF1
+# loader is gated behind `pytest.importorskip("fastf1")`, so this extra stays out of CI.
+wear-cal = [
+    "scipy>=1.14",
+    "fastf1>=3.4",
+]
 
 [project.scripts]
 outlap = "outlap:main"
