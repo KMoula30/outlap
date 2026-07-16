@@ -12,7 +12,7 @@ and extending outlap, with the physics, the API, and worked recipes.
 The full architecture and specification live in [`docs/HANDOFF.md`](docs/HANDOFF.md); the working
 agreement is in [`CLAUDE.md`](CLAUDE.md).
 
-## What works at v0.2.5
+## What works at v0.3.0
 
 - **One vehicle description** consumed by every solver tier — chassis, aero, suspension, tyres, a
   drivetrain topology graph, ERS/battery, brakes — with a strict, friendly load pipeline (miette
@@ -28,7 +28,11 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
   per-wheel loads/slips, gear, regen power, SoC. (`t3`, the 14-DOF suspension model, is future.)
 - **Tyres**: a steady-state Magic Formula 6.1 model and a physical brush model, with a `.tir` codec
   and a Python MF6.1 fitting pipeline; citation-backed reference `.tyr` sets; first-order slip
-  relaxation, live in T2.
+  relaxation, live in T2. Plus the **flagship thermal ring + wear/degradation stack** (v0.3): a
+  reduced Farroni-TRT three-node thermal model (grip that depends on temperature), Archard wear
+  with a positive-feedback cliff, and irreversible thermal damage — marched as slow states in every
+  tier so a **stint** is simulable, inverse-calibrated from stint pace by `outlap.wearcal`, with
+  soft/medium/hard compound presets.
 - **Powertrain, thermal, and battery**: `.ptm` maps flowing through the drivetrain topology graph
   (gearboxes, splits, open/locked/LSD/solid diffs); an N-node machine-thermal network with torque
   derating; and a Thévenin battery whose SoC-dependent terminal voltage feeds back into the
@@ -42,7 +46,7 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
 - **Importers**: OSM+DEM tracks (with closed-lap graph assembly for fragmented circuits), TUMFTM
   tracks, PDT HDF5 powertrains (→ `.ptm` maps, battery params, an `.emotor` thermal network), and
   `.tir` tyre files.
-- **A notebook course** (`notebooks/00`–`09`, CI-executed with committed outputs): from the car as
+- **A notebook course** (`notebooks/00`–`10`, CI-executed with committed outputs): from the car as
   data to reading T2 traces like a race engineer — corner anatomy, the friction circle in action,
   car balance via what-if overrides.
 - **Validation, honestly reported**: the Perantoni & Limebeer 2014 F1 cross-check (top speed

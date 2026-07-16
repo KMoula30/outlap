@@ -4,6 +4,63 @@ All notable changes to outlap are documented here. This project follows
 [Conventional Commits](https://www.conventionalcommits.org) and
 [Semantic Versioning](https://semver.org).
 
+## [0.3.0] - 2026-07-16
+
+Milestone **M5** — the flagship **tyre thermal ring + wear/degradation** stack, the headline of the
+project: *no open-source tyre thermal + wear model existed anywhere*. A reduced Farroni-TRT
+three-node thermal ring (tread surface / carcass / inflation gas) gives grip that depends on
+temperature; an Archard sliding-energy wear law with Grosch temperature-hardness, a C¹ cliff, a
+`C_s(w)` positive-feedback mechanism (worn → hotter), and irreversible thermal damage give tyres
+that go off. All of it marches as **slow states** lap-to-lap in every tier (explicit Euler over the
+QSS quasi-static solution; the decimated slow clock in T2), so a **stint** — not just a lap — is
+simulable. The g-g-g-v envelope gained real `T_tire`/`wear` grid axes (Decision #49). Parameters are
+**inverse-calibrated from stint pace** by the new `outlap.wearcal` harness, soft/medium/hard compound
+presets ship, and the `10_stint_strategy` notebook demonstrates warm-up, the cliff, QSS↔T2 agreement,
+and a multi-compound crossover.
+
+### Added
+
+- **outlap-tire**: the `TireThermalState` + `TireThermalRing` — a pure, wasm-clean, alloc-free
+  `step(dt, drivers)` integrating the three node ODEs with semi-implicit Euler, exposing the three
+  force-model couplings (gas-law pressure `p = p_cold·T_g/T_cold`, the grip window
+  `λ_μ(T_s) = exp(−c_T·((T_s−T_opt)/T_opt)²)`, and carcass softening). Then the §7.3 wear/damage law
+  on top: tread depth `w` (Archard), damage `D` (threshold-power, irreversible), the cliff sigmoid,
+  and the `C_s(w)` feedback. Theory: `docs/theory/tire-thermal.md` + `tire-wear.md` (Farroni,
+  Archard, Grosch, Pacejka citations); property tests for warm-up bands, energy closure, wear
+  monotone in sliding energy, C¹ cliff, determinism, alloc=0, f32/f64 parity.
+- **outlap-qss / outlap-transient**: the ring+wear wired as a third hand-rolled slow subsystem in
+  both tiers — the QSS `march_slow_states` (per-segment explicit Euler, indexing the new envelope
+  tire-state axes) and the T2 `SlowStack` (per-wheel, on the decimated slow clock, feeding
+  `mu_scale`/pressure back into the per-step force call). Reference-slice bit-identity keeps frozen
+  tyre laps and the QSS↔T2 parity gates byte-identical (`tire_thermal` defaults off for single laps).
+- **outlap-py / python**: multi-lap stint entry points (`solve_stint`, `solve_transient_stint`) that
+  carry the slow state lap-to-lap, and `stint_dataset` / `transient_stint_dataset` surfacing the
+  per-wheel `T_s/T_c/T_g`, wear, damage, and grip channels on a `lap` axis.
+- **python (`outlap.wearcal`)**: the **stint-pace inverse-calibration harness** — a fast
+  reduced-order surrogate (clean-room numpy mirror of the Rust ring's laws) inverted by
+  `scipy.optimize.least_squares` to recover `k_w`, `w_c`, `s_w`, `Δ_c` (and the grip-window/damage
+  terms) from an observed per-lap pace curve. FastF1 is the opt-in live loader (`wear-cal` extra,
+  never in CI, anonymised per-lap times only per §15); a faithful sim engine wraps the real driver.
+  CLI `python -m outlap.wearcal {calibrate, synth, sim-check}`, a committed derived stint fixture,
+  and a round-trip recovery gate.
+- **data**: the reference `.tyr` thermal/wear blocks are **recalibrated** off the saturating
+  synthetic placeholders (a 25-lap F1 stint now wears ~0.1→3.2 mm and loses ~4 s with a cliff), and
+  **soft/medium/hard compound presets** (`data/tires/f1_2026_compounds/`) differentiated by peak
+  grip / temperature window / wear rate for the strategy demo.
+- **notebooks**: **`10_stint_strategy.ipynb`** — warm-up + degradation + the cliff, the QSS↔T2
+  stint-decay agreement (on the validated Limebeer reference), and the soft/medium/hard lap-time and
+  cumulative-time crossover (the stage-2 strategy tease, dry only).
+
+### Validation (§13, Decision #48 — assert where robust, record-and-decompose otherwise)
+
+- **Tyre thermal** (`docs/validation/tire-thermal.md`): cold-start warm-up is monotone and the
+  settled surface temperature (~99 °C peak) lands in the published Farroni/broadcast slick band
+  (85–115 °C, asserted); the ~6-lap warm-up time constant is recorded, not gated.
+- **Wear/cliff** (`docs/validation/wear-cliff.md`): after inverse-calibration the real driver
+  reproduces monotone pace loss and the cliff (wear crossing `w_c` ~lap 14, the per-lap loss peaking
+  at the sigmoid inflection); the QSS↔T2 stint decay agrees to **0.041 ≤ 0.1 s/lap**, the residual
+  decomposed as the T2 speed-margin sliding-energy effect.
+
 ## [0.2.5] - 2026-07-13
 
 Milestone **M4** — the transient **T2** tier, end to end: a 7-DOF chassis integrated through time at
