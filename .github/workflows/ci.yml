@@ -27,6 +27,7 @@ jobs:
       - run: cargo build --target wasm32-unknown-unknown -p outlap-tire      # tire kernels stay wasm-clean
       - run: cargo build --target wasm32-unknown-unknown -p outlap-qss       # QSS solvers stay wasm-clean (parallel feature off)
       - run: cargo build --target wasm32-unknown-unknown -p outlap-vehicle    # T2 blocks stay wasm-clean
+      - run: cargo build --target wasm32-unknown-unknown -p outlap-powertrain # ERS rulebook/manager stays wasm-clean
       - run: cargo build --target wasm32-unknown-unknown -p outlap-transient  # T2 orchestration stays wasm-clean
 
   python:

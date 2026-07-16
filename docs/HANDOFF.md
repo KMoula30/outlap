@@ -125,7 +125,7 @@ One experienced simulation engineer builds v1 solo.
 | 27 | Errors/panics | **Typed (thiserror) + panic-free core**: all fallible APIs return typed errors; kernels never panic; `debug_assert!` for physics invariants; anyhow only in CLI edges |
 | 28 | Lint strictness | **Strict**: clippy::pedantic baseline (curated allow-list), `deny(missing_docs)` on pub items, `forbid(unsafe_code)` everywhere except the C-ABI/FFI crate, rustfmt defaults |
 | 29 | 7-DOF Fz algebraic loop | **User-selectable solver setting**: `one_step_lag` (default) or `fixed_point` (2–3 damped iterations) — per the author, both ship in v1 as a simulation setting |
-| 30 | Map interpolation | **Monotone cubic Hermite (Fritsch-Carlson), C¹**, one shared implementation for all gridded maps; analytic derivatives for Newton solvers |
+| 30 | Map interpolation | **Monotone cubic Hermite (Fritsch-Carlson), C¹**, one shared implementation for all gridded maps; analytic derivatives for Newton solvers. **AMENDED M6/PR1 (recorded exception):** regulatory *closed-form piecewise-linear formulas* (FIA C5.2.8 ERS tapers, C5.12 ramp bounds) are evaluated by the shared exact piecewise-linear interpolant — the Hermite bows a flat-plateau breakpoint set up to +78 kW above the regulation line at 315 kph. Closed-form regs only; gridded maps stay on the Hermite |
 | 31 | T0 envelope vs slow states | **Base table gg(v, ax, g_normal) + separable multiplicative corrections** from T1 sensitivities (μ_tire, mass, ClA); validated against full T1 re-solves in CI. **AMENDED 2026-07-14 (author-authorized, M5/PR4 — see #49):** tyre thermal + wear are promoted from corrections to **genuine grid axes** the boundary is re-solved across (`gg(v, ax, g_normal, T_tire, wear)`); μ_tire/mass/ClA stay separable corrections |
 | 32 | EOM verification | **SymPy derive + verify**: docs/derivations notebooks derive 7/14-DOF EOMs symbolically; CI evaluates symbolic vs Rust RHS at random states, agreement to 1e-12 |
 | 33 | Symbol naming | **Hybrid**: descriptive names at public APIs; paper symbols inside math kernels with doc-comment headers citing equation numbers (e.g. "Pacejka 2012 eq. 4.E19–4.E30") |
@@ -422,7 +422,9 @@ was degraded) prints with every run and embeds in artifacts: *nothing silent*.
 bias, shift logic) are first-class swappable blocks running in the `control` phase on the same
 bus — **Rust or C-ABI only (#38); no Python inside a timestep, ever**. Experimentation with
 custom control strategies happens by writing a Rust controller block (plugin point) or
-pre-computing control schedules `u(s)` as data.
+pre-computing control schedules `u(s)` as data. The ERS energy manager (`outlap-powertrain`,
+M6/PR1) is a pure struct with a policy enum consumed by the tiers' control phase — deliberately
+NOT plugin-registration machinery (that is the post-1.0 plugin surface).
 
 **Exactly three plugin points (#37)** — everything else is core enums (fast, curated):
 1. Custom blocks: Rust trait + compile-time registration (a plugin crate depends on `outlap-core`,
@@ -590,37 +592,49 @@ data*:
 ers:
   mgu_k: mguk.ptm.yaml            # torque/speed/efficiency map, bidirectional
   es:                              # energy store limits (battery physics lives in §8.4)
-    capacity_MJ: 4.0
-    soc_window: [0.1, 0.9]
+    capacity_MJ: 4.0               # the USABLE WINDOW energy (C5.2.9: max−min SoC ≤ 4 MJ on
+    soc_window: [0.2, 0.9]         # track; the regs set no total capacity — pack sizing is design)
   deployment:
-    power_limit_kW: 350            # 2026-class MGU-K electrical power (VERIFY vs FIA regs)
-    taper_vs_speed:                # deployment de-rate at high speed (2026 mechanism)
-      speed_kph:  [0, 290, 345]
-      power_frac: [1.0, 1.0, 0.0]  # full power to ~290 km/h, linear ramp to 0 by ~345
-    per_lap_deploy_MJ: null        # optional integral constraint
-  override_mode:                   # "boost / overtake" (2026 Manual Override Mode)
+    power_limit_kW: 350            # ELECTRICAL DC power at the CU-K bus, both directions (C5.2.7)
+    taper_vs_speed:                # C5.2.8i: P(kW)=1800−5v to 340 kph, 6900−20v to 345, 0 beyond;
+      speed_kph:  [0, 290, 340, 345]           # as breakpoints: knee EXACTLY 2/7 at 340; the
+      power_frac: [1.0, 1.0, 0.2857142857142857, 0.0]  # 0–290 plateau IS min(cap, curve)
+    # NO per_lap_deploy_MJ in 2026 (C5.2, absence verified): deployment is bounded only by the
+    # power curves + SoC window. The field stays as generic config and is NEVER estimated.
+  override_mode:                   # "Overtake" (2026 Manual Override Mode)
     power_limit_kW: 350
-    taper_vs_speed:                # override holds full power to a higher speed
-      speed_kph:  [0, 337, 355]
+    taper_vs_speed:                # C5.2.8ii: P = 7100 − 20v, zero at ≥355 → full power to 337.5
+      speed_kph:  [0, 337.5, 355]
       power_frac: [1.0, 1.0, 0.0]
-    extra_energy_per_lap_MJ: 0.5   # additional allowance while activated (VERIFY)
-    activation: strategy           # stage-2 control input (e.g. within-1s detection rule)
+    extra_energy_per_lap_MJ: 0.5   # extra HARVEST allowance while activated (C5.2.10iii) — a
+                                   # Recharge bonus, NOT a deployment budget
+    activation: strategy           # stage-2 hint (Detection Gap, B7.2); the per-run flag wins
   recovery:
-    braking_power_limit_kW: 350    # regen through the MGU-K under braking (brake blending §7.6)
-    per_lap_harvest_MJ: 8.5        # 2026-class harvest limit (VERIFY vs FIA regs)
-    recharge_phases: true          # allow ICE-driven recharge (torque-split: ICE > wheel demand,
-                                   # K harvests the surplus) + lift-and-coast harvesting
+    braking_power_limit_kW: 350    # electrical, at the same C5.2.7 bus (mech ≈ 360.8 kW at cap)
+    per_lap_harvest_MJ: 8.5        # C5.2.10 Recharge budget; ALL harvest paths count against it
+    recharge_phases: true          # part-throttle harvest + full-throttle ICE back-drive
+    recharge_target_soc: 0.55      # optional; the ECU's "Recharge target" (default mid-window)
+    ramp_initial_step_kW: 150      # optional C5.12 ramp bounds (defaults 150 / 50 / 700):
+    ramp_rate_kW_per_s: 50         #   initial demand step, then rate-limited reduction,
+    ramp_total_kW: 700             #   episode total (= the full +350 → −350 swing)
+  elec_mech_factor: 0.97           # optional; the fixed C5.2.14 electrical→mechanical correction
 ```
 
-> ⚠ The numeric values above are approximate 2026-regulation figures from memory — **verify every
-> number against the published FIA 2026 Technical Regulations before shipping reference cars.**
-> The *mechanisms* (speed taper, override mode, per-lap energy limits, recharge phases) are the
-> architecture; the numbers are config data.
+Figures verified against **FIA 2026 Section C [Technical] Issue 19 (2026-06-25)** and **Section B
+[Sporting] Issue 07 (2026-06-25)**; article numbers cited in `docs/theory/ers-energy-manager.md`.
+The *mechanisms* (speed taper, override mode, per-lap Recharge budget, recharge phases) are the
+architecture; the numbers are config data (most are per-event parameters, B7.2.1b). The tapers are
+regulatory closed-form piecewise-linear lines and are evaluated as such (the recorded Decision #30
+exception) — a Hermite through the breakpoints bows up to +78 kW above C5.2.8i at 315 kph. All
+caps/budgets live on the electrical side (the CU-K DC bus) with ONE conversion seam (0.97,
+C5.2.14/C5.2.21); the per-lap ledger integrates electrical energy.
 
 Energy-management control vector per track segment: `u(s) = [deploy/regen ∈ [−1,1], override_flag,
-lift_point, shift_map_id]`. V1 ships rule-based deployment (feed-forward "deploy below taper speed,
-harvest under braking, recharge on designated straights") + configurable integral constraints.
-Stage 2's strategy optimizer writes u(s).
+lift_point, shift_map_id]`, accepted as a data-driven schedule (an API input, not vehicle schema).
+V1 ships rule-based deployment (feed-forward "deploy below taper speed, harvest under braking,
+recharge on designated straights" — greedy demand-gated deploy, no SoC input; automated Recharge
+paths steered by `recharge_target_soc`) + configurable integral constraints. Stage 2's strategy
+optimizer writes u(s).
 
 Non-F1 hybrids are the same block with different data: LMDh = single 50 kW MGU on the rear axle;
 road PHEV = P2 machine + big ES; pure EV = MGU-K *is* the powertrain (no ICE block).
@@ -1072,6 +1086,10 @@ outlap/
 - **Interpolation standard (Locked Decision #30):** ONE shared implementation — monotone cubic
   Hermite (Fritsch–Carlson) on rectilinear grids, C¹ with analytic derivatives — used by every
   gridded map (aero, efficiency/loss, envelopes, tire thermal params). No per-block interp choices.
+  **Amended M6/PR1:** regulatory *closed-form piecewise-linear formulas* (the FIA C5.2.8 ERS
+  tapers, the C5.12 ramp bounds) are evaluated by the shared exact piecewise-linear interpolant
+  (`outlap_core::PiecewiseLinear`) — a Hermite through a flat-plateau breakpoint set bows up to
+  +78 kW above the regulation line. Closed-form regs only; gridded maps stay on the Hermite.
 - **Envelope × slow states (Locked Decision #31):** T0 consumes a dense base table
   `gg(v, ax, g_normal)` at reference state plus separable multiplicative corrections from T1
   sensitivities (∂gg/∂μ_tire, ∂/∂mass, ∂/∂ClA at reference points); CI validates the corrected
