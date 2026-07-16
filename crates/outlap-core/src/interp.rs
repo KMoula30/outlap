@@ -10,6 +10,13 @@
 //! The interpolant exposes an [analytic derivative](MonotoneCubic::deriv) (Decision #30 requires it
 //! for the Newton solvers in the transient tiers).
 //!
+//! [`PiecewiseLinear`] is the one recorded exception to Decision #30 (amended M6/PR1): regulatory
+//! *closed-form piecewise-linear formulas* — the FIA 2026 ERS speed tapers (C5.2.8) and the C5.12
+//! power-ramp bounds — must be evaluated exactly as the rulebook writes them. Running their
+//! breakpoints through the Hermite bows the curve (a flat plateau forces a zero end tangent,
+//! lifting the f1 deployment taper up to +78 kW above the regulation line at 315 km/h). It is for
+//! closed-form regulations only; gridded maps stay on [`MonotoneCubic`].
+//!
 //! # Symbols
 //!
 //! Following the paper: `Δ_k` are the secant slopes, `m_k` the knot tangents; the Hermite basis is
@@ -136,6 +143,83 @@ impl<T: Float> MonotoneCubic<T> {
         let h = self.xs[k + 1] - self.xs[k];
         let t = (x - self.xs[k]) / h;
         (k, t, h)
+    }
+}
+
+/// An exact piecewise-linear interpolant over a strictly increasing grid.
+///
+/// The one recorded exception to Decision #30 (see the module docs): regulatory closed-form
+/// piecewise-linear formulas (FIA 2026 ERS tapers, C5.12 ramp bounds) are evaluated as written,
+/// with no Hermite smoothing. Construct with [`PiecewiseLinear::new`]; evaluate with
+/// [`PiecewiseLinear::eval`] and [`PiecewiseLinear::deriv`]. Queries outside `[xs[0], xs[last]]`
+/// clamp to the nearest endpoint value (derivative zero), matching [`MonotoneCubic`].
+#[derive(Clone, Debug)]
+pub struct PiecewiseLinear<T> {
+    xs: Vec<T>,
+    ys: Vec<T>,
+}
+
+impl<T: Float> PiecewiseLinear<T> {
+    /// Build a piecewise-linear interpolant from a strictly increasing grid `xs` and values `ys`.
+    ///
+    /// # Errors
+    /// Returns [`InterpError`] if there are fewer than two knots, the lengths differ, or `xs` is
+    /// not strictly increasing.
+    pub fn new(xs: Vec<T>, ys: Vec<T>) -> Result<Self, InterpError> {
+        if xs.len() != ys.len() {
+            return Err(InterpError::LengthMismatch {
+                xs: xs.len(),
+                ys: ys.len(),
+            });
+        }
+        if xs.len() < 2 {
+            return Err(InterpError::TooFewKnots { got: xs.len() });
+        }
+        for k in 0..xs.len() - 1 {
+            if xs[k + 1] <= xs[k] {
+                return Err(InterpError::NotIncreasing { index: k });
+            }
+        }
+        Ok(Self { xs, ys })
+    }
+
+    /// The interpolated value at `x` (clamped to the endpoint value outside the grid).
+    pub fn eval(&self, x: T) -> T {
+        let last = self.xs.len() - 1;
+        if x <= self.xs[0] {
+            return self.ys[0];
+        }
+        if x >= self.xs[last] {
+            return self.ys[last];
+        }
+        let k = self.xs.partition_point(|&xk| xk <= x) - 1;
+        let t = (x - self.xs[k]) / (self.xs[k + 1] - self.xs[k]);
+        self.ys[k] + t * (self.ys[k + 1] - self.ys[k])
+    }
+
+    /// The analytic derivative `dy/dx` at `x`: the segment slope inside the grid (an interior knot
+    /// takes the slope of the segment to its **right**), zero outside.
+    pub fn deriv(&self, x: T) -> T {
+        let last = self.xs.len() - 1;
+        if x < self.xs[0] || x >= self.xs[last] {
+            return T::zero();
+        }
+        let k = if x <= self.xs[0] {
+            0
+        } else {
+            self.xs.partition_point(|&xk| xk <= x) - 1
+        };
+        (self.ys[k + 1] - self.ys[k]) / (self.xs[k + 1] - self.xs[k])
+    }
+
+    /// The grid span `[first, last]` knot abscissae.
+    pub fn domain(&self) -> (T, T) {
+        (self.xs[0], self.xs[self.xs.len() - 1])
+    }
+
+    /// Whether the values are monotone non-increasing across the knots.
+    pub fn is_non_increasing(&self) -> bool {
+        self.ys.windows(2).all(|w| w[1] <= w[0])
     }
 }
 
@@ -306,5 +390,61 @@ mod tests {
             MonotoneCubic::new(vec![0.0, 1.0, 1.0], vec![0.0, 1.0, 2.0]),
             Err(InterpError::NotIncreasing { index: 1 })
         ));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exactness at knots/plateau/clamp IS the assertion
+    fn linear_is_exact_between_knots() {
+        // The f1 2026 deployment taper shape: flat plateau then two linear segments.
+        let f = PiecewiseLinear::new(
+            vec![0.0, 290.0, 340.0, 345.0],
+            vec![1.0, 1.0, 2.0 / 7.0, 0.0],
+        )
+        .unwrap();
+        // Interior of the plateau: exactly 1.0 (the Hermite would bow here).
+        assert_eq!(f.eval(150.0), 1.0);
+        assert_eq!(f.eval(289.9), 1.0);
+        // Interior of the first ramp: exact linear blend.
+        let x = 315.0;
+        let expect = 1.0 + (x - 290.0) / (340.0 - 290.0) * (2.0 / 7.0 - 1.0);
+        assert!(approx(f.eval(x), expect, 1e-15));
+        // Clamp at the ends, derivative zero outside.
+        assert_eq!(f.eval(-5.0), 1.0);
+        assert_eq!(f.eval(400.0), 0.0);
+        assert_eq!(f.deriv(-5.0), 0.0);
+        assert_eq!(f.deriv(400.0), 0.0);
+        assert!(f.is_non_increasing());
+    }
+
+    #[test]
+    fn linear_deriv_is_segment_slope() {
+        let f = PiecewiseLinear::new(vec![0.0, 1.0, 3.0], vec![0.0, 2.0, 1.0]).unwrap();
+        assert!(approx(f.deriv(0.5), 2.0, 1e-15));
+        assert!(approx(f.deriv(2.0), -0.5, 1e-15));
+        // Interior knot takes the right segment's slope.
+        assert!(approx(f.deriv(1.0), -0.5, 1e-15));
+        assert!(!f.is_non_increasing());
+    }
+
+    #[test]
+    fn linear_rejects_bad_grids() {
+        assert!(matches!(
+            PiecewiseLinear::new(vec![0.0], vec![0.0]),
+            Err(InterpError::TooFewKnots { got: 1 })
+        ));
+        assert!(matches!(
+            PiecewiseLinear::new(vec![0.0, 1.0], vec![0.0]),
+            Err(InterpError::LengthMismatch { xs: 2, ys: 1 })
+        ));
+        assert!(matches!(
+            PiecewiseLinear::new(vec![0.0, 1.0, 1.0], vec![0.0, 1.0, 2.0]),
+            Err(InterpError::NotIncreasing { index: 1 })
+        ));
+    }
+
+    #[test]
+    fn linear_works_in_f32() {
+        let f = PiecewiseLinear::new(vec![0.0f32, 1.0, 2.0], vec![1.0f32, 1.0, 0.0]).unwrap();
+        assert!((f.eval(1.5) - 0.5).abs() < 1e-6);
     }
 }
