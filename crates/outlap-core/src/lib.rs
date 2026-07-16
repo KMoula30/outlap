@@ -35,7 +35,7 @@ pub use gridmap::{EvalFlags, GridMapError, GriddedMapN, GriddedTable, OutOfDomai
 pub use integrator::{
     back_interpolate, ButcherTableau, EventQueue, RkMethod, ScheduledEvent, SimArena,
 };
-pub use interp::{InterpError, MonotoneCubic};
+pub use interp::{InterpError, MonotoneCubic, PiecewiseLinear};
 pub use relax::{exact_exponential, semi_implicit_decay, SlowClock};
 pub use spline::{CubicSpline, SplineError};
 pub use state::{
