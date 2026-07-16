@@ -465,7 +465,7 @@
       "type": "object",
       "properties": {
         "per_lap_deploy_mj": {
-          "description": "Optional per-lap deployment budget, MJ (estimable).",
+          "description": "Optional per-lap deployment budget, MJ (electrical). Generic config for non-F1 rule sets —\nthe 2026 F1 regulations impose NO per-lap deployment budget (deployment is bounded only by\nthe power curves and the SoC window); leave it absent for a 2026 car. Never estimated.",
           "type": [
             "number",
             "null"
@@ -473,12 +473,12 @@
           "format": "double"
         },
         "power_limit_kw": {
-          "description": "Peak deployment power, kW.",
+          "description": "Peak deployment power, kW — ELECTRICAL DC power at the CU-K bus (FIA 2026 C5.2.7), not\nmechanical crank power.",
           "type": "number",
           "format": "double"
         },
         "taper_vs_speed": {
-          "description": "Power-vs-speed taper.",
+          "description": "Power-vs-speed taper (evaluated piecewise-linearly — the regulatory closed-form curves of\nC5.2.8 are the breakpoints, not samples of a smooth map).",
           "$ref": "#/$defs/SpeedTaper"
         }
       },
@@ -774,7 +774,7 @@
       "type": "object",
       "properties": {
         "capacity_mj": {
-          "description": "Usable capacity, MJ.",
+          "description": "Usable-window energy, MJ — the energy spanned by `soc_window` on the pack, not the pack's\ntotal capacity (the FIA 2026 C5.2.9 limit is a max−min SoC *window* of 4 MJ on track; the\nregulations set no total capacity).",
           "type": "number",
           "format": "double"
         },
@@ -801,6 +801,14 @@
         "deployment": {
           "description": "Deployment rules.",
           "$ref": "#/$defs/Deployment"
+        },
+        "elec_mech_factor": {
+          "description": "Fixed electrical→mechanical conversion factor between the CU-K DC bus (where the\nregulatory power caps and energy ledgers live) and the crank (FIA 2026 C5.2.14; the\nharvest direction uses its inverse per C5.2.21). Default 0.97.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "es": {
           "description": "Energy store sizing/window (battery physics lives in the battery block).",
@@ -886,7 +894,7 @@
           "default": "strategy"
         },
         "extra_energy_per_lap_mj": {
-          "description": "Extra energy allowance per lap in override, MJ (estimable).",
+          "description": "Extra per-lap HARVEST allowance while override is active, MJ (estimable; defaults to 0).\nFIA 2026 C5.2.10iii: the +0.5 MJ granted with Override is additional *Recharge* (harvest)\nallowance — it is NOT a deployment budget.",
           "type": [
             "number",
             "null"
@@ -921,19 +929,51 @@
       "type": "object",
       "properties": {
         "braking_power_limit_kw": {
-          "description": "Peak braking-recovery power, kW.",
+          "description": "Peak braking-recovery power, kW — ELECTRICAL DC power at the CU-K bus (FIA 2026 C5.2.7\ncaps both directions at the same bus).",
           "type": "number",
           "format": "double"
         },
         "per_lap_harvest_mj": {
-          "description": "Per-lap harvest budget, MJ.",
+          "description": "Per-lap harvest (\"Recharge\") budget, MJ (electrical; FIA 2026 C5.2.10). ALL harvest paths\n— braking, part-throttle, ICE-driven — count against this one budget.",
           "type": "number",
           "format": "double"
         },
+        "ramp_initial_step_kw": {
+          "description": "Recharge-phase ramp: maximum initial power-demand step, kW (FIA 2026 C5.12.4 \"power\nlimited\" ramp-down, simplified). Default 150.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ramp_rate_kw_per_s": {
+          "description": "Recharge-phase ramp: maximum demand-reduction rate after the initial step, kW per second\n(C5.12.5, the conservative bound of the reg's 50–100 range). Default 50.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "ramp_total_kw": {
+          "description": "Recharge-phase ramp: maximum total demand reduction, kW (C5.12.6). Default 700.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "recharge_phases": {
-          "description": "Whether dedicated recharge phases (off-throttle harvesting) are modelled.",
+          "description": "Whether dedicated recharge phases (part-throttle harvest and full-throttle ICE-driven\nback-drive on straights) are modelled.",
           "type": "boolean",
           "default": false
+        },
+        "recharge_target_soc": {
+          "description": "Target pack SoC the automated Recharge paths steer toward (the 2026 ECU's selectable\n\"Recharge target\"). Must lie inside `es.soc_window`. Default: mid-window.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
       },
       "required": [

@@ -30,19 +30,10 @@ pub fn estimate(spec: &mut Vehicle, prov: &mut ProvenanceMap, estimated: &mut Ve
         estimated,
     );
 
+    // `per_lap_deploy_mj` is deliberately NOT estimated: the 2026 F1 regulations impose no per-lap
+    // deployment budget (C5.2 — absence verified), so an absent value means "unbounded", and any
+    // back-filled number would become a phantom cap the moment budgets are enforced (M6/PR1).
     if let Some(ers) = &mut spec.ers {
-        if ers.deployment.per_lap_deploy_mj.is_none() {
-            // Heuristic: assume the full usable store can be deployed each lap.
-            let v = ers.es.capacity_mj;
-            ers.deployment.per_lap_deploy_mj = Some(v);
-            record(
-                prov,
-                estimated,
-                "/ers/deployment/per_lap_deploy_mj",
-                "per_lap_deploy_capacity",
-                format!("assumed = usable capacity ({v} MJ)"),
-            );
-        }
         if let Some(om) = &mut ers.override_mode {
             if om.extra_energy_per_lap_mj.is_none() {
                 om.extra_energy_per_lap_mj = Some(0.0);

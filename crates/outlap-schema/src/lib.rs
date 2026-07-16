@@ -99,15 +99,40 @@ pub mod schema_name {
 
 /// The MAJOR version this build of the loader accepts for every schema (loaders accept same-major).
 pub const SCHEMA_MAJOR: u16 = 1;
-/// The MINOR version this build emits when serializing, and the highest MINOR it fully understands
-/// (additive/forward-compatible within a MAJOR). Bumped to 1 for the `tyr/1.1` brush block, to
-/// 2 for the `vehicle/1.2` suspension `static_ride_height_m` (ride-height aero map, §7.4), then to
-/// 3 for the `ptm/1.1` optional Vdc axis (Vdc–SoC coupling, §8.4) alongside the new `battery/1.0`
-/// document, then to 4 for the `sim/1.1` `flat_track` analysis flag (tier dispatch + Limebeer
-/// cross-check), then to 5 for the `vehicle/1.5` optional `driver` section (MacAdam preview + PI
-/// speed-tracking gains, §7.7), then to 6 for the `vehicle/1.6` optional torque-vectoring
-/// `max_yaw_moment_nm` cap (§8.0), then to 7 for the `ptm/1.2` optional
-/// `max_regen_torque_nm_vs_speed` machine braking envelope alongside the `battery/1.1` optional
-/// `regen_derate_vs_temp` charge-acceptance curve (series regen blend, §7.6); an unknown key in a
-/// file that declares a newer MINOR than this is flagged as possibly-newer-schema.
-pub const SCHEMA_MINOR: u16 = 7;
+
+/// The highest MINOR this build fully understands for each document kind, replacing the former
+/// single global counter (which conflated unrelated documents: a `tyr` bump inflated the `vehicle`
+/// minor). Additive/forward-compatible within a MAJOR; an unknown key in a file that declares a
+/// newer MINOR than this table is flagged as possibly-newer-schema.
+///
+/// Per-document history — `vehicle`: 1.2 suspension `static_ride_height_m` (§7.4), 1.5 optional
+/// `driver` section (§7.7), 1.6 rule-based control layer (torque-vectoring `max_yaw_moment_nm`
+/// cap §8.0 + brakes `regen_blend` §7.6), 1.7 optional ERS
+/// `elec_mech_factor` + `recovery` recharge-phase fields (§8.3, M6/PR1); `ptm`: 1.1 optional Vdc
+/// axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block; `battery`: 1.1
+/// `regen_derate_vs_temp` (§7.6); `sim`: 1.1 `flat_track` analysis flag.
+///
+/// # Validation-tightening policy
+///
+/// Semantic validation may be TIGHTENED within a MAJOR only for values that are *always
+/// meaningless* — inputs no consumer could ever have interpreted (a rising `power_frac` speed
+/// taper, a non-positive capacity). Rejecting a value that some past consumer gave meaning to is
+/// a behavior change and bumps MAJOR.
+///
+/// # Field-semantics policy
+///
+/// The documented *meaning* of a field may change only while the field has ZERO consumers; the
+/// moment any code reads it, a semantics change is MAJOR (a migration, not a doc edit). Worked
+/// example: `ers.override_mode.extra_energy_per_lap_mj` was documented as extra *deployment*
+/// energy while nothing consumed it; M6/PR1 corrected it to extra *harvest* allowance (FIA 2026
+/// C5.2.10iii) as a doc-only MINOR change precisely because the field was dormant. After PR1 the
+/// rulebook consumes it — any further semantics change is MAJOR.
+pub fn current_minor(name: &str) -> u16 {
+    match name {
+        schema_name::VEHICLE => 7,
+        schema_name::PTM => 2,
+        schema_name::TYR | schema_name::BATTERY | schema_name::SIM => 1,
+        // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.
+        _ => 0,
+    }
+}

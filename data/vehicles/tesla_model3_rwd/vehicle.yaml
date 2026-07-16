@@ -6,7 +6,7 @@
 # a documented ESTIMATE — see README.md for per-parameter provenance. The committed powertrain
 # (drive units + pack) is SYNTHETIC (python/tools/gen_model3_powertrain.py); the real PDT-derived
 # maps stay local and untracked (M3 user decision #7).
-schema: vehicle/1.0
+schema: vehicle/1.6
 name: "Tesla Model 3 RWD (HV variant)"
 chassis:
   mass_kg: 1765.0

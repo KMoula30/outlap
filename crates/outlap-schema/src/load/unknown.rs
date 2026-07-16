@@ -22,14 +22,16 @@ use crate::tree::SpanIndex;
 
 /// Walk `value` (a document of type `T`) against `T`'s JSON Schema, reporting unknown keys.
 ///
-/// `doc_minor` is the file's declared schema MINOR; when it exceeds [`crate::SCHEMA_MINOR`] an
-/// unknown-key error gains a hint that the key may be a field added in a newer schema version.
+/// `doc_minor` is the file's declared schema MINOR; when it exceeds `supported_minor` (this
+/// build's [`crate::current_minor`] for the document kind) an unknown-key error gains a hint that
+/// the key may be a field added in a newer schema version.
 pub fn check<T: JsonSchema>(
     value: &Value,
     index: &SpanIndex,
     sources: &Sources,
     file: SourceId,
     doc_minor: u16,
+    supported_minor: u16,
     warnings: &mut Vec<ReportEntry>,
 ) -> Result<()> {
     let root = schemars::schema_for!(T).to_value();
@@ -44,6 +46,7 @@ pub fn check<T: JsonSchema>(
         sources,
         file,
         doc_minor,
+        supported_minor,
     };
     ctx.walk(value, &root, "")?;
     // Collect x-* warnings on a second, cheap pass at every object level.
@@ -57,6 +60,7 @@ struct Ctx<'a> {
     sources: &'a Sources,
     file: SourceId,
     doc_minor: u16,
+    supported_minor: u16,
 }
 
 impl Ctx<'_> {
@@ -69,12 +73,11 @@ impl Ctx<'_> {
     /// A hint for the case where the file declares a newer schema MINOR than this build supports —
     /// an unknown key may simply be a field added in that newer version.
     fn newer_schema_hint(&self) -> Option<String> {
-        (self.doc_minor > crate::SCHEMA_MINOR).then(|| {
+        (self.doc_minor > self.supported_minor).then(|| {
             format!(
                 "the file declares schema minor {} but this build supports up to minor {}; this key \
                  may be a field added in a newer schema version",
-                self.doc_minor,
-                crate::SCHEMA_MINOR,
+                self.doc_minor, self.supported_minor,
             )
         })
     }
