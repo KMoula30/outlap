@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC compound preset — HARD. Shares the generic racing-slick MF6.1 core (f1_2026 slick);
+# the compound identity is peak grip (LMUX/LMUY), the thermal window (t_opt/c_t), and the wear/cliff
+# block. Hard = lowest peak grip, high optimal temperature (slow to switch on), slowest wear and the
+# latest, gentlest cliff. Thermal/wear in the calibrated racing-slick band (outlap.wearcal, M5
+# PR7/PR8). Not measured data.
+schema: tyr/1.0
+mf61:
+  FNOMIN: 4000.0
+  UNLOADED_RADIUS: 0.33
+  PCX1: 1.65
+  PDX1: 1.30
+  PEX1: 0.10
+  PKX1: 22.0
+  PCY1: 1.40
+  PDY1: 1.25
+  PEY1: -1.0
+  PKY1: -20.0
+  RBX1: 13.0
+  RBY1: 9.0
+  # Peak-grip scaling: hard carries ~2% less grip than the medium baseline.
+  LMUX: 0.98
+  LMUY: 0.98
+thermal:
+  c_s: 8000.0
+  c_c: 22000.0
+  c_g: 1500.0
+  g_sc: 90.0
+  g_cg: 40.0
+  g_road: 250.0
+  h0: 15.0
+  h1: 5.5
+  p_t: 0.65
+  # High optimal temperature: the hard needs more energy to reach its window, then holds it.
+  t_opt: 102.0
+  c_t: 2.4
+  k_c: 0.0015
+  t_c_ref: 80.0
+  p_cold: 138.0
+  t_cold: 20.0
+wear:
+  # Slowest wear + the latest, gentlest cliff (M5 PR7/PR8 racing-slick calibration, hard band).
+  k_w: 2.6e-9
+  w_max: 8.0
+  w_c: 2.5
+  tau_d: 600.0
+  t_deg: 122.0
+  delta_t_ref: 20.0
+  beta: 2.0
+  delta_c: 0.09
+  s_w: 0.6
+  delta_d: 0.30
+provenance:
+  citation: "Pacejka, Tire and Vehicle Dynamics, 3rd ed. (2012)"
+  source: "synthetic hard-compound preset — generic racing-slick MF6.1 core with -2% peak grip; thermal/wear in the calibrated racing-slick band (outlap.wearcal, M5 PR7/PR8), hard class"
+  synthetic: true
