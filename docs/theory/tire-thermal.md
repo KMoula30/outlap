@@ -156,6 +156,9 @@ F1-representative set; `λ_μ ∈ (0,1]` peaking at `T_opt`; monotone convection
 gas law; carcass softening reducing stiffness; monotone warm-up; zero allocations per step; f32/f64
 parity; and bit-identical determinism.
 
+The end-to-end lap-level cross-check — cold-start warm-up + the settled surface temperature against
+the published Farroni/broadcast slick band — is [`docs/validation/tire-thermal.md`](../validation/tire-thermal.md).
+
 ## T2 tier integration — wiring the ring into a transient lap (PR3)
 
 The ring above is a pure `step(dt, drivers)`; the transient (T2) solver owns the clock and drives it.

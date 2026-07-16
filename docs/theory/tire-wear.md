@@ -141,3 +141,7 @@ irreversible, and thresholded at `T_deg`; `λ_μ,total ∈ [0,1]` and C¹ across
 difference derivative continuity); the `C_s(w)` feedback raising the worn tire's peak temperature; the
 thermal-only path staying inert to wear; zero allocations per step; and bit-identical determinism plus
 f32/f64 parity.
+
+The parameters are calibrated inversely from stint pace by [`outlap.wearcal`](../../python/src/outlap/wearcal/README.md);
+the lap-level cross-check — monotone pace loss + the cliff reproduced after calibration, and the
+QSS↔T2 stint-decay agreement — is [`docs/validation/wear-cliff.md`](../validation/wear-cliff.md).
