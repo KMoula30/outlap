@@ -125,7 +125,9 @@ def test_wear_cliff_reproduced_after_calibration(track: Track) -> None:
     deltas = np.diff(lap_time)
     peak_delta_lap = int(np.argmax(deltas)) + 1
     assert deltas.max() > 2.0 * abs(deltas[0]), "degradation accelerates into the cliff"
-    assert abs(peak_delta_lap - cliff_lap) <= 4, "the peak degradation rate sits near the cliff"
+    assert abs(peak_delta_lap - cliff_lap) <= 4, (
+        "the peak degradation rate sits near the cliff"
+    )
     # Recorded (docs/validation/wear-cliff.md): decay s/lap and cliff lap.
     assert 0.02 < _decay_s_per_lap(lap_time) < 1.0
 

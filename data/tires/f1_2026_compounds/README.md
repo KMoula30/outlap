@@ -21,6 +21,11 @@ degrades fastest; the hard starts slower but holds pace longest — the trade th
 strategy. To run a stint on a compound, point a vehicle's `tires:` block at the preset (or pass it
 through the `overrides`/scratch mechanism); the notebook demonstrates the comparison.
 
+![Compound crossover](../../../docs/validation/img/compound_crossover.png)
+
+Regenerate with `python python/tools/plot_compound_crossover.py`; the full walkthrough is
+`notebooks/10_stint_strategy.ipynb`.
+
 ## Usage
 
 ```python
