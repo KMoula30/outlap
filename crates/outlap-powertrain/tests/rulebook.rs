@@ -163,9 +163,10 @@ fn gt_hybrid_option_paths() {
     let v = 285.0 * KPH_TO_MPS; // midpoint of [250, 320]
     assert!((rb.deploy_cap_electrical_w(v, false) - 120e3 * 0.4).abs() < 1e-6);
 
-    // Reg defaults fill the absent recharge fields; recharge phases stay off.
+    // Reg defaults fill the absent recharge fields; recharge phases stay off, and the recharge
+    // target defaults to the TOP of the usable window (recharge toward the max the pack allows).
     assert!(!rb.recharge_phases());
-    assert_eq!(rb.recharge_target_soc(), (0.3 + 0.85) / 2.0);
+    assert_eq!(rb.recharge_target_soc(), 0.85);
     assert_eq!(rb.ramp_allowed_reduction_w(0.0, 0.1), 150e3);
     assert_eq!(rb.ramp_allowed_reduction_w(150e3, 0.1), 50e3 * 0.1);
 }

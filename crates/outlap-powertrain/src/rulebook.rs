@@ -82,7 +82,9 @@ pub struct ErsRulebook<T> {
     elec_mech_factor: T,
     /// Whether the automated recharge phases (part-throttle / full-throttle back-drive) run.
     recharge_phases: bool,
-    /// Target pack SoC the recharge paths steer toward (default: mid `soc_window`).
+    /// Target pack SoC the recharge paths steer toward (default: the TOP of `soc_window` — the
+    /// recharge phases keep the store as full as the pack allows; the on-track energy swing is
+    /// bounded by the usable window, not by this target).
     recharge_target_soc: T,
     /// C5.12.4 maximum initial power-demand step, W.
     ramp_initial_step_w: T,
@@ -129,8 +131,7 @@ impl<T: Float> ErsRulebook<T> {
         });
         let torque_env = torque_env.transpose()?;
 
-        let [soc_lo, soc_hi] = ers.es.soc_window;
-        let two = c::<T>(2.0);
+        let [_soc_lo, soc_hi] = ers.es.soc_window;
         Ok(Self {
             p_deploy_cap_w: c(ers.deployment.power_limit_kw * 1e3),
             deploy_taper,
@@ -149,7 +150,7 @@ impl<T: Float> ErsRulebook<T> {
             recharge_target_soc: ers
                 .recovery
                 .recharge_target_soc
-                .map_or_else(|| (c::<T>(soc_lo) + c::<T>(soc_hi)) / two, c),
+                .map_or_else(|| c::<T>(soc_hi), c),
             ramp_initial_step_w: ers
                 .recovery
                 .ramp_initial_step_kw

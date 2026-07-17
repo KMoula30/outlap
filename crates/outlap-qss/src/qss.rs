@@ -573,6 +573,14 @@ fn ers_realize(
         // Idle: the pack still relaxes (RC decay + thermal node) over the segment.
         c.pack.step_power(st, 0.0, dt);
     }
+    // Hold the pack inside its usable window. `step_power` clamps SoC to [0, 1] only, so a segment
+    // that begins just inside the edge (where the acceptance/discharge ceiling is still open) can
+    // overshoot it by one step. Clamping to `[soc_lo, soc_hi]` bounds the on-track SoC swing to the
+    // usable window span — the FIA C5.2.9 ≤ 4 MJ recharge window for the f1 pack, whose window is
+    // sized to exactly that (D-M6-3, now clamped rather than only recorded). Scoped to the manager
+    // path, so no-ers packs stay bit-identical.
+    let [soc_lo, soc_hi] = c.pack.soc_window();
+    st.soc = st.soc.clamp(soc_lo, soc_hi);
     bufs.deploy_w[i] = realized.deploy_w;
     bufs.harvest_w[i] = realized.harvest_w;
     realized
