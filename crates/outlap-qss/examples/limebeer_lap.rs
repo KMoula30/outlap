@@ -17,7 +17,8 @@ use std::path::PathBuf;
 
 use outlap_qss::path::T0Path;
 use outlap_qss::{
-    solve_t0, GgvEnvelope, LineDescriptor, T0Options, T0Vehicle, T1Vehicle, DEFAULT_DS_M,
+    solve_t0, Couplings, GgvEnvelope, LapRequest, LineDescriptor, T0Options, T0Vehicle, T1Vehicle,
+    DEFAULT_DS_M,
 };
 use outlap_raceline::{min_curvature_line, RacelineOptions};
 use outlap_schema::io::FsLoader;
@@ -64,17 +65,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let lap = solve_t0(
         &t0,
         env,
-        None,
-        None,
+        &Couplings::default(),
         &path,
-        LineDescriptor::MinCurvature {
-            ds_m: RacelineOptions::default().ds_m,
-            iterations: 1,
+        LapRequest {
+            line: LineDescriptor::MinCurvature {
+                ds_m: RacelineOptions::default().ds_m,
+                iterations: 1,
+            },
+            resolved_hash: resolved.report.resolved_hash.clone(),
+            notes: t0.notes().to_vec(),
+            fz_coupling: sim.resolved_fz_coupling(),
+            flat_track: true,
         },
-        resolved.report.resolved_hash.clone(),
-        t0.notes().to_vec(),
-        sim.resolved_fz_coupling(),
-        true,
     )?;
 
     let r = &lap.lap;

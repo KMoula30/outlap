@@ -394,6 +394,12 @@ impl T1Vehicle {
         &self.powertrain
     }
 
+    /// Whether any drive unit has an installed efficiency map (the mapped-EV slow-state march is
+    /// live) — the assembly-time activity fact for the QSS coupling.
+    pub fn has_energy_maps(&self) -> bool {
+        self.powertrain.has_energy_maps()
+    }
+
     /// The maximum wheel **drive** force the powertrain can put down at vehicle speed `v` (m/s), N —
     /// the traction ceiling PR7's g-g-g-v envelope caps the acceleration boundary with. The
     /// tyre-grip limit is enforced separately by the trim. Allocation-free.

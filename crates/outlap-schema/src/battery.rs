@@ -70,7 +70,10 @@ pub struct PackTopology {
 pub struct PackCapacity {
     /// Pack charge capacity, A·h (Coulomb counting divides by this).
     pub q_pack_ah: f64,
-    /// Pack energy capacity, W·h (nominal; informational).
+    /// Pack TOTAL energy capacity, W·h (nominal). Load-bearing since M6 PR2: on an
+    /// `ers:`-bearing vehicle the load pipeline checks `(soc window span) × e_pack_wh` against
+    /// the declared `ers.es.capacity_mj` usable-window energy (the field-semantics policy froze
+    /// this meaning when it gained its first consumer).
     pub e_pack_wh: f64,
 }
 

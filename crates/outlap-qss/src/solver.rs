@@ -158,6 +158,13 @@ struct GgvGrip<'a> {
     /// marched along the previous pass; it multiplies the powertrain traction ceiling in the forward
     /// step. Braking is unaffected (it draws no drive power). See [`crate::qss`].
     traction_scale: Option<&'a [f64]>,
+    /// Optional per-station **ADDITIVE ERS deploy-force slice**, N (`None` ⇒ the forward step uses
+    /// the opaque `tractive_force` total — mechanical units + the greedy budget-free ERS adder).
+    /// When present, the forward step becomes `mech_tractive_force·scale + deploy_force[i]`: the
+    /// energy-manager march fills the slice with the budget/pack/machine-clipped electric share,
+    /// the scale multiplies the mechanical share only, and a NEGATIVE entry is a C5.12 super-clip
+    /// back-drive (a "power limited" straight — net force drops while the store recharges).
+    deploy_force: Option<&'a [f64]>,
     /// Optional per-station **tyre state** `(T_tire[i] in K, wear[i] in mm)` (`None` ⇒ the envelope is
     /// queried at its frozen reference slice). The QSS tyre-thermal march ([`crate::tire`]) fills this
     /// from the ring marched along the previous pass; the boundary + longitudinal shoulders are then
@@ -172,22 +179,26 @@ impl<'a> GgvGrip<'a> {
             veh,
             env,
             traction_scale: None,
+            deploy_force: None,
             tire_state: None,
         }
     }
 
     /// As [`Self::new`] but with the optional per-station couplings: the traction `scale` (machine /
-    /// battery) and the `tire` state `(T_tire[i], wear[i])` (the tyre-thermal march).
+    /// battery), the additive ERS `deploy` force slice (the energy-manager march), and the `tire`
+    /// state `(T_tire[i], wear[i])` (the tyre-thermal march).
     fn coupled(
         veh: &'a T0Vehicle,
         env: &'a GgvEnvelope,
         scale: Option<&'a [f64]>,
+        deploy: Option<&'a [f64]>,
         tire: Option<(&'a [f64], &'a [f64])>,
     ) -> Self {
         Self {
             veh,
             env,
             traction_scale: scale,
+            deploy_force: deploy,
             tire_state: tire,
         }
     }
@@ -320,9 +331,14 @@ impl GripModel for GgvGrip<'_> {
         let accel = if self.planted(v_i, gn) {
             let ax_grip = self.ax_forward(i, v_i, gn, ay_dem.abs(), p.grip[i]);
             // Slow-state coupling: the machine-thermal derate ∧ battery peak-power cap scale the
-            // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1.
-            let pt_net = self.veh.tractive_force(v_i) * self.scale(i) / self.veh.mass_kg
-                - self.env.drag_accel(v_i);
+            // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1. With an
+            // energy-manager deploy slice, the scale multiplies the MECHANICAL share only and the
+            // (budget/pack/machine-clipped, possibly negative) electric share adds on top.
+            let pt_force = match self.deploy_force {
+                Some(d) => self.veh.mech_tractive_force(v_i) * self.scale(i) + d[i],
+                None => self.veh.tractive_force(v_i) * self.scale(i),
+            };
+            let pt_net = pt_force / self.veh.mass_kg - self.env.drag_accel(v_i);
             ax_grip.min(pt_net) - G * p.sin_g[i]
         } else {
             // Airborne (crest unloading beyond aero downforce): no traction, just drag + grade coast.
@@ -478,18 +494,22 @@ pub fn solve_into_ggv_scaled(
     path: &T0Path,
     ws: &mut T0Workspace,
 ) -> Result<f64, T0Error> {
-    solve_into_ggv_coupled(veh, env, Some(scale), None, path, ws)
+    solve_into_ggv_coupled(veh, env, Some(scale), None, None, path, ws)
 }
 
 /// As [`solve_into_ggv`] but with the optional QSS slow-state couplings composed into one solve:
 ///
 /// * `scale` — the per-station **traction scale** ∈ [0, 1] (machine-thermal derate ∧ battery
 ///   peak-power cap), multiplying the powertrain traction ceiling in the forward step.
+/// * `deploy` — the per-station **additive ERS deploy-force slice**, N, filled by the
+///   energy-manager march ([`crate::qss`]). When present the scale multiplies the MECHANICAL
+///   share only ([`T0Vehicle::mech_tractive_force`]) and the slice adds the (budget/pack/machine
+///   clipped) electric share; a negative entry is a C5.12 super-clip back-drive.
 /// * `tire` — the per-station **tyre state** `(T_tire[i] in K, wear[i] in mm)` the tyre-thermal march
 ///   ([`crate::tire`]) fills; the tyre-grip boundary + longitudinal shoulders are indexed on the
 ///   envelope's tyre-state axes so a hot / worn tyre solves a degraded lap.
 ///
-/// Either may be `None` (uncoupled in that dimension). Both slices, when present, must be
+/// Any may be `None` (uncoupled in that dimension). All slices, when present, must be
 /// `path.len()` long. Zero-allocation.
 ///
 /// # Errors
@@ -498,6 +518,7 @@ pub fn solve_into_ggv_coupled(
     veh: &T0Vehicle,
     env: &GgvEnvelope,
     scale: Option<&[f64]>,
+    deploy: Option<&[f64]>,
     tire: Option<(&[f64], &[f64])>,
     path: &T0Path,
     ws: &mut T0Workspace,
@@ -516,11 +537,14 @@ pub fn solve_into_ggv_coupled(
     if let Some(s) = scale {
         check(s.len())?;
     }
+    if let Some(d) = deploy {
+        check(d.len())?;
+    }
     if let Some((t, w)) = tire {
         check(t.len())?;
         check(w.len())?;
     }
-    solve_generic(&GgvGrip::coupled(veh, env, scale, tire), path, ws)
+    solve_generic(&GgvGrip::coupled(veh, env, scale, deploy, tire), path, ws)
 }
 
 /// Central segment longitudinal acceleration `(v_{i+1}² − v_i²)/2ds` at each station into `ax_out`

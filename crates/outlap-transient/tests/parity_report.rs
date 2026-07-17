@@ -140,17 +140,18 @@ fn qss_t2_parity_report_limebeer_catalunya() {
     let t0 = solve_t0(
         &t0v,
         env,
-        None,
-        None,
+        &outlap_qss::Couplings::default(),
         &path,
-        LineDescriptor::MinCurvature {
-            ds_m: RacelineOptions::default().ds_m,
-            iterations: 1,
+        outlap_qss::LapRequest {
+            line: LineDescriptor::MinCurvature {
+                ds_m: RacelineOptions::default().ds_m,
+                iterations: 1,
+            },
+            resolved_hash: resolved.report.resolved_hash.clone(),
+            notes: t0v.notes().to_vec(),
+            fz_coupling: sim.resolved_fz_coupling(),
+            flat_track: true,
         },
-        resolved.report.resolved_hash.clone(),
-        t0v.notes().to_vec(),
-        sim.resolved_fz_coupling(),
-        true,
     )
     .unwrap();
     let t0r = &t0.lap;

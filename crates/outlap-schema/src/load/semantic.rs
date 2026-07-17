@@ -646,6 +646,69 @@ pub fn check_battery(
     Ok(())
 }
 
+/// Relative tolerance for the ers↔battery usable-window energy agreement (M6 PR2 / D-M6-3). The
+/// pack ECM document is the model of record; `ers.es.capacity_mj` is the DECLARED usable-window
+/// energy (FIA C5.2.9) and must reproduce `(soc window span) × e_pack_wh` to this tolerance.
+const ERS_BATTERY_CAPACITY_RTOL: f64 = 0.01;
+
+/// Cross-document integrity: the vehicle's `ers.es` energy store must agree with its referenced
+/// battery document (M6 PR2 / D-M6-3). Anchored on the VEHICLE file's spans — the mismatch is a
+/// vehicle-level declaration error; the battery file's values ride in the message.
+///
+/// # Errors
+/// [`SchemaError::Semantic`] when the two `soc_window`s differ, or when `es.capacity_mj` does
+/// not equal the battery's usable-window energy within [`ERS_BATTERY_CAPACITY_RTOL`].
+pub fn check_ers_battery(
+    ers: &crate::vehicle::Ers,
+    battery: &crate::battery::BatteryDoc,
+    battery_path: &str,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    let s = Spans { index, file };
+    let [e_lo, e_hi] = ers.es.soc_window;
+    let [b_lo, b_hi] = battery.soc_window;
+    if (e_lo - b_lo).abs() > 1e-9 || (e_hi - b_hi).abs() > 1e-9 {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/ers/es/soc_window"),
+            format!(
+                "`ers.es.soc_window` [{e_lo}, {e_hi}] disagrees with the battery document's \
+                 soc_window [{b_lo}, {b_hi}] (`{battery_path}`)"
+            ),
+            Some(
+                "the ers energy store IS the referenced battery — the two windows must be one \
+                 declaration"
+                    .to_owned(),
+            ),
+        ));
+    }
+    // Usable-window energy: (window span) × pack total. `e_pack_wh` is load-bearing from M6 PR2
+    // on (its first consumer — the field-semantics policy freezes its meaning here).
+    let window_mj = (b_hi - b_lo) * battery.capacity.e_pack_wh * 3600.0e-6;
+    let declared = ers.es.capacity_mj;
+    if (window_mj - declared).abs() > ERS_BATTERY_CAPACITY_RTOL * declared.max(f64::MIN_POSITIVE) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/ers/es/capacity_mj"),
+            format!(
+                "`ers.es.capacity_mj` = {declared} MJ (the usable-window energy, FIA C5.2.9) \
+                 disagrees with the battery document: (soc window {b_lo}..{b_hi}) × e_pack_wh \
+                 {} Wh = {window_mj:.4} MJ (`{battery_path}`)",
+                battery.capacity.e_pack_wh
+            ),
+            Some(format!(
+                "size the pack so the window spans the declared capacity (within {:.0}% \
+                 relative) — e.g. a 4.0 MJ window over [0.2, 0.9] needs a {:.4} MJ total pack",
+                ERS_BATTERY_CAPACITY_RTOL * 100.0,
+                declared / (b_hi - b_lo).max(f64::MIN_POSITIVE)
+            )),
+        ));
+    }
+    Ok(())
+}
+
 /// Semantic checks for a `.tyr` document. Returns non-fatal warnings (unknown MF6.1 keys, a brush
 /// block under an old MINOR, a partial MF6.1 force set alongside a brush block).
 pub fn check_tyr(

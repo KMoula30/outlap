@@ -23,6 +23,11 @@ pub enum T0Error {
         /// Index of the offending drive unit.
         unit: usize,
     },
+    /// The ERS rulebook could not be built from the `ers:` block (a malformed taper table or a
+    /// power fraction rising with speed — should not happen after schema validation; surfaced
+    /// defensively).
+    #[error("could not build the ERS rulebook: {0}")]
+    ErsRulebook(#[from] outlap_powertrain::RulebookError),
     /// The vehicle has no propulsion source T0 can use (no drive units and no ERS).
     #[error("vehicle has no drive units or ERS — nothing to propel the point mass")]
     NoDrive,

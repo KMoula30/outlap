@@ -99,7 +99,9 @@ def test_slow_state_coupling_live(nuerburgring_lap: xr.Dataset) -> None:
     assert 0.0 < soc[-1] < 0.98, f"end SoC {soc[-1]:.3f}"
     temp = ds.machine_temp_c.to_numpy()
     assert temp.max() > temp[0] + 5.0, "the winding must heat under traction loss"
-    assert temp.max() < 180.0, f"winding {temp.max():.1f} °C must stay below t_max"
+    # model3 has no `ers:` block, so its pack keeps the v0.3.0 top-of-window seed (the M6 PR2
+    # mid-window seed is scoped to ERS cars) — this lap is byte-identical to v0.3.0.
+    assert float(temp.max()) < 180.0, "winding stays below t_max"
     # The machine-thermal mass-heuristic fills (none expected — the emotor is fully authored)
     # and the missing-map fallbacks are recorded in the notes: nothing silent.
     assert isinstance(ds.attrs["notes"], tuple)

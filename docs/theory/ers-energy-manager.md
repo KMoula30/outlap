@@ -159,6 +159,60 @@ the deploy/regen fraction (scaling the budget-clipped envelope command) and the 
 station for the M6 PR4 wiring. The rule-based and scheduled policies emit the same `ErsCommand`
 type, so tier wiring and the parity gate are policy-agnostic.
 
+## QSS tier wiring (M6 PR2)
+
+The quasi-steady tier consumes the manager inside its slow-state march: per station along the
+solved profile, the march classifies the station from the point-mass force balance
+(`F = m·(a_x + drag + g·sinθ)`; drive / braking, with full throttle at ≥ 98% of the pedal
+availability), builds the manager's inputs, and realizes the command against the ceilings the
+tier owns — **the pack has the final word**. The realized electric wheel-force share then enters
+the next profile solve as an ADDITIVE per-station slice: the machine/battery caps scale the
+electric share only, never the ICE.
+
+![QSS energy-manager wiring — an f1_2026 lap](img/ers_qss_lap.png)
+
+**Deployment** (electrical → wheel force): `min(cap·taper(v), pack discharge ceiling)` → × 0.97
+(C5.2.14) → `min(machine mechanical ceiling)` → × η_driveline → `/v`. Both conversion factors
+stay distinct: 0.97 is the regulation's electrical→mechanical crank factor, η the crank→wheel
+driveline loss. The C5.2.11 crank torque cap is not separately enforced at this tier — the MGU-K
+`.ptm` is a bare-machine map with no declared reduction ratio, so the ratio-invariant machine
+power ceiling `max(τ·ω)` is the binding proxy (T2 enforces torque through the gearbox, M6 PR4).
+The uncoupled pedal availability runs the same rulebook curve — retiring the tier's old
+Hermite-taper, no-0.97 shortcut:
+
+![What changed at T0: the deploy chain](img/ers_t0_taper_change.png)
+
+**Harvest** composes the same five ceilings as the transient tier's series regen blend
+(`blend_regen`), in the same order, so parity gate #4 measures physics rather than modelling
+gaps:
+
+| # | Ceiling | QSS form |
+|---|---------|----------|
+| 1 | machine envelope | `max(τ·ω)` over the `.ptm` map (symmetric-machine fallback) |
+| 2 | low-speed fade | linear to zero below 2 m/s (the T2 constant) |
+| 3 | pack charge acceptance | `regen_power_limit_w` — design curve × kinetic derate ∧ CV taper |
+| 4 | blend authority | `brakes.regen_blend.max_regen_frac` × the braking demand |
+| 5 | per-axle split | balance bar over the axle(s) the machine drives |
+
+Braking and part-throttle harvest never touch the trajectory (the calipers supply the braking
+deficit; the ICE covers the part-throttle gap). Full-throttle **super-clip** back-drive is the
+exception by design: the C5.12 "power limited" periods reduce net force on straights while the
+store recharges, so the slice goes negative and the lap honestly slows.
+
+The per-lap ledger banks the REALIZED command (post pack-clip) — never more than commanded, so
+budgets hold by construction and lap energy closure is exact. Attribution follows D-M6-10: the
+pack exchanges only the manager's electrical deploy/harvest power; the ICE covers the rest of
+traction (this replaces the pre-M6 full-draw simplification for hybrids). The march is governed
+by a deeper fixed outer-iteration count than the derate marches (6 vs 2): the deploy/harvest
+schedule reshapes the very profile it was decided on, and a SoC-starved lap needs several passes
+to settle — measured residuals are recorded per lap (`max |Δscale|`, `max |Δdeploy force|`,
+`|Δlap time|`), and every no-manager path keeps the original count bit-identically.
+
+The FIA C5.2.9 usable-window rule (max − min SoC ≤ 4 MJ on track) is **recorded, not clamped**:
+the lap reports its on-track SoC swing, and the load pipeline cross-checks the vehicle's declared
+`ers.es` window against the referenced battery document (window agreement exact; usable-window
+energy within 1% of `(span) × e_pack_wh`).
+
 ## Not modelled (v1)
 
 Recorded per §15; all are event config or stage-2 territory:

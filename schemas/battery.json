@@ -193,7 +193,7 @@
       "type": "object",
       "properties": {
         "e_pack_wh": {
-          "description": "Pack energy capacity, W·h (nominal; informational).",
+          "description": "Pack TOTAL energy capacity, W·h (nominal). Load-bearing since M6 PR2: on an\n`ers:`-bearing vehicle the load pipeline checks `(soc window span) × e_pack_wh` against\nthe declared `ers.es.capacity_mj` usable-window energy (the field-semantics policy froze\nthis meaning when it gained its first consumer).",
           "type": "number",
           "format": "double"
         },

@@ -66,6 +66,9 @@ pub struct Pack {
     scale_r: f64,
     /// Pack charge capacity, Coulomb (`q_pack_ah · 3600`).
     q_pack_coulomb: f64,
+    /// Nominal TOTAL energy capacity, J (`e_pack_wh · 3600`) — the declared pack energy the
+    /// normalized SoC spans. Used to report an on-track SoC swing in MJ (the FIA C5.2.9 window).
+    total_energy_j: f64,
     /// Usable SoC window `[min, max]`.
     soc_window: [f64; 2],
     /// Peak discharge power vs SoC, W (positive ceiling).
@@ -187,6 +190,7 @@ impl Pack {
             scale_v,
             scale_r,
             q_pack_coulomb: doc.capacity.q_pack_ah * S_PER_H,
+            total_energy_j: doc.capacity.e_pack_wh * S_PER_H,
             soc_window: doc.soc_window,
             peak_discharge,
             peak_regen,
@@ -275,6 +279,14 @@ impl Pack {
     #[must_use]
     pub fn soc_window(&self) -> [f64; 2] {
         self.soc_window
+    }
+
+    /// The nominal TOTAL energy capacity, J (`e_pack_wh · 3600`) — the energy a full SoC swing of
+    /// 1.0 spans. A `ΔSoC` swing therefore banks `ΔSoC · total_energy_j` (the FIA C5.2.9 window in
+    /// MJ is `on-track ΔSoC × total_energy_j`).
+    #[must_use]
+    pub fn total_energy_j(&self) -> f64 {
+        self.total_energy_j
     }
 
     /// Whether the pack declared a `regen_derate_vs_temp` curve. When `false`, charge acceptance is

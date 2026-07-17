@@ -33,27 +33,31 @@
 )]
 
 pub mod error;
+pub mod ers;
 pub mod margin;
 pub mod path;
 pub mod qss;
 pub mod result;
 pub mod solver;
+pub mod stack;
 pub mod t1;
 pub mod tire;
 pub mod vehicle;
 
 pub use error::{T0Error, T1Error};
+pub use ers::ErsCoupling;
 pub use margin::corner_scaled_targets;
 pub use path::T0Path;
 pub use qss::{
-    solve_t0, solve_t1, tier_not_implemented, QssError, QssLap, SetupLog, SlowCoupling, SlowLog,
-    WheelLog, WHEEL_ORDER,
+    solve_t0, solve_t1, tier_not_implemented, Couplings, ErsSlowLog, LapRequest, MarchConvergence,
+    QssError, QssLap, SetupLog, SlowCoupling, SlowLog, WheelLog, WHEEL_ORDER,
 };
 pub use result::{LapResult, LineDescriptor, T0Workspace};
 pub use solver::{
     solve_into, solve_into_ggv, solve_into_ggv_coupled, solve_into_ggv_scaled, solve_lap,
     solve_lap_ggv,
 };
+pub use stack::{plan_slow_stack, SlowStackPlan, ThermalPairing};
 pub use t1::{
     load_transfer, split_axle, AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint,
     GgvEnvelope, LoadTransferGeometry, MachineThermal, Pack, PackState, PrimaryDiff, StepOut,

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 outlap-core = { path = "../outlap-core" }
+outlap-powertrain = { path = "../outlap-powertrain" }
 outlap-tire = { path = "../outlap-tire" }
 outlap-track = { path = "../outlap-track" }
 outlap-thermal = { path = "../outlap-thermal" }
