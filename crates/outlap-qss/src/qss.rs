@@ -413,7 +413,14 @@ fn march_slow_states(
                 ramp_reduced_w,
                 &ledger,
             );
-            let realized = ers_realize(t0, e, c, &mut st, &cmd, f_req, vi, dt, bufs, i);
+            // The C5.2.9 running-band clip is built from the running SoC min/max SEEN so far this
+            // lap (`stats`, which already folds in the entry state carried into this station).
+            let band = SwingBand {
+                seen_lo: stats.soc_min,
+                seen_hi: stats.soc_max,
+                swing_soc: e.swing_limit_j / c.pack.total_energy_j(),
+            };
+            let realized = ers_realize(t0, e, c, &mut st, &cmd, f_req, vi, dt, band, bufs, i);
             ledger.record(&realized, dt);
             // Ramp episode accounting (the manager_trace idiom): reductions accumulate while the
             // signed K power falls, and the episode resets the moment it rises.
@@ -539,6 +546,7 @@ fn ers_realize(
     f_req: f64,
     vi: f64,
     dt: f64,
+    band: SwingBand,
     bufs: &mut SlowMarchBuffers,
     i: usize,
 ) -> ErsCommand<f64> {
@@ -547,17 +555,36 @@ fn ers_realize(
         harvest_w: 0.0,
         mode: cmd.mode,
     };
+    // The SoC floor/ceiling this step must respect: the PHYSICAL usable window intersected with the
+    // REGULATORY C5.2.9 swing band (running-band clip — see `SwingBand`). The two are independent:
+    // for a pack sized to the reg they coincide; for a physically larger pack the reg band bites
+    // first. The `Pack` power ceilings + the post-step clamp enforce the PHYSICAL edge exactly as
+    // before; the reg edge adds a power cap (from the SoC headroom) that fires ONLY where the reg
+    // band is STRICTLY inside the physical window, so the pack stops delivering/accepting at the
+    // regulatory limit (ledger-consistent) — and a pack sized to the reg (`reg == physical`, the
+    // f1 case) is untouched by this branch.
+    let [phys_lo, phys_hi] = c.pack.soc_window();
+    let (soc_floor, soc_ceil) = band.bounds([phys_lo, phys_hi]);
+    let e_total = c.pack.total_energy_j();
     if cmd.deploy_w > 0.0 {
-        // Pack discharge ceiling on the ELECTRIC share (D-M6-10; the ICE is untouched), then the
-        // machine's mechanical ceiling — the pack never pays for power the machine cannot convert.
-        let p_elec = cmd.deploy_w.min(c.pack.discharge_power_limit_w(st));
+        // Pack discharge ceiling on the ELECTRIC share (D-M6-10; the ICE is untouched), then — only
+        // if the reg floor sits ABOVE the physical floor — the reg headroom, then the machine's
+        // mechanical ceiling (the pack never pays for power the machine cannot convert).
+        let mut p_elec = cmd.deploy_w.min(c.pack.discharge_power_limit_w(st));
+        if soc_floor > phys_lo {
+            p_elec = p_elec.min((st.soc - soc_floor).max(0.0) * e_total / dt);
+        }
         let (_p_mech, p_elec_real) = t0.ers_realized_deploy_w(p_elec);
         c.pack.step_power(st, p_elec_real, dt);
         bufs.deploy_force_n[i] = t0.ers_deploy_force_n(vi, p_elec_real);
         realized.deploy_w = p_elec_real;
     } else if cmd.harvest_w > 0.0 {
-        // Harvest ceiling 3: pack charge acceptance (design curve × kinetic derate ∧ CV taper).
-        let p_elec = cmd.harvest_w.min(c.pack.regen_power_limit_w(st));
+        // Harvest ceiling 3: pack charge acceptance (design curve × kinetic derate ∧ CV taper),
+        // then — only if the reg ceiling sits BELOW the physical ceiling — the reg headroom.
+        let mut p_elec = cmd.harvest_w.min(c.pack.regen_power_limit_w(st));
+        if soc_ceil < phys_hi {
+            p_elec = p_elec.min((soc_ceil - st.soc).max(0.0) * e_total / dt);
+        }
         c.pack.step_power(st, -p_elec, dt);
         realized.harvest_w = p_elec;
         if cmd.mode == ErsMode::HarvestStraight && f_req > 0.0 {
@@ -573,17 +600,35 @@ fn ers_realize(
         // Idle: the pack still relaxes (RC decay + thermal node) over the segment.
         c.pack.step_power(st, 0.0, dt);
     }
-    // Hold the pack inside its usable window. `step_power` clamps SoC to [0, 1] only, so a segment
-    // that begins just inside the edge (where the acceptance/discharge ceiling is still open) can
-    // overshoot it by one step. Clamping to `[soc_lo, soc_hi]` bounds the on-track SoC swing to the
-    // usable window span — the FIA C5.2.9 ≤ 4 MJ recharge window for the f1 pack, whose window is
-    // sized to exactly that (D-M6-3, now clamped rather than only recorded). Scoped to the manager
-    // path, so no-ers packs stay bit-identical.
-    let [soc_lo, soc_hi] = c.pack.soc_window();
-    st.soc = st.soc.clamp(soc_lo, soc_hi);
+    // Belt-and-suspenders: `step_power` clamps SoC to [0, 1] only, so a segment that begins just
+    // inside an edge can overshoot by one step. Clamp to the physical ∩ regulatory band so the
+    // on-track swing is bounded exactly.
+    st.soc = st.soc.clamp(soc_floor, soc_ceil);
     bufs.deploy_w[i] = realized.deploy_w;
     bufs.harvest_w[i] = realized.harvest_w;
     realized
+}
+
+/// The FIA C5.2.9 regulatory swing band for the current step: the running SoC min/max seen so far
+/// this lap, plus the swing limit in SoC units. Bounds `max − min ≤ swing` causally — a step may
+/// not raise SoC more than `swing` above the lap's lowest point so far (`seen_lo + swing`), nor
+/// lower it more than `swing` below the highest (`seen_hi − swing`) — with no knowledge of the
+/// future minimum. Independent of the pack's physical window; [`SwingBand::bounds`] intersects the
+/// two.
+#[derive(Clone, Copy)]
+struct SwingBand {
+    seen_lo: f64,
+    seen_hi: f64,
+    swing_soc: f64,
+}
+
+impl SwingBand {
+    /// The physical usable window intersected with the regulatory swing band → `(floor, ceiling)`.
+    fn bounds(self, [phys_lo, phys_hi]: [f64; 2]) -> (f64, f64) {
+        let reg_lo = self.seen_hi - self.swing_soc;
+        let reg_hi = self.seen_lo + self.swing_soc;
+        (phys_lo.max(reg_lo), phys_hi.min(reg_hi))
+    }
 }
 
 /// Run the coupled (or uncoupled) velocity profile into `ws`, returning the lap time and — when a

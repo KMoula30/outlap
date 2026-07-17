@@ -264,6 +264,67 @@ fn f1_lap_deploys_under_the_curve_and_harvests_under_braking() {
 }
 
 #[test]
+fn the_c5_2_9_swing_clip_is_independent_of_the_physical_window() {
+    // The FIA C5.2.9 on-track swing limit is a REGULATION, enforced independently of the pack's
+    // PHYSICAL usable window. Give the f1 pack (physical window [0.2, 0.9] = 4 MJ) a TIGHTER reg
+    // swing limit of 2 MJ, then drain it: the swing must clip at the 2 MJ reg band (≈ 0.35 SoC),
+    // NOT at the physical 0.7 span — the pack stops discharging well ABOVE its physical floor.
+    let mut h = hybrid("f1_2026", None);
+    let e_total = h.pack.total_energy_j();
+    let swing_mj = 2.0;
+    h.resolved.spec.ers.as_mut().unwrap().es.capacity_mj = swing_mj; // 2 MJ < the 4 MJ window
+
+    let spec = {
+        let mut s = h.resolved.spec.clone();
+        s.ers.as_mut().unwrap().recovery.recharge_phases = false;
+        s
+    };
+    let ers = ErsCoupling::assemble(&spec, &h.t0, Policy::RuleBased, true)
+        .unwrap()
+        .unwrap();
+    assert!((ers.swing_limit_j - swing_mj * 1e6).abs() < 1.0);
+    let path = T0Path::from_track(&stadium_track(), 5.0);
+    let electro = SlowCoupling {
+        vehicle: &h.t1,
+        thermal: None,
+        pack: h.pack.clone(),
+        pack_state: PackState {
+            soc: 0.9,
+            ..h.state
+        },
+        active: h.t1.has_energy_maps(),
+    };
+    let lap = solve_t0(
+        &h.t0,
+        h.env.clone(),
+        &Couplings {
+            electro: Some(&electro),
+            tire: None,
+            ers: Some(&ers),
+        },
+        &path,
+        plain_request(),
+    )
+    .unwrap();
+    let ers_log = lap.slow.unwrap().ers.unwrap();
+    let swing_soc = swing_mj * 1e6 / e_total;
+    // The recorded swing respects the reg limit (a hair of discretisation tolerance)...
+    assert!(
+        ers_log.soc_max - ers_log.soc_min <= swing_soc + 2e-3,
+        "swing {:.4} exceeds the {swing_mj} MJ reg band {swing_soc:.4}",
+        ers_log.soc_max - ers_log.soc_min
+    );
+    // ...and it is genuinely the REG limit biting, not the physical window: the pack drains from
+    // 0.9 but stops far above the physical floor 0.2 (≈ 0.9 − 0.35 = 0.55).
+    let [phys_lo, _] = h.pack.soc_window();
+    assert!(
+        ers_log.soc_min > phys_lo + 0.2,
+        "reg clip must stop the drain ABOVE the physical floor {phys_lo}, got soc_min {:.4}",
+        ers_log.soc_min
+    );
+}
+
+#[test]
 fn pack_soc_closes_against_the_ledger_over_the_lap() {
     // The spec's energy-closure gate ('ES out − ES in == Σ deploy − Σ harvest'), in two parts:
     //   (1) an independent re-march reproduces the PRODUCTION ledger — so the reported ledger is

@@ -516,19 +516,32 @@ fn an_ers_vehicle_without_a_battery_block_is_gated() {
     assert!(!resolved.report.degraded.is_empty());
 }
 
-/// `ers.es.capacity_mj` is the USABLE-window energy and must reproduce the battery document's
-/// `(window span) × e_pack_wh` within 1% — a mismatch is a vehicle-level declaration error.
+/// `ers.es.capacity_mj` is the FIA C5.2.9 on-track swing limit; it must FIT WITHIN the battery's
+/// physical usable-window energy `(window span) × e_pack_wh` — a swing that draws more than the
+/// store physically holds is a vehicle-level declaration error.
 #[test]
-fn an_ers_battery_capacity_mismatch_is_rejected() {
+fn an_ers_swing_limit_over_the_physical_window_is_rejected() {
     let bad = GT_VEHICLE.replace("capacity_mj: 2.0", "capacity_mj: 2.5");
     let l = gt_loader(&bad, Some(GT_BATTERY));
     let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
-        .expect_err("a capacity mismatch must be rejected");
+        .expect_err("a swing limit above the physical window must be rejected");
     let msg = format!("{err}");
     assert!(
         msg.contains("capacity_mj") && msg.contains("e_pack_wh"),
         "both sides of the disagreement are named: {msg}"
     );
+}
+
+/// The C5.2.9 swing limit is INDEPENDENT of the physical window: a reg limit SMALLER than the
+/// pack's usable-window energy is valid (the swing is then clipped below the physical edge). The
+/// old `= window` heuristic would have rejected this.
+#[test]
+fn a_swing_limit_below_the_physical_window_is_accepted() {
+    let smaller = GT_VEHICLE.replace("capacity_mj: 2.0", "capacity_mj: 1.5");
+    let l = gt_loader(&smaller, Some(GT_BATTERY));
+    let resolved = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect("a reg swing limit below the physical window is valid (independent of it)");
+    assert!((resolved.spec.ers.as_ref().unwrap().es.capacity_mj - 1.5).abs() < 1e-9);
 }
 
 /// The two `soc_window` declarations are ONE physical window and must agree exactly.

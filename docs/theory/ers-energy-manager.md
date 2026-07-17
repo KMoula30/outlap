@@ -107,9 +107,10 @@ on the Hermite. The property test evaluates the rulebook against the closed-form
   estimated**: the former loader heuristic that back-filled it with `es.capacity_mj` was removed
   (a phantom 4 MJ/lap cap on an F1 car the moment budgets are enforced), and a property test
   holds that a null budget stays unenforced.
-- **The ES window** (C5.2.9): `max SoC − min SoC ≤ 4 MJ` on track — a usable *window*, not a
-  capacity. `ers.es.capacity_mj` documents the usable-window energy; results carry a recorded
-  on-track max−min SoC channel (record, not clamp — M6 PR2).
+- **The ES swing limit** (C5.2.9): `max SoC − min SoC ≤ 4 MJ` on track — a regulatory *swing*, not
+  a capacity. `ers.es.capacity_mj` is that limit, enforced independently of the pack's physical
+  `soc_window` by the running-band clip (see "QSS tier wiring" below); results also carry the
+  recorded on-track max−min SoC in MJ.
 
 The ledger ([`LapEnergyLedger`]) is caller-clocked: `record(cmd, dt)` each step, `reset()` at the
 lap boundary. A lap boundary resets the **ledger**, never the pack — the store carries over.
@@ -211,14 +212,27 @@ slice is under-relaxed (ω = 0.5) to converge the fixed point. Measured residual
 lap (`max |Δscale|`, `max |Δdeploy force|`, `|Δlap time|`), and every no-manager path keeps the
 original count bit-identically.
 
-The FIA C5.2.9 usable-window rule (max − min SoC ≤ 4 MJ on track) is enforced by **clamping the
-pack to its usable `soc_window`** each step: the on-track SoC swing is bounded by the window span,
-so the f1 pack — whose window is sized to exactly 4 MJ — cannot exceed the regulation. (The pack's
-`soc_window` is a physical car/battery property; the 4 MJ is an F1 regulation expressed by sizing
-that window to it. A pack physically larger than the reg would need a separate, tighter swing
-clip.) The lap still reports its on-track swing in MJ, and the load pipeline cross-checks the
-vehicle's declared `ers.es` window against the referenced battery document (window agreement
-exact; usable-window energy within 1% of `(span) × e_pack_wh`).
+Two **independent** limits bound the state of charge, and the march enforces both:
+
+- **The physical usable window** (`soc_window`) — a car/battery property. `Pack::step_power` clamps
+  SoC to `[0, 1]` only, so the manager path clamps to `[soc_lo, soc_hi]` each step (a segment that
+  begins just inside an edge would otherwise overshoot it by one step).
+- **The FIA C5.2.9 on-track swing** (`ers.es.capacity_mj`, e.g. 4 MJ) — a *regulation*: `max − min`
+  SoC energy on track. Enforced by a **running-band clip** that needs no knowledge of the future
+  minimum: a step may not raise SoC more than the swing above the lap's lowest point so far
+  (`seen_lo + swing`), nor lower it more than the swing below the highest (`seen_hi − swing`).
+  Together these bound `max − min ≤ swing` causally at every step. Where the reg band sits strictly
+  inside the physical window the pack stops delivering/accepting via a power cap (ledger-consistent,
+  not a post-hoc clamp), so the store simply "runs out of allocation" above its physical floor.
+
+The two are independent: the reg limit must only *fit within* the physical window
+(`capacity_mj ≤ (span) × e_pack_wh`, the load-pipeline cross-check — you cannot swing more energy
+than the store holds). A pack sized exactly to the reg (the shipped f1 pack: a 4 MJ window over
+[0.2, 0.9] with a 4 MJ swing limit) sees the reg band coincide with the physical window, so the
+regulatory branch is inert and the physical clamp alone bounds the swing; a physically larger pack
+has its swing clipped at `capacity_mj`, below the physical edge. The lap reports its on-track swing
+in MJ either way. The load pipeline also cross-checks the declared `ers.es` window against the
+referenced battery document (windows must agree exactly).
 
 ## Not modelled (v1)
 

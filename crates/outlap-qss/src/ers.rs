@@ -67,6 +67,14 @@ pub struct ErsCoupling {
     /// Blend authority `brakes.regen_blend.max_regen_frac` (0 without a `regen_blend` block —
     /// the T2 convention: no blend policy, no braking harvest) — harvest ceiling 4.
     pub max_regen_frac: f64,
+    /// FIA C5.2.9 on-track energy-swing limit, J (`ers.es.capacity_mj`) — the maximum
+    /// `max − min` SoC energy the store may vary on track. A REGULATORY limit, enforced
+    /// independently of the pack's PHYSICAL `soc_window`: the physical window is the battery's
+    /// range; this caps the swing WITHIN it (they coincide only when the pack is sized exactly to
+    /// the reg). Bounded causally by the running-band clip in the march (a step may not raise SoC
+    /// more than this above the lap's lowest point so far, nor lower it more than this below the
+    /// highest).
+    pub swing_limit_j: f64,
 }
 
 impl ErsCoupling {
@@ -117,6 +125,7 @@ impl ErsCoupling {
             p_mech_max_w: t0.ers_p_mech_max_w(),
             regen_axle_share,
             max_regen_frac,
+            swing_limit_j: ers.es.capacity_mj * 1.0e6,
         }))
     }
 
