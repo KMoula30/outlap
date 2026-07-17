@@ -27,8 +27,8 @@ use std::path::PathBuf;
 
 use outlap_qss::path::T0Path;
 use outlap_qss::{
-    solve_t0, GgvEnvelope, LineDescriptor, T0Options, T0Vehicle, T1Vehicle, TireStateRes,
-    TireThermalMarch, DEFAULT_DS_M, G,
+    solve_t0, Couplings, GgvEnvelope, LapRequest, LineDescriptor, T0Options, T0Vehicle, T1Vehicle,
+    TireStateRes, TireThermalMarch, DEFAULT_DS_M, G,
 };
 use outlap_raceline::{min_curvature_line, RacelineOptions};
 use outlap_schema::io::FsLoader;
@@ -103,29 +103,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let hash = resolved.report.resolved_hash.clone();
+    let req = |hash: String| LapRequest {
+        line: LineDescriptor::Centerline,
+        resolved_hash: hash,
+        notes: Vec::new(),
+        fz_coupling: coupling,
+        flat_track: true,
+    };
     let frozen = solve_t0(
         &t0,
         env.clone(),
-        None,
-        None,
+        &Couplings::default(),
         &path,
-        LineDescriptor::Centerline,
-        hash.clone(),
-        Vec::new(),
-        coupling,
-        true,
+        req(hash.clone()),
     )?;
     let warm = solve_t0(
         &t0,
         env.clone(),
-        None,
-        Some(&march),
+        &Couplings {
+            tire: Some(&march),
+            ..Couplings::default()
+        },
         &path,
-        LineDescriptor::Centerline,
-        hash,
-        Vec::new(),
-        coupling,
-        true,
+        req(hash),
     )?;
 
     println!(

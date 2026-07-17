@@ -436,3 +436,154 @@ fn the_new_ers_recovery_fields_load() {
     assert_eq!(ers.recovery.recharge_target_soc, Some(0.55));
     assert_eq!(ers.elec_mech_factor, Some(0.97));
 }
+
+// --- M6 PR2: the ers↔battery integrity contract ----------------------------------------------
+
+/// A `MemLoader` carrying every side file the `gt_hybrid` fixture references, with its
+/// `vehicle.yaml` swapped for `vehicle` and the battery document optionally omitted or replaced.
+fn gt_loader(vehicle: &str, battery: Option<&str>) -> MemLoader {
+    let slick = include_str!("fixtures/tyr/slick.tyr.yaml");
+    let mgu = include_str!("fixtures/ptm/mgu_k.ptm.yaml");
+    let ice = include_str!("fixtures/ptm/ice_v6.ptm.yaml");
+    let mut l = MemLoader::new()
+        .with("vehicle.yaml", vehicle)
+        .with("tyr/slick.tyr.yaml", slick)
+        .with("ptm/mgu_k.ptm.yaml", mgu)
+        .with("ptm/ice_v6.ptm.yaml", ice);
+    if let Some(b) = battery {
+        l = l.with("battery/gt_es.yaml", b);
+    }
+    l
+}
+
+const GT_VEHICLE: &str = include_str!("fixtures/gt_hybrid/vehicle.yaml");
+const GT_BATTERY: &str = include_str!("fixtures/battery/gt_es.yaml");
+
+/// The energy manager schedules the pack: an `ers:`-bearing vehicle whose battery document is
+/// missing must fail loudly — unless `allow_degraded` downgrades it to a RECORDED degradation.
+#[test]
+fn an_ers_vehicle_with_a_missing_battery_file_is_gated() {
+    let l = gt_loader(GT_VEHICLE, None);
+    let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect_err("missing battery on an ers car must be a hard error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not found") && msg.contains("energy store"),
+        "the message explains the contract: {msg}"
+    );
+
+    let resolved = load_vehicle(
+        "vehicle.yaml",
+        &l,
+        &LoadOptions {
+            allow_degraded: true,
+        },
+    )
+    .expect("allow_degraded downgrades the missing battery to a recorded degradation");
+    assert!(
+        resolved
+            .report
+            .degraded
+            .iter()
+            .any(|e| e.pointer.contains("battery")),
+        "the degradation is recorded, nothing silent"
+    );
+}
+
+/// An `ers:` block without any `battery:` reference at all is the same contract violation.
+#[test]
+fn an_ers_vehicle_without_a_battery_block_is_gated() {
+    let stripped = GT_VEHICLE.replace(
+        "battery:\n  model: rc_pairs\n  params: battery/gt_es.yaml\n",
+        "",
+    );
+    assert!(!stripped.contains("battery:"), "block stripped");
+    let l = gt_loader(&stripped, Some(GT_BATTERY));
+    let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect_err("ers without a battery block must be a hard error");
+    assert!(
+        format!("{err}").contains("`battery:`"),
+        "the fix is named: {err}"
+    );
+    let resolved = load_vehicle(
+        "vehicle.yaml",
+        &l,
+        &LoadOptions {
+            allow_degraded: true,
+        },
+    )
+    .expect("allow_degraded keeps the car solvable");
+    assert!(!resolved.report.degraded.is_empty());
+}
+
+/// `ers.es.capacity_mj` is the USABLE-window energy and must reproduce the battery document's
+/// `(window span) × e_pack_wh` within 1% — a mismatch is a vehicle-level declaration error.
+#[test]
+fn an_ers_battery_capacity_mismatch_is_rejected() {
+    let bad = GT_VEHICLE.replace("capacity_mj: 2.0", "capacity_mj: 2.5");
+    let l = gt_loader(&bad, Some(GT_BATTERY));
+    let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect_err("a capacity mismatch must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("capacity_mj") && msg.contains("e_pack_wh"),
+        "both sides of the disagreement are named: {msg}"
+    );
+}
+
+/// The two `soc_window` declarations are ONE physical window and must agree exactly.
+#[test]
+fn an_ers_battery_soc_window_mismatch_is_rejected() {
+    let bad = GT_VEHICLE.replace("soc_window: [0.3, 0.85]", "soc_window: [0.2, 0.85]");
+    let l = gt_loader(&bad, Some(GT_BATTERY));
+    let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect_err("a soc_window mismatch must be rejected");
+    assert!(
+        format!("{err}").contains("soc_window"),
+        "the window disagreement is named: {err}"
+    );
+}
+
+/// A NON-ers vehicle whose battery file is absent stays CLEAN (no `degraded` entry without
+/// `allow_degraded`) — the electro coupling is simply inert and the binding notes it. A
+/// `degraded` entry is the mark of an opted-into fallback run, never a silent side effect.
+#[test]
+fn a_non_ers_vehicle_with_a_missing_battery_stays_clean() {
+    // Strip the `ers:` block from the gt_hybrid fixture → a plain battery car (no manager),
+    // and point the battery at a missing file. It must load clean (no degraded entry).
+    let no_ers = strip_ers_block(GT_VEHICLE)
+        .replace("params: battery/gt_es.yaml", "params: battery/missing.yaml");
+    assert!(!no_ers.contains("ers:"), "ers block stripped");
+    let l = gt_loader(&no_ers, None); // no battery doc supplied ⇒ NotFound
+    let resolved = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect("a non-ers car with an absent battery still resolves");
+    assert!(resolved.spec.ers.is_none(), "control: no ers block");
+    assert!(
+        resolved.report.degraded.is_empty(),
+        "a non-ers car with a missing battery must NOT record a degradation without \
+         allow_degraded: {:?}",
+        resolved.report.degraded
+    );
+}
+
+/// Remove the top-level `ers:` block (up to the next top-level `battery:` key) from a vehicle
+/// YAML string — a test helper for the no-manager battery cases.
+fn strip_ers_block(vehicle: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in vehicle.lines() {
+        if line.starts_with("ers:") {
+            skipping = true;
+            continue;
+        }
+        // A new top-level key (no leading whitespace, not a comment) ends the ers block.
+        if skipping && !line.is_empty() && !line.starts_with(char::is_whitespace) {
+            skipping = false;
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}

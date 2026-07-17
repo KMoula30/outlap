@@ -8,6 +8,7 @@
 //! path into a set of gears so the hot [`T0Vehicle::tractive_force`] query is allocation-free.
 
 use outlap_core::MonotoneCubic;
+use outlap_powertrain::ErsRulebook;
 use outlap_schema::conditions::Conditions;
 use outlap_schema::io::SourceLoader;
 use outlap_schema::load::{load_ptm, load_tyr};
@@ -22,8 +23,6 @@ use crate::DEFAULT_DS_M;
 
 /// Revolutions per minute → radians per second.
 const RPM_TO_RAD_PER_S: f64 = std::f64::consts::PI / 30.0;
-/// Kilometres per hour → metres per second.
-const KPH_TO_MPS: f64 = 1000.0 / 3600.0;
 /// Specific gas constant for dry air, J/(kg·K).
 const DRY_AIR_R: f64 = 287.05;
 /// Speed floor for the ERS power→force conversion (the friction ellipse caps launch force anyway).
@@ -93,17 +92,27 @@ struct T0Gear {
     force_per_torque: f64,
 }
 
-/// An ERS reduced to a power-capped tractive-force contribution.
+/// An ERS reduced to a rulebook-governed tractive-force contribution.
+///
+/// The regulatory side (electrical cap × piecewise-LINEAR taper, the C5.2.14 0.97
+/// electrical→mechanical seam) lives in the shared [`ErsRulebook`] — the same implementation the
+/// energy manager enforces, so the greedy uncoupled path and the budget-enforced march can never
+/// disagree on the curve. The machine ceiling `p_mech_max_w` and the driveline `eta` are the
+/// T0-side mechanical composition (both factors distinct from the rulebook's 0.97 — see
+/// [`T0Vehicle::ers_deploy_force_n`]).
 #[derive(Clone, Debug)]
 struct T0Ers {
-    /// Peak deployment power, W.
-    p_deploy_w: f64,
+    /// The shared FIA-style rulebook (electrical caps, piecewise-linear tapers, 0.97 seam).
+    rulebook: ErsRulebook<f64>,
     /// Machine mechanical power ceiling `max(τ·ω)` over the map, W (ratio-invariant).
+    ///
+    /// The C5.2.11 crank torque cap is NOT separately enforced at T0: the MGU-K `.ptm` is a
+    /// bare-machine map with no declared ratio, so a crank-ω torque query would be wrong by the
+    /// (unknown) reduction; this ratio-invariant power ceiling is the binding proxy. T2 (M6 PR4)
+    /// enforces torque properly through the gearbox.
     p_mech_max_w: f64,
-    /// Driveline efficiency applied to the ERS force.
+    /// Driveline (crank→wheel) efficiency applied to the ERS force.
     eta: f64,
-    /// Power fraction vs vehicle speed [m/s → 0..1].
-    taper: MonotoneCubic<f64>,
 }
 
 impl T0Vehicle {
@@ -172,7 +181,7 @@ impl T0Vehicle {
             });
         }
 
-        // --- ERS (power-capped force; schema gives the MGU-K no path/ratio) ---
+        // --- ERS (rulebook-governed force; schema gives the MGU-K no path/ratio) ---
         let ers = match &spec.ers {
             Some(e) => {
                 let ptm = load_ptm(e.mgu_k.as_str(), loader)?;
@@ -183,18 +192,23 @@ impl T0Vehicle {
                     .zip(&curve.torque_nm)
                     .map(|(rpm, t)| (rpm * RPM_TO_RAD_PER_S) * t.abs())
                     .fold(0.0_f64, f64::max);
-                let taper = taper_env(&e.deployment.taper_vs_speed)?;
+                // The C5.2.11 crank torque cap stays proxied by `p_mech_max_w` (no declared
+                // machine→crank ratio at T0 — see the `T0Ers` doc); the rulebook carries the
+                // electrical caps + piecewise-linear tapers + the 0.97 conversion seam.
+                let rulebook = ErsRulebook::from_schema(e, None)?;
                 let eta = single_gearbox_eff(spec).unwrap_or(1.0);
                 notes.push(
-                    "ERS modelled as a power cap; per-lap deploy/harvest budgets and override mode \
-                     are not enforced at T0"
+                    "ERS folded into the T0 pedal-availability force as the greedy, budget-free \
+                     regulation-curve adder (piecewise-linear taper × the 0.97 crank factor); the \
+                     2026 energy manager governs actual budget-limited deployment where it is \
+                     wired (the QSS slow-state march; the T2 tier in M6 PR4). Where no manager \
+                     governs, this greedy adder is the deployment"
                         .to_owned(),
                 );
                 Some(T0Ers {
-                    p_deploy_w: e.deployment.power_limit_kw * 1000.0,
+                    rulebook,
                     p_mech_max_w,
                     eta,
-                    taper,
                 })
             }
             None => None,
@@ -224,8 +238,23 @@ impl T0Vehicle {
     }
 
     /// Total tractive force available at vehicle speed `v` (m/s), N — the sum over drive units of
-    /// the best gear's wheel force plus the power-capped ERS contribution. Allocation-free.
+    /// the best gear's wheel force plus the GREEDY (budget-free) ERS contribution on the
+    /// piecewise-linear regulation taper. This is the *pedal availability* — what the car can put
+    /// down when nothing but the deploy curve limits the ERS. The budget-enforced coupled solve
+    /// splits the two shares instead ([`Self::mech_tractive_force`] + a per-station deploy-force
+    /// slice from the energy-manager march). Allocation-free.
     pub fn tractive_force(&self, v: f64) -> f64 {
+        let mut force = self.mech_tractive_force(v);
+        if let Some(e) = &self.ers {
+            let p_elec = e.rulebook.deploy_cap_electrical_w(v, false);
+            force += self.ers_deploy_force_n(v, p_elec);
+        }
+        force
+    }
+
+    /// Mechanical tractive force from the drive units alone at speed `v` (m/s), N — best gear per
+    /// unit, no ERS share. Allocation-free.
+    pub fn mech_tractive_force(&self, v: f64) -> f64 {
         let mut force = 0.0;
         for unit in &self.units {
             let mut best = 0.0;
@@ -240,12 +269,61 @@ impl T0Vehicle {
             }
             force += best;
         }
-        if let Some(e) = &self.ers {
-            let frac = e.taper.eval(v).clamp(0.0, 1.0);
-            let power = (e.p_deploy_w * frac).min(e.p_mech_max_w).max(0.0);
-            force += e.eta * power / v.max(ERS_V_FLOOR_MPS);
-        }
         force
+    }
+
+    /// The wheel-force contribution of an ELECTRICAL ERS deploy power `p_elec_w` (W at the CU-K DC
+    /// bus) at speed `v`, N: `p_elec × 0.97 (C5.2.14, the rulebook seam) → min(machine mechanical
+    /// ceiling) → × η_driveline / v`. Both conversion factors stay distinct: 0.97 is the
+    /// regulation's electrical→mechanical crank factor, `eta` the crank→wheel driveline loss.
+    /// Returns 0 for a car without an `ers:` block. Allocation-free.
+    pub fn ers_deploy_force_n(&self, v: f64, p_elec_w: f64) -> f64 {
+        match &self.ers {
+            Some(e) => {
+                let p_mech = e
+                    .rulebook
+                    .mech_deploy_w(p_elec_w)
+                    .min(e.p_mech_max_w)
+                    .max(0.0);
+                e.eta * p_mech / v.max(ERS_V_FLOOR_MPS)
+            }
+            None => 0.0,
+        }
+    }
+
+    /// The mechanical crank power the ERS can realize for an electrical deploy `p_elec_w`, W —
+    /// `min(0.97·p_elec, machine ceiling)` — plus the electrical power actually drawn once the
+    /// machine ceiling binds (`p_mech / 0.97`: the pack never pays for power the machine cannot
+    /// convert). Returns `(p_mech_w, p_elec_realized_w)`; `(0, 0)` without an `ers:` block.
+    pub fn ers_realized_deploy_w(&self, p_elec_w: f64) -> (f64, f64) {
+        match &self.ers {
+            Some(e) => {
+                let p_mech = e
+                    .rulebook
+                    .mech_deploy_w(p_elec_w)
+                    .min(e.p_mech_max_w)
+                    .max(0.0);
+                let p_elec = if e.rulebook.mech_deploy_w(p_elec_w) > e.p_mech_max_w {
+                    e.rulebook.mech_harvest_w(p_mech) // p_mech / 0.97 — machine-bound draw
+                } else {
+                    p_elec_w.max(0.0)
+                };
+                (p_mech, p_elec)
+            }
+            None => (0.0, 0.0),
+        }
+    }
+
+    /// The ERS machine's ratio-invariant mechanical power ceiling `max(τ·ω)` over its `.ptm` map,
+    /// W (0 without an `ers:` block). The regen envelope proxy for the harvest chain — the `.ptm`
+    /// schema treats an absent regen curve as a symmetric machine.
+    pub fn ers_p_mech_max_w(&self) -> f64 {
+        self.ers.as_ref().map_or(0.0, |e| e.p_mech_max_w)
+    }
+
+    /// The ERS driveline (crank→wheel) efficiency (1 without an `ers:` block).
+    pub fn ers_eta(&self) -> f64 {
+        self.ers.as_ref().map_or(1.0, |e| e.eta)
     }
 
     /// Human-readable notes on T0 simplifications and any degradations (nothing silent).
@@ -372,12 +450,6 @@ fn torque_env(curve: &TorqueCurve) -> Result<MonotoneCubic<f64>, T0Error> {
         .map(|r| r * RPM_TO_RAD_PER_S)
         .collect();
     MonotoneCubic::new(omega, curve.torque_nm.clone()).map_err(T0Error::from)
-}
-
-/// Fit an ERS taper envelope `frac(v)` from a speed/fraction taper (kph → m/s at the boundary).
-fn taper_env(taper: &outlap_schema::vehicle::SpeedTaper) -> Result<MonotoneCubic<f64>, T0Error> {
-    let v: Vec<f64> = taper.speed_kph.iter().map(|s| s * KPH_TO_MPS).collect();
-    MonotoneCubic::new(v, taper.power_frac.clone()).map_err(T0Error::from)
 }
 
 /// If the whole drivetrain has exactly one gearbox with a constant efficiency, return it.

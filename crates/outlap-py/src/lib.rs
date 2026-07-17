@@ -33,10 +33,10 @@ use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
 
 use outlap_qss::{
-    solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, MachineThermal, Pack,
-    PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options, T0Path, T0Vehicle, T1Vehicle,
-    TireSlowLog, TireStateRes, TireThermalMarch, TireThermalState, WheelLog, DEFAULT_DS_M,
-    WHEEL_ORDER,
+    solve_t0, solve_t1, tier_not_implemented, Couplings, ErsCoupling, GgvEnvelope, LapRequest,
+    LineDescriptor, MachineThermal, Pack, PackState, QssLap, SetupLog, SlowCoupling, SlowLog,
+    T0Options, T0Path, T0Vehicle, T1Vehicle, TireSlowLog, TireStateRes, TireThermalMarch,
+    TireThermalState, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
 };
 use outlap_raceline::{
     min_curvature_line, min_curvature_line_weighted, raceline_stations, RacelineOptions,
@@ -102,15 +102,19 @@ fn overrides_from(d: Option<&Bound<'_, pyo3::types::PyDict>>) -> PyResult<Overri
 }
 
 /// Load + resolve a vehicle with optional dotted-path overrides (through the real pipeline:
-/// schema-validated after the merge, recorded in provenance — Decision #35).
-fn resolve_with_overrides(
+/// schema-validated after the merge, recorded in provenance — Decision #35), threading
+/// `allow_degraded` into the load pipeline (the ers↔battery integrity checks downgrade from hard
+/// errors to recorded degradations — #40). The solve entry points build their `Sim` FIRST so the
+/// real flag reaches the loader; the diagnostic report passes `true` so a degraded car surfaces.
+fn resolve_with_overrides_opts(
     vehicle_dir: &str,
     overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    allow_degraded: bool,
 ) -> PyResult<(FsLoader, ResolvedVehicle)> {
     let vl = FsLoader::new(vehicle_dir);
     let ov = overrides_from(overrides)?;
-    let resolved =
-        load_vehicle_with("vehicle.yaml", &vl, &LoadOptions::default(), &ov).map_err(schema_err)?;
+    let options = LoadOptions { allow_degraded };
+    let resolved = load_vehicle_with("vehicle.yaml", &vl, &options, &ov).map_err(schema_err)?;
     Ok((vl, resolved))
 }
 
@@ -497,8 +501,10 @@ fn time_weighted(
     };
 
     // --- assemble the speed pre-pass once (the envelope is line-independent) --------------------
-    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
-    let sim_cfg = build_sim(&vl, sim, None)?;
+    // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
+    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, None)?;
+    let (vl, resolved) =
+        resolve_with_overrides_opts(vehicle_dir, overrides, sim_cfg.allow_degraded)?;
     let base_conditions = match load_conditions("conditions.yaml", &vl) {
         Ok(c) => c,
         Err(e) if is_not_found(&e) => Conditions::default(),
@@ -533,14 +539,15 @@ fn time_weighted(
         let lap = solve_t0(
             &t0v,
             env.clone(),
-            None,
-            None,
+            &Couplings::default(),
             &path,
-            LineDescriptor::Centerline,
-            hash.clone(),
-            Vec::new(),
-            fzc,
-            flat,
+            LapRequest {
+                line: LineDescriptor::Centerline,
+                resolved_hash: hash.clone(),
+                notes: Vec::new(),
+                fz_coupling: fzc,
+                flat_track: flat,
+            },
         )
         .map_err(err)?
         .lap;
@@ -663,6 +670,10 @@ pub struct Lap {
     // Slow-state channels (per station); `None` unless a coupled electrified stack was active.
     state_of_charge: Option<Vec<f64>>,
     machine_temp_c: Option<Vec<f64>>,
+    // ERS energy-manager channels (per station, ELECTRICAL W, realized); `None` unless the
+    // 2026 energy manager governed the march (M6 PR2).
+    deploy_power_w: Option<Vec<f64>>,
+    harvest_power_w: Option<Vec<f64>>,
     // Tyre-thermal slow-state channels (per station, the representative front tyre); `None` unless
     // the tyre-thermal march was opted in (`tire_thermal=True`).
     tire_surface_c: Option<Vec<f64>>,
@@ -777,9 +788,24 @@ impl Lap {
             .as_ref()
             .map(|v| v.clone().into_pyarray(py))
     }
-    /// Machine winding temperature per station (°C), or `None` when no coupled stack was active.
+    /// Machine winding temperature per station (°C), or `None` when no coupled stack was active
+    /// (or the pack marches without a machine-thermal network).
     fn machine_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.machine_temp_c
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Realized electrical ERS deployment power per station (W, CU-K DC bus), or `None` when the
+    /// 2026 energy manager did not govern the lap.
+    fn deploy_power_w<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.deploy_power_w
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Realized electrical ERS harvest power per station (W, all Recharge paths), or `None` when
+    /// the 2026 energy manager did not govern the lap.
+    fn harvest_power_w<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.harvest_power_w
             .as_ref()
             .map(|v| v.clone().into_pyarray(py))
     }
@@ -1053,64 +1079,67 @@ fn load_pack(
     Ok(Some((pack, state)))
 }
 
+/// Assemble the electro slow-state stack per the typed [`plan_slow_stack`] rules (the pure
+/// eligibility/pairing logic lives in `outlap-qss`; this function performs exactly the IO the
+/// plan names). The machine-thermal network is OPTIONAL (M6 PR2): a pack marches without one.
 fn build_slow_stack(
     resolved: &ResolvedVehicle,
     vl: &FsLoader,
     conditions: &Conditions,
     notes: &mut Vec<String>,
-) -> PyResult<Option<(MachineThermal, Pack, PackState)>> {
-    let Some((pack, pack_state)) = load_pack(resolved, vl, notes)? else {
+) -> PyResult<Option<(Option<MachineThermal>, Pack, PackState)>> {
+    let plan = outlap_qss::plan_slow_stack(&resolved.spec);
+    let outlap_qss::SlowStackPlan::Pack {
+        thermal: pairing,
+        notes: plan_notes,
+        ..
+    } = plan
+    else {
         return Ok(None);
     };
-    // The first drive unit with a `.emotor` thermal ref carries the machine slow state (the QSS
-    // coupling marches ONE thermal network this milestone; multi-machine stacks arrive with the
-    // ERS energy manager). Extra thermal declarations are dropped WITH a note (nothing silent).
-    let thermal_units: Vec<usize> = resolved
-        .spec
-        .drivetrain
-        .units
-        .iter()
-        .enumerate()
-        .filter_map(|(i, u)| u.thermal.as_ref().map(|_| i))
-        .collect();
-    let Some(&unit_idx) = thermal_units.first() else {
-        notes.push(
-            "battery present but no drive unit declares a `.emotor` thermal model — slow-state \
-             coupling inert"
-                .to_owned(),
-        );
+    let Some((pack, mut pack_state)) = load_pack(resolved, vl, notes)? else {
         return Ok(None);
     };
-    if thermal_units.len() > 1 {
+    // QSS default seed: MID-window for an ERS car (D-M6-10) — matching the T2 `prepare_transient`
+    // seed, so the tiers agree by default and the pack can actually accept harvest. A no-`ers:`
+    // mapped EV (discharge-only QSS march) keeps `Pack::assemble`'s top-of-window default so its
+    // lap stays BYTE-IDENTICAL to v0.3.0 — mid-window would buy that car nothing and would move an
+    // established golden/band (the critical no-ers bit-identity invariant).
+    if resolved.spec.ers.is_some() {
+        let [lo, hi] = pack.soc_window();
+        pack_state.soc = 0.5 * (lo + hi);
         notes.push(format!(
-            "{} drive units declare `.emotor` thermal models — the QSS coupling marches ONE \
-             network (unit {unit_idx}); the aggregate powertrain loss heats it and the others \
-             are not integrated this milestone",
-            thermal_units.len()
+            "QSS pack seeded at {:.0}% state of charge, the middle of its usable window \
+             [{lo:.2}, {hi:.2}] (estimated — an `initial_soc` input arrives with the M6 PR3 stint \
+             surface); a pack at the top of its window accepts no charge and recovers nothing",
+            pack_state.soc * 100.0
         ));
     }
-    let unit = &resolved.spec.drivetrain.units[unit_idx];
-    let emotor_path = unit.thermal.as_ref().expect("filtered on thermal").as_str();
-    let em = match outlap_schema::load::load_emotor(emotor_path, vl) {
+    notes.extend(plan_notes);
+    let Some(pairing) = pairing else {
+        return Ok(Some((None, pack, pack_state)));
+    };
+    let em = match outlap_schema::load::load_emotor(&pairing.emotor_path, vl) {
         Ok(em) => em,
         Err(e) if is_not_found(&e) => {
             notes.push(format!(
-                "machine thermal `{emotor_path}` not present — slow-state coupling inert"
+                "machine thermal `{}` not present — the pack marches without a thermal network",
+                pairing.emotor_path
             ));
-            return Ok(None);
+            return Ok(Some((None, pack, pack_state)));
         }
         Err(e) => return Err(schema_err(e)),
     };
-    let ptm = match outlap_schema::load::load_ptm(unit.source.as_str(), vl) {
+    let ptm = match outlap_schema::load::load_ptm(&pairing.ptm_path, vl) {
         Ok(ptm) => ptm,
         // Unreachable in practice (T1 assembly hard-errors on a broken/missing unit source
         // first), but keep the policy symmetric with the battery/emotor refs above.
         Err(e) if is_not_found(&e) => {
             notes.push(format!(
-                "drive-unit source `{}` not present — slow-state coupling inert",
-                unit.source.as_str()
+                "drive-unit source `{}` not present — the pack marches without a thermal network",
+                pairing.ptm_path
             ));
-            return Ok(None);
+            return Ok(Some((None, pack, pack_state)));
         }
         Err(e) => return Err(schema_err(e)),
     };
@@ -1121,7 +1150,7 @@ fn build_slow_stack(
             .iter()
             .map(|e| format!("machine thermal: {e}")),
     );
-    Ok(Some((thermal, pack, pack_state)))
+    Ok(Some((Some(thermal), pack, pack_state)))
 }
 
 /// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
@@ -1230,8 +1259,10 @@ fn solve_lap(
     tire_thermal: bool,
 ) -> PyResult<Lap> {
     check_ds(ds_m)?;
-    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
-    let sim_cfg = build_sim(&vl, sim, tier)?;
+    // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
+    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, tier)?;
+    let (vl, resolved) =
+        resolve_with_overrides_opts(vehicle_dir, overrides, sim_cfg.allow_degraded)?;
     // Missing conditions.yaml → ISA defaults; a PRESENT-but-broken one is a real error.
     let base_conditions = match load_conditions("conditions.yaml", &vl) {
         Ok(c) => c,
@@ -1293,15 +1324,26 @@ fn solve_lap(
             notes.extend(t0v.notes().iter().cloned());
             notes.extend(t1v.notes().iter().cloned());
             notes.extend(env.notes().iter().cloned());
-            // Slow-state coupling from the vehicle's own battery + `.emotor` refs (inert with a
-            // note when the stack files are not present — the status quo for `f1_2026`).
+            // Slow-state coupling from the vehicle's own battery (+ optional `.emotor`) refs
+            // (inert with a note when the stack files are not present).
             let stack = build_slow_stack(&resolved, &vl, &conditions, &mut notes)?;
             let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
                 vehicle: &t1v,
                 thermal: thermal.clone(),
                 pack: pack.clone(),
                 pack_state: *state,
+                active: t1v.has_energy_maps(),
             });
+            // The 2026 ERS energy manager (M6 PR2): governs the march whenever the car has an
+            // `ers:` block AND a pack to schedule; without a pack the greedy budget-free curve
+            // still shapes the pedal availability, recorded as such.
+            let ers_coupling = build_ers_coupling(
+                &resolved,
+                &t0v,
+                coupling.is_some(),
+                sim_cfg.allow_degraded,
+                &mut notes,
+            )?;
             // Tyre-thermal march (M5 PR5): opt-in, so the default lap stays bit-identical to pre-M5
             // (the synthetic .tyr params are pre-calibration — the default flips on at PR8).
             let tire_march = if tire_thermal {
@@ -1309,40 +1351,71 @@ fn solve_lap(
             } else {
                 None
             };
+            let couplings = Couplings {
+                electro: coupling.as_ref(),
+                tire: tire_march.as_ref(),
+                ers: ers_coupling.as_ref(),
+            };
+            let req = LapRequest {
+                line,
+                resolved_hash: hash,
+                notes,
+                fz_coupling: sim_cfg.resolved_fz_coupling(),
+                flat_track: sim_cfg.flat_track,
+            };
             if wanted == Tier::T0 {
-                solve_t0(
-                    &t0v,
-                    env,
-                    coupling.as_ref(),
-                    tire_march.as_ref(),
-                    &path,
-                    line,
-                    hash,
-                    notes,
-                    sim_cfg.resolved_fz_coupling(),
-                    sim_cfg.flat_track,
-                )
-                .map_err(err)?
+                solve_t0(&t0v, env, &couplings, &path, req).map_err(err)?
             } else {
-                solve_t1(
-                    &t1v,
-                    &t0v,
-                    env,
-                    coupling.as_ref(),
-                    tire_march.as_ref(),
-                    &path,
-                    line,
-                    hash,
-                    notes,
-                    sim_cfg.resolved_fz_coupling(),
-                    sim_cfg.flat_track,
-                )
-                .map_err(err)?
+                solve_t1(&t1v, &t0v, env, &couplings, &path, req).map_err(err)?
             }
         }
     };
 
     Ok(qss_lap_to_py(qss, track))
+}
+
+/// Build the QSS energy-manager coupling for an `ers:`-bearing vehicle (M6 PR2). `None` when the
+/// car has no `ers:` block.
+///
+/// The load pipeline already hard-errors (unless `allow_degraded`) when an `ers:` car's battery
+/// YAML is absent, so reaching here with `!pack_present` means the YAML loaded but the pack could
+/// not be BUILT — a missing/broken ECM sidecar. That is the same missing-energy-store contract
+/// violation, so it is a hard error too unless `allow_degraded` (the ONLY fallback path, which
+/// then marks the run and runs the budget-free curve).
+fn build_ers_coupling(
+    resolved: &ResolvedVehicle,
+    t0v: &T0Vehicle,
+    pack_present: bool,
+    allow_degraded: bool,
+    notes: &mut Vec<String>,
+) -> PyResult<Option<ErsCoupling>> {
+    if resolved.spec.ers.is_none() {
+        return Ok(None);
+    }
+    if !pack_present {
+        if !allow_degraded {
+            return Err(PyValueError::new_err(
+                "an `ers:` vehicle's battery pack could not be built (its ECM sidecar is missing \
+                 or unreadable) — the energy manager schedules the pack. Provide the battery ECM \
+                 parquet sidecar, or set `allow_degraded: true` in sim.yaml to run with an inert \
+                 (budget-free, harvest-less) ERS",
+            ));
+        }
+        notes.push(
+            "ERS present but no runnable battery pack — the energy manager is inert: deployment \
+             follows the budget-free regulation curve and nothing is harvested (degraded path)"
+                .to_owned(),
+        );
+        return Ok(None);
+    }
+    let coupling = ErsCoupling::assemble(
+        &resolved.spec,
+        t0v,
+        outlap_qss::ers::ErsPolicy::RuleBased,
+        false,
+    )
+    .map_err(err)?;
+    Ok(coupling)
 }
 
 /// Convert a solved [`QssLap`] into the Python `Lap`, reconstructing world positions from the track.
@@ -1381,7 +1454,9 @@ fn qss_lap_to_py(qss: QssLap, track: &Track) -> Lap {
         understeer_gradient: setup.map(|s| s.understeer_gradient.clone()),
         aero_front_share: setup.map(|s| s.aero_front_share.clone()),
         state_of_charge: slow.map(|s| s.state_of_charge.clone()),
-        machine_temp_c: slow.map(|s| s.machine_temp_c.clone()),
+        machine_temp_c: slow.and_then(|s| s.machine_temp_c.clone()),
+        deploy_power_w: slow.and_then(|s| s.ers.as_ref().map(|e| e.deploy_power_w.clone())),
+        harvest_power_w: slow.and_then(|s| s.ers.as_ref().map(|e| e.harvest_power_w.clone())),
         tire_surface_c: tire.map(|t| t.surface_temp_c.clone()),
         tire_carcass_c: tire.map(|t| t.carcass_temp_c.clone()),
         tire_gas_c: tire.map(|t| t.gas_temp_c.clone()),
@@ -1427,7 +1502,12 @@ fn vehicle_report<'py>(
             .collect::<PyResult<_>>()?,
         None => Vec::new(),
     };
-    let (_vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
+    // The loaded-model report is the diagnostic surface: it must DESCRIBE a degraded car, not
+    // hard-fail on it (the M6 PR2 ers↔battery integrity check would otherwise make an
+    // ers-without-battery car un-inspectable). Load with `allow_degraded` so the missing-store
+    // condition surfaces as a `degraded` report entry — exactly where a user should see it —
+    // rather than as an exception (`estimated/inherited/degraded always surface in the report`).
+    let (_vl, resolved) = resolve_with_overrides_opts(vehicle_dir, overrides, true)?;
     let d = pyo3::types::PyDict::new(py);
     d.set_item("name", &resolved.spec.name)?;
     d.set_item("resolved_hash", &resolved.report.resolved_hash)?;
@@ -1962,8 +2042,10 @@ fn prepare_transient(
             )));
         }
     }
-    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
-    let sim_cfg = build_sim(&vl, sim, Some("t2"))?;
+    // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
+    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, Some("t2"))?;
+    let (vl, resolved) =
+        resolve_with_overrides_opts(vehicle_dir, overrides, sim_cfg.allow_degraded)?;
     let base_conditions = match load_conditions("conditions.yaml", &vl) {
         Ok(c) => c,
         Err(e) if is_not_found(&e) => Conditions::default(),
@@ -2019,14 +2101,15 @@ fn prepare_transient(
     let reference = solve_t0(
         &t0v,
         env,
-        None,
-        None,
+        &Couplings::default(),
         &path,
-        line_descriptor,
-        hash.clone(),
-        Vec::new(),
-        sim_cfg.resolved_fz_coupling(),
-        flat,
+        LapRequest {
+            line: line_descriptor,
+            resolved_hash: hash.clone(),
+            notes: Vec::new(),
+            fz_coupling: sim_cfg.resolved_fz_coupling(),
+            flat_track: flat,
+        },
     )
     .map_err(err)?;
 
@@ -2463,8 +2546,10 @@ fn solve_stint(
             "n_laps must lie in 1..={MAX_STINT_LAPS}, got {n_laps}"
         )));
     }
-    let (vl, resolved) = resolve_with_overrides(vehicle_dir, overrides)?;
-    let sim_cfg = build_sim(&vl, sim, tier)?;
+    // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
+    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, tier)?;
+    let (vl, resolved) =
+        resolve_with_overrides_opts(vehicle_dir, overrides, sim_cfg.allow_degraded)?;
     let base_conditions = match load_conditions("conditions.yaml", &vl) {
         Ok(c) => c,
         Err(e) if is_not_found(&e) => Conditions::default(),
@@ -2517,8 +2602,16 @@ fn solve_stint(
     notes.extend(t1v.notes().iter().cloned());
     notes.extend(env.notes().iter().cloned());
     // The electrified coupling (inert unless the car's stack files are present). It re-seeds per lap in
-    // the QSS stint (SoC is not carried across laps here); the tyre state is what carries.
+    // the QSS stint (SoC is not carried across laps here — M6 PR3); the tyre state is what carries.
     let stack = build_slow_stack(&resolved, &vl, &conditions, &mut notes)?;
+    // The 2026 ERS energy manager (per-lap budgets; the ledger resets each lap by construction).
+    let ers_coupling = build_ers_coupling(
+        &resolved,
+        &t0v,
+        stack.is_some(),
+        sim_cfg.allow_degraded,
+        &mut notes,
+    )?;
     let base_march = if tire_thermal {
         Some(build_tire_march(
             &t1v,
@@ -2570,43 +2663,41 @@ fn solve_stint(
             thermal: thermal.clone(),
             pack: pack.clone(),
             pack_state: *state,
+            active: t1v.has_energy_maps(),
         });
         let line = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
+        let couplings = Couplings {
+            electro: coupling.as_ref(),
+            tire: march_lap.as_ref(),
+            ers: ers_coupling.as_ref(),
+        };
+        let req = LapRequest {
+            line,
+            resolved_hash: hash.clone(),
+            notes: Vec::new(),
+            fz_coupling: fzc,
+            flat_track: flat,
+        };
         let qss: QssLap = if wanted == Tier::T0 {
-            solve_t0(
-                &t0v,
-                env.clone(),
-                coupling.as_ref(),
-                march_lap.as_ref(),
-                &path,
-                line,
-                hash.clone(),
-                Vec::new(),
-                fzc,
-                flat,
-            )
-            .map_err(err)?
+            solve_t0(&t0v, env.clone(), &couplings, &path, req).map_err(err)?
         } else {
-            solve_t1(
-                &t1v,
-                &t0v,
-                env.clone(),
-                coupling.as_ref(),
-                march_lap.as_ref(),
-                &path,
-                line,
-                hash.clone(),
-                Vec::new(),
-                fzc,
-                flat,
-            )
-            .map_err(err)?
+            solve_t1(&t1v, &t0v, env.clone(), &couplings, &path, req).map_err(err)?
         };
         if lap_idx == 0 {
             s_grid.clone_from(&qss.lap.s);
             tier_out = format!("{:?}", qss.tier).to_lowercase();
             fz_out = fz_coupling_str(qss.fz_coupling);
             hash_out.clone_from(&qss.lap.resolved_hash);
+        }
+        // Surface the per-lap ERS record (manager mode, ledger MJ, C5.2.9 swing, convergence)
+        // from the LAST lap — the per-lap request carries no assembly notes, so `qss.lap.notes`
+        // here is exactly the manager's `finish_notes` output. Nothing silent (D-M6-3).
+        if lap_idx + 1 == n_laps {
+            for note in &qss.lap.notes {
+                if !notes.contains(note) {
+                    notes.push(format!("lap {}: {note}", lap_idx + 1));
+                }
+            }
         }
         lap_time_s.push(qss.lap.lap_time_s);
         v_flat.extend_from_slice(&qss.lap.v);

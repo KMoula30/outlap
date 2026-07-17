@@ -155,7 +155,15 @@ fn finish(
     semantic::check_vehicle(&spec, &index, sources, root_id)?;
 
     // Referenced files: validate each and collect .ptm kinds for topology.
-    let unit_sources = load_referenced(&spec, loader, sources, &mut report)?;
+    let unit_sources = load_referenced(
+        &spec,
+        loader,
+        sources,
+        &mut report,
+        &index,
+        root_id,
+        options,
+    )?;
 
     // Stage 7: topology graph.
     topology::check(&spec, &unit_sources, &index, sources, root_id)?;
@@ -175,7 +183,6 @@ fn finish(
 
     // Stage 9: resolved-set hash.
     report.resolved_hash = report::resolved_hash(&spec);
-    let _ = options; // `allow_degraded` recorded here once degraded combos exist.
 
     Ok(ResolvedVehicle {
         spec,
@@ -185,11 +192,15 @@ fn finish(
 }
 
 /// Load and validate all files referenced by the vehicle, returning per-unit `.ptm` source info.
+#[allow(clippy::too_many_arguments)]
 fn load_referenced(
     spec: &Vehicle,
     loader: &dyn SourceLoader,
     sources: &mut Sources,
     report: &mut LoadedModelReport,
+    index: &SpanIndex,
+    root_id: SourceId,
+    options: &LoadOptions,
 ) -> Result<Vec<Option<UnitSource>>> {
     // Tires.
     for tyr_ref in [&spec.tires.front, &spec.tires.rear] {
@@ -203,6 +214,10 @@ fn load_referenced(
             load_typed::<Ptm>(ers.mgu_k.as_str(), schema_name::PTM, loader, sources)?;
         semantic::check_ptm(&ptm, &index, sources, id)?;
     }
+    // Battery document (+ the ers↔battery integrity contract, M6 PR2). The energy manager
+    // schedules the pack, so an `ers:`-bearing vehicle without a loadable battery is a hard
+    // error unless `allow_degraded` (Decision #40 — recorded, and the results are marked).
+    load_battery_referenced(spec, loader, sources, report, index, root_id, options)?;
     // Drive units: source .ptm (+ optional thermal .emotor).
     let mut unit_sources = Vec::with_capacity(spec.drivetrain.units.len());
     for unit in &spec.drivetrain.units {
@@ -220,6 +235,95 @@ fn load_referenced(
         }));
     }
     Ok(unit_sources)
+}
+
+/// The battery leg of [`load_referenced`]: validate a referenced `battery/1.x` document and run
+/// the ers↔battery integrity contract (M6 PR2 / D-M6-3):
+///
+/// * A vehicle with an `ers:` block needs a LOADABLE battery document — the energy manager
+///   schedules the pack. A missing `battery:` block or an absent params file is a hard error,
+///   unless `allow_degraded` downgrades it to a recorded degradation (the results are marked).
+/// * When both sides exist, `ers.es` must agree with the battery file:
+///   the two `soc_window`s must match, and `es.capacity_mj` (the USABLE-window energy, FIA
+///   C5.2.9) must equal `(window span) × capacity.e_pack_wh` within 1% relative — the pack ECM
+///   is the model of record, the ers block the declared window.
+fn load_battery_referenced(
+    spec: &Vehicle,
+    loader: &dyn SourceLoader,
+    sources: &mut Sources,
+    report: &mut LoadedModelReport,
+    index: &SpanIndex,
+    root_id: SourceId,
+    options: &LoadOptions,
+) -> Result<()> {
+    let span_at = |ptr: &str| resolve_span(index, ptr, root_id);
+    let Some(batt) = &spec.battery else {
+        if spec.ers.is_some() {
+            if !options.allow_degraded {
+                return Err(SchemaError::semantic(
+                    sources,
+                    span_at("/ers"),
+                    "an `ers:` energy store needs a `battery:` document to bank into — the \
+                     energy manager schedules the pack",
+                    Some(
+                        "add a `battery: {model, params}` block referencing a battery/1.x \
+                         document, or set `allow_degraded: true` in sim.yaml to run with an \
+                         inert (budget-free, harvest-less) ERS"
+                            .to_owned(),
+                    ),
+                ));
+            }
+            report.degraded.push(ReportEntry::new(
+                "/ers",
+                "ers present without a `battery:` block — the energy manager is inert \
+                 (budget-free deployment, no harvest)",
+            ));
+        }
+        return Ok(());
+    };
+    let batt_parts = load_typed::<crate::battery::BatteryDoc>(
+        batt.params.as_str(),
+        schema_name::BATTERY,
+        loader,
+        sources,
+    );
+    let (doc, bid, bindex, _) = match batt_parts {
+        Ok(parts) => parts,
+        Err(SchemaError::Io(crate::io::SourceError::NotFound { path })) => {
+            // A NON-ers car's missing battery is not a contract violation — the electro coupling
+            // is simply inert and the binding notes it. Leave the report CLEAN (a `degraded`
+            // entry is the mark of an opted-into `allow_degraded` run, never a silent side effect).
+            if spec.ers.is_none() {
+                return Ok(());
+            }
+            if !options.allow_degraded {
+                return Err(SchemaError::semantic(
+                    sources,
+                    span_at("/battery/params"),
+                    format!(
+                        "battery document `{path}` not found — an `ers:`-bearing vehicle needs \
+                         its energy store on disk (the energy manager schedules the pack)"
+                    ),
+                    Some(
+                        "author the referenced battery/1.x document (+ its ECM parquet sidecar), \
+                         or set `allow_degraded: true` in sim.yaml to run with an inert ERS"
+                            .to_owned(),
+                    ),
+                ));
+            }
+            report.degraded.push(ReportEntry::new(
+                "/battery/params",
+                format!("battery document `{path}` not present — electro slow stack inert"),
+            ));
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    semantic::check_battery(&doc, &bindex, sources, bid)?;
+    if let Some(ers) = &spec.ers {
+        semantic::check_ers_battery(ers, &doc, batt.params.as_str(), index, sources, root_id)?;
+    }
+    Ok(())
 }
 
 /// Load a referenced document of type `T`, running stages 1–5 (parse → version → unknown →

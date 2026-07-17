@@ -526,6 +526,14 @@ impl T1Powertrain {
         self.units.get(unit_idx).is_some_and(|u| u.has_vdc)
     }
 
+    /// Whether ANY drive unit has an installed efficiency map — the assembly-time fact that the
+    /// mapped-EV slow-state march can actually move a state ([`Self::traction_energy`] returns
+    /// `Some`). The QSS coupling's activity flag reads this instead of diffing outputs.
+    #[must_use]
+    pub fn has_energy_maps(&self) -> bool {
+        self.units.iter().any(|u| u.eff_map.is_some())
+    }
+
     /// The maximum wheel **drive** force available at vehicle speed `v` (m/s), N — summed over drive
     /// units at each unit's best gear. This is the powertrain traction ceiling (PR7 caps the g-g-g-v
     /// acceleration boundary with it). Allocation-free.

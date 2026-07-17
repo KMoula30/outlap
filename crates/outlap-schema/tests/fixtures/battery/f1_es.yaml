@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC 2026-style F1 energy store. No public team data exists — every curve is an
+# invented smooth surface (firewall). SIZING is regulation-derived (D-M6-3): the vehicle's
+# ers.es declares 4.0 MJ usable over soc_window [0.2, 0.9] (FIA 2026 C5.2.9: max−min SoC
+# ≤ 4 MJ on track), so the pack total is 4.0/0.7 ≈ 5.7143 MJ; the load pipeline cross-checks
+# this file against the ers block. Discharge/regen design curves sit above the FIA 350 kW
+# electrical caps away from the window edges — the regulation binds, not the pack.
+# coolant_temp_c is the car's radiator-loop hot side (car data, not weather): 45 °C, where
+# the kinetic charge-acceptance derate saturates at 1.0.
+# Regenerate the tables with: python python/tools/gen_f1_es_pack.py
+schema: battery/1.1
+model: rc_pairs
+topology:
+  ns: 180
+  np: 1
+capacity:
+  q_pack_ah: 2.4
+  e_pack_wh: 1587.3016
+soc_window: [0.2, 0.9]
+ecm:
+  rc_pairs: 1
+  axes:
+    soc: [0.00, 0.20, 0.40, 0.60, 0.80, 1.00]
+    temp_c: [20.0, 45.0, 60.0]
+  tables:
+    # Sidecar next to this YAML (the PDT-importer convention).
+    file: f1_es.tables.parquet
+    level: cell
+limits:
+  peak_discharge_power_w_vs_soc:
+    soc: [0.20, 0.30, 0.50, 0.70, 0.90, 1.00]
+    power_w: [250000.0, 450000.0, 600000.0, 650000.0, 650000.0, 650000.0]
+  peak_regen_power_w_vs_soc:
+    soc: [0.20, 0.30, 0.50, 0.70, 0.90, 1.00]
+    power_w: [520000.0, 510000.0, 490000.0, 460000.0, 300000.0, 0.0]
+  regen_derate_vs_temp:
+    temp_c: [0.0, 20.0, 45.0, 60.0]
+    factor: [0.30, 0.85, 1.00, 1.00]
+  cell_v_min: 2.9
+  cell_v_max: 4.25
+  # Informational: 350 kW / (661.5 V × 2.40 A·h) — an ultra-high-power race cell.
+  max_c_rate: 220.0
+thermal:
+  mass_kg: 35.0
+  cp_j_per_kgk: 900.0
+  thermal_resistance_k_per_w: 0.002
+  coolant_temp_c: 45.0
+meta:
+  source: synthetic 2026-style F1 ES (gen_f1_es_pack.py) — SYNTHETIC, regulation-sized
+  cell: Generic_F1_power_cell

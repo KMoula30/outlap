@@ -1431,6 +1431,7 @@ version = "0.3.0"
 dependencies = [
  "dhat",
  "outlap-core",
+ "outlap-powertrain",
  "outlap-raceline",
  "outlap-schema",
  "outlap-thermal",

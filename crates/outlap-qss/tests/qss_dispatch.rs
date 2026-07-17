@@ -13,8 +13,8 @@ use std::f64::consts::PI;
 use outlap_core::GriddedTable;
 use outlap_qss::path::T0Path;
 use outlap_qss::{
-    solve_t0, solve_t1, tier_not_implemented, GgvEnvelope, LineDescriptor, MachineThermal, Pack,
-    SlowCoupling, T0Options, T0Vehicle, T1Powertrain, T1Vehicle,
+    solve_t0, solve_t1, tier_not_implemented, Couplings, GgvEnvelope, LapRequest, LineDescriptor,
+    MachineThermal, Pack, SlowCoupling, T0Options, T0Vehicle, T1Powertrain, T1Vehicle,
 };
 use outlap_schema::centerline::{Centerline, CenterlineRow};
 use outlap_schema::io::{FsLoader, SourceLoader};
@@ -110,6 +110,17 @@ fn small_env(t1: &T1Vehicle) -> GgvEnvelope {
     GgvEnvelope::generate(t1, &res, FzCoupling::OneStepLag).unwrap()
 }
 
+/// A plain centerline lap request (the metadata the dispatch tests do not exercise).
+fn plain_request() -> LapRequest {
+    LapRequest {
+        line: LineDescriptor::Centerline,
+        resolved_hash: String::new(),
+        notes: vec![],
+        fz_coupling: FzCoupling::OneStepLag,
+        flat_track: false,
+    }
+}
+
 #[test]
 fn coupled_lap_discharges_heats_and_is_deterministic() {
     let (t1, t0, pack, state, thermal) = full_stack(true);
@@ -121,14 +132,12 @@ fn coupled_lap_discharges_heats_and_is_deterministic() {
         solve_t0(
             &t0,
             env.clone(),
-            coupling,
-            None,
+            &Couplings {
+                electro: coupling,
+                ..Couplings::default()
+            },
             &path,
-            LineDescriptor::Centerline,
-            String::new(),
-            vec![],
-            FzCoupling::OneStepLag,
-            false,
+            plain_request(),
         )
         .unwrap()
     };
@@ -138,9 +147,10 @@ fn coupled_lap_discharges_heats_and_is_deterministic() {
 
     let coupling = SlowCoupling {
         vehicle: &t1,
-        thermal,
+        thermal: Some(thermal),
         pack,
         pack_state: state,
+        active: t1.has_energy_maps(),
     };
     let a = solve(Some(&coupling));
     let b = solve(Some(&coupling));
@@ -163,7 +173,10 @@ fn coupled_lap_discharges_heats_and_is_deterministic() {
         soc[0],
         soc[path.len() - 1]
     );
-    let temp = &slow.machine_temp_c;
+    let temp = slow
+        .machine_temp_c
+        .as_ref()
+        .expect("thermal network present ⇒ machine channel");
     assert!(
         temp.iter().copied().fold(f64::MIN, f64::max) > temp[0] + 1e-6,
         "the winding must heat under traction loss"
@@ -191,33 +204,27 @@ fn coupling_without_installed_maps_is_inert() {
     let uncoupled = solve_t0(
         &t0,
         env.clone(),
-        None,
-        None,
+        &Couplings::default(),
         &path,
-        LineDescriptor::Centerline,
-        String::new(),
-        vec![],
-        FzCoupling::OneStepLag,
-        false,
+        plain_request(),
     )
     .unwrap();
     let coupling = SlowCoupling {
         vehicle: &t1,
-        thermal,
+        thermal: Some(thermal),
         pack,
         pack_state: state,
+        active: t1.has_energy_maps(),
     };
     let coupled = solve_t0(
         &t0,
         env,
-        Some(&coupling),
-        None,
+        &Couplings {
+            electro: Some(&coupling),
+            ..Couplings::default()
+        },
         &path,
-        LineDescriptor::Centerline,
-        String::new(),
-        vec![],
-        FzCoupling::OneStepLag,
-        false,
+        plain_request(),
     )
     .unwrap();
 
@@ -243,20 +250,7 @@ fn t1_emits_per_wheel_and_setup_channels() {
     let track = circle_track(false);
     let path = T0Path::from_track(&track, 5.0);
 
-    let lap = solve_t1(
-        &t1,
-        &t0,
-        env,
-        None,
-        None,
-        &path,
-        LineDescriptor::Centerline,
-        String::new(),
-        vec![],
-        FzCoupling::OneStepLag,
-        false,
-    )
-    .unwrap();
+    let lap = solve_t1(&t1, &t0, env, &Couplings::default(), &path, plain_request()).unwrap();
 
     assert_eq!(lap.tier, Tier::T1);
     let wheels = lap.wheels.as_ref().expect("t1 emits per-wheel channels");

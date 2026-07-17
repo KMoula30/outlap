@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 
 use outlap_core::GriddedTable;
 use outlap_qss::path::T0Path;
-use outlap_qss::solver::{solve_into, solve_into_ggv};
+use outlap_qss::solver::{solve_into, solve_into_ggv, solve_into_ggv_coupled};
 use outlap_qss::{
     GgvEnvelope, MachineThermal, Pack, PackState, T0Options, T0Vehicle, T0Workspace, T1Vehicle,
     TrimInput,
@@ -272,6 +272,44 @@ fn hot_paths_are_zero_alloc() {
         after.total_blocks,
         before.total_blocks,
         "coupled solve / traction_energy allocated {} block(s)",
+        after.total_blocks - before.total_blocks
+    );
+
+    // --- The energy-manager kernels (M6 PR2): the deploy-slice coupled solve, the per-station
+    // T0 ERS queries, and the manager decide loop. The march composes exactly these primitives
+    // (+ the alloc-gated `Pack::step_power` above), so a zero count here covers its hot loop.
+    let deploy = vec![1200.0; path.len()];
+    solve_into_ggv_coupled(
+        &veh,
+        &env,
+        Some(&scale),
+        Some(&deploy),
+        None,
+        &path,
+        &mut ws,
+    )
+    .unwrap();
+    let before = dhat::HeapStats::get();
+    for _ in 0..16 {
+        solve_into_ggv_coupled(
+            &veh,
+            &env,
+            Some(&scale),
+            Some(&deploy),
+            None,
+            &path,
+            &mut ws,
+        )
+        .unwrap();
+        let _ = veh.mech_tractive_force(41.0);
+        let _ = veh.ers_deploy_force_n(41.0, 250e3);
+        let _ = veh.ers_realized_deploy_w(250e3);
+    }
+    let after = dhat::HeapStats::get();
+    assert_eq!(
+        after.total_blocks,
+        before.total_blocks,
+        "deploy-slice coupled solve / ERS force queries allocated {} block(s)",
         after.total_blocks - before.total_blocks
     );
 }

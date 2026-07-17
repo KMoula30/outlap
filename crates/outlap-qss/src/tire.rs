@@ -431,9 +431,16 @@ mod tests {
         let mut ws_frozen = T0Workspace::for_path(&path);
         let lt_frozen = solve_into_ggv(&t0, &env, &path, &mut ws_frozen).unwrap();
         let mut ws_ref = T0Workspace::for_path(&path);
-        let lt_ref =
-            solve_into_ggv_coupled(&t0, &env, None, Some((&t_ref, &w_ref)), &path, &mut ws_ref)
-                .unwrap();
+        let lt_ref = solve_into_ggv_coupled(
+            &t0,
+            &env,
+            None,
+            None,
+            Some((&t_ref, &w_ref)),
+            &path,
+            &mut ws_ref,
+        )
+        .unwrap();
 
         assert_eq!(
             lt_frozen.to_bits(),
@@ -465,9 +472,16 @@ mod tests {
         let t_state = vec![hot; n];
         let w_state = vec![worn; n];
         let mut ws2 = T0Workspace::for_path(&path);
-        let lt_deg =
-            solve_into_ggv_coupled(&t0, &env, None, Some((&t_state, &w_state)), &path, &mut ws2)
-                .unwrap();
+        let lt_deg = solve_into_ggv_coupled(
+            &t0,
+            &env,
+            None,
+            None,
+            Some((&t_state, &w_state)),
+            &path,
+            &mut ws2,
+        )
+        .unwrap();
         assert!(
             lt_deg > lt_frozen,
             "a hot, worn tyre should not lap faster: {lt_deg:.4} vs {lt_frozen:.4}"
