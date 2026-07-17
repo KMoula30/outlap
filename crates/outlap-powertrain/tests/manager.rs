@@ -265,7 +265,7 @@ fn recharge_ramp_limits_are_respected() {
         brake_demand_w: 0.0,
         mech_regen_envelope_w: 400e3,
         ice_surplus_w: 150e3,
-        soc: 0.3, // below the 0.55 mid-window target → recharge wanted
+        soc: 0.3, // below the recharge target (window top) → recharge wanted
         override_active: false,
         prev_k_power_w: 350e3, // arriving from full deployment
         ramp_reduced_w: 0.0,
@@ -329,8 +329,10 @@ fn part_throttle_harvests_the_demand_gap() {
     let cmd = mgr.decide(&inp, &ledger);
     assert_eq!(cmd.mode, ErsMode::HarvestPartThrottle);
     assert_eq!(cmd.harvest_w, 120e3 * 0.97);
-    // At or above the recharge target the same step deploys instead.
-    let above = DecideInput { soc: 0.7, ..inp };
+    // At or above the recharge target the same step deploys instead. The default target is now the
+    // TOP of the usable window (0.9 for the f1 pack), so the store recharges toward full — the
+    // deploy-instead boundary sits at the window top.
+    let above = DecideInput { soc: 0.9, ..inp };
     let cmd = mgr.decide(&above, &ledger);
     assert_eq!(cmd.mode, ErsMode::Deploy);
 }

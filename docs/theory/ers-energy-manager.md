@@ -125,8 +125,9 @@ step-boundary events, §11.2):
 1. **Braking** → harvest through the brake-blend path:
    `P_elec = min(0.97·min(P_regen_envelope, P_brake_demand), P_harvest_cap, budget headroom)`.
 2. **Driving with recharge wanted** — recharge phases enabled, SoC below the configurable target
-   (`recovery.recharge_target_soc`, default mid-window: the 2026 ECU's selectable "Recharge
-   target"), ICE surplus available, budget left:
+   (`recovery.recharge_target_soc`, **default: the top of the usable `soc_window`** — the store
+   recharges toward the maximum the pack allows; a pack/car property, overridable per vehicle),
+   ICE surplus available, budget left:
    - *part throttle*: the ICE covers the driver's demand gap and the K harvests the surplus;
    - *full throttle* ("super-clip"): the K's demand ramps down from the previous level toward
      back-drive, rate-limited by the C5.12 bounds — initial step ≤ 150 kW, thereafter ≤ 50 kW/s,
@@ -203,15 +204,21 @@ The per-lap ledger banks the REALIZED command (post pack-clip) — never more th
 budgets hold by construction and lap energy closure is exact. Attribution follows D-M6-10: the
 pack exchanges only the manager's electrical deploy/harvest power; the ICE covers the rest of
 traction (this replaces the pre-M6 full-draw simplification for hybrids). The march is governed
-by a deeper fixed outer-iteration count than the derate marches (6 vs 2): the deploy/harvest
-schedule reshapes the very profile it was decided on, and a SoC-starved lap needs several passes
-to settle — measured residuals are recorded per lap (`max |Δscale|`, `max |Δdeploy force|`,
-`|Δlap time|`), and every no-manager path keeps the original count bit-identically.
+by a deeper fixed outer-iteration count than the derate marches (8 vs 2): the deploy/harvest
+schedule reshapes the very profile it was decided on, and at the charge-sustain equilibrium a
+straight station is bistable between deploy and super-clip harvest — so the solver-fed deploy
+slice is under-relaxed (ω = 0.5) to converge the fixed point. Measured residuals are recorded per
+lap (`max |Δscale|`, `max |Δdeploy force|`, `|Δlap time|`), and every no-manager path keeps the
+original count bit-identically.
 
-The FIA C5.2.9 usable-window rule (max − min SoC ≤ 4 MJ on track) is **recorded, not clamped**:
-the lap reports its on-track SoC swing, and the load pipeline cross-checks the vehicle's declared
-`ers.es` window against the referenced battery document (window agreement exact; usable-window
-energy within 1% of `(span) × e_pack_wh`).
+The FIA C5.2.9 usable-window rule (max − min SoC ≤ 4 MJ on track) is enforced by **clamping the
+pack to its usable `soc_window`** each step: the on-track SoC swing is bounded by the window span,
+so the f1 pack — whose window is sized to exactly 4 MJ — cannot exceed the regulation. (The pack's
+`soc_window` is a physical car/battery property; the 4 MJ is an F1 regulation expressed by sizing
+that window to it. A pack physically larger than the reg would need a separate, tighter swing
+clip.) The lap still reports its on-track swing in MJ, and the load pipeline cross-checks the
+vehicle's declared `ers.es` window against the referenced battery document (window agreement
+exact; usable-window energy within 1% of `(span) × e_pack_wh`).
 
 ## Not modelled (v1)
 

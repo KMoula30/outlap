@@ -236,12 +236,31 @@ fn f1_lap_deploys_under_the_curve_and_harvests_under_braking() {
         .any(|i| ers.harvest_power_w[i] > 0.0 && soc[i + 1] > soc[i]);
     assert!(charged, "a harvesting segment must raise the entry SoC");
 
-    // The SoC trace is physical and the recorded C5.2.9 swing is consistent with it.
-    assert!(soc.iter().all(|s| (0.0..=1.0).contains(s)));
+    // The SoC trace is physical, stays inside the usable window (the C5.2.9 clamp), and the
+    // recorded swing brackets the visible channel. The stats see every post-step state; the
+    // channel logs ENTRY states, so on a closed lap it misses the final segment — the stats
+    // therefore bracket the channel min/max, never sit inside it.
+    let [win_lo, win_hi] = h.pack.soc_window();
+    assert!(soc
+        .iter()
+        .all(|s| (win_lo - 1e-9..=win_hi + 1e-9).contains(s)));
     let (lo, hi) = soc
         .iter()
         .fold((f64::MAX, f64::MIN), |(lo, hi), &s| (lo.min(s), hi.max(s)));
-    assert!((ers.soc_min - lo).abs() < 1e-12 && (ers.soc_max - hi).abs() < 1e-9);
+    assert!(
+        ers.soc_min <= lo + 1e-12 && ers.soc_max >= hi - 1e-9,
+        "recorded swing [{:.4}, {:.4}] must bracket the channel [{lo:.4}, {hi:.4}]",
+        ers.soc_min,
+        ers.soc_max
+    );
+    // The on-track SoC swing is bounded by the usable window span — for f1 the FIA C5.2.9 ≤ 4 MJ
+    // recharge window, now clamped rather than only recorded (per the recharge-to-top default).
+    assert!(
+        ers.soc_max - ers.soc_min <= (win_hi - win_lo) + 1e-9,
+        "on-track swing {:.4} exceeds the usable window span {:.4}",
+        ers.soc_max - ers.soc_min,
+        win_hi - win_lo
+    );
 }
 
 #[test]
