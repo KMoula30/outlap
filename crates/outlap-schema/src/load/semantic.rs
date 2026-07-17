@@ -684,24 +684,30 @@ pub fn check_ers_battery(
             ),
         ));
     }
-    // Usable-window energy: (window span) × pack total. `e_pack_wh` is load-bearing from M6 PR2
-    // on (its first consumer — the field-semantics policy freezes its meaning here).
+    // The regulatory C5.2.9 on-track swing limit (`ers.es.capacity_mj`) must FIT WITHIN the pack's
+    // physical usable-window energy `(window span) × e_pack_wh`: you cannot be allowed to swing more
+    // energy than the store physically holds. The two are otherwise INDEPENDENT — the reg limit is
+    // a regulation, the window is a battery property — so a physically larger window is permitted
+    // (the swing is then clipped at `capacity_mj`, below the physical edge). `e_pack_wh` is
+    // load-bearing from M6 PR2 on (its first consumer — the field-semantics policy freezes its
+    // meaning here).
     let window_mj = (b_hi - b_lo) * battery.capacity.e_pack_wh * 3600.0e-6;
     let declared = ers.es.capacity_mj;
-    if (window_mj - declared).abs() > ERS_BATTERY_CAPACITY_RTOL * declared.max(f64::MIN_POSITIVE) {
+    if declared > window_mj * (1.0 + ERS_BATTERY_CAPACITY_RTOL) {
         return Err(SchemaError::semantic(
             sources,
             s.at("/ers/es/capacity_mj"),
             format!(
-                "`ers.es.capacity_mj` = {declared} MJ (the usable-window energy, FIA C5.2.9) \
-                 disagrees with the battery document: (soc window {b_lo}..{b_hi}) × e_pack_wh \
-                 {} Wh = {window_mj:.4} MJ (`{battery_path}`)",
+                "`ers.es.capacity_mj` = {declared} MJ (the FIA C5.2.9 on-track swing limit) \
+                 exceeds what the battery physically holds: (soc window {b_lo}..{b_hi}) × \
+                 e_pack_wh {} Wh = {window_mj:.4} MJ (`{battery_path}`) — the swing cannot draw \
+                 more energy than the usable window",
                 battery.capacity.e_pack_wh
             ),
             Some(format!(
-                "size the pack so the window spans the declared capacity (within {:.0}% \
-                 relative) — e.g. a 4.0 MJ window over [0.2, 0.9] needs a {:.4} MJ total pack",
-                ERS_BATTERY_CAPACITY_RTOL * 100.0,
+                "lower `capacity_mj` to at most the usable-window energy ({window_mj:.4} MJ), or \
+                 size the pack larger — a {declared} MJ swing over [{b_lo}, {b_hi}] needs a \
+                 {:.4} MJ total pack",
                 declared / (b_hi - b_lo).max(f64::MIN_POSITIVE)
             )),
         ));
