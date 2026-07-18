@@ -81,7 +81,8 @@ pub struct PackCapacity {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Ecm {
-    /// Number of series RC pairs (currently 1 — the tables carry `r1`/`tau1`).
+    /// Number of series RC pairs: `1` (the sidecar carries `r1_ohm`/`tau1_s`) or `2` (`battery/1.2`
+    /// — the sidecar additionally carries `r2_ohm`/`tau2_s` for a second, slower relaxation branch).
     pub rc_pairs: u32,
     /// The `(soc, temp_c)` grid axes the sidecar tables are sampled on.
     pub axes: EcmAxes,
@@ -104,7 +105,8 @@ pub struct EcmAxes {
 #[serde(rename_all = "snake_case")]
 pub struct BatteryTables {
     /// Reference to the long/tidy parquet sidecar
-    /// (`soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k`).
+    /// (`soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k`; a two-RC pack adds `r2_ohm,
+    /// tau2_s`). Extra columns are additive and name-selected, so a one-RC sidecar stays valid.
     pub file: MapRef,
     /// Whether the OCV/resistance values are stated per cell or per pack.
     pub level: TableLevel,

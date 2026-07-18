@@ -94,7 +94,7 @@
       "type": "object",
       "properties": {
         "file": {
-          "description": "Reference to the long/tidy parquet sidecar\n(`soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k`).",
+          "description": "Reference to the long/tidy parquet sidecar\n(`soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k`; a two-RC pack adds `r2_ohm,\ntau2_s`). Extra columns are additive and name-selected, so a one-RC sidecar stays valid.",
           "$ref": "#/$defs/MapRef"
         },
         "level": {
@@ -142,7 +142,7 @@
           "$ref": "#/$defs/EcmAxes"
         },
         "rc_pairs": {
-          "description": "Number of series RC pairs (currently 1 — the tables carry `r1`/`tau1`).",
+          "description": "Number of series RC pairs: `1` (the sidecar carries `r1_ohm`/`tau1_s`) or `2` (`battery/1.2`\n— the sidecar additionally carries `r2_ohm`/`tau2_s` for a second, slower relaxation branch).",
           "type": "integer",
           "format": "uint32",
           "minimum": 0

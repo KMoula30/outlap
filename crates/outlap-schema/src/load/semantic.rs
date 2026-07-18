@@ -643,6 +643,67 @@ pub fn check_battery(
             ));
         }
     }
+    // Only 1 or 2 RC pairs are modelled (a 2nd pair carries the `r2_ohm`/`tau2_s` sidecar columns,
+    // battery/1.2). Reported here as a config-surface error, not a bare runtime `Err` deep in the
+    // solver assembly.
+    if !matches!(b.ecm.rc_pairs, 1 | 2) {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/ecm/rc_pairs"),
+            "`ecm.rc_pairs` must be 1 or 2",
+            None,
+        ));
+    }
+    // The peak-power curves (PR4h consumer-lands-the-checks): each is a paired, equal-length,
+    // strictly-ascending-SoC ceiling the runtime fits into a monotone cubic — an unpaired or
+    // out-of-order curve would fail deep in `Pack::assemble` with a bare string error.
+    let check_power_curve = |p: &crate::battery::PowerVsSoc, ptr: &str| -> Result<()> {
+        if p.soc.len() != p.power_w.len() || p.soc.len() < 2 || !is_ascending(&p.soc) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(ptr),
+                "peak-power curve needs ≥ 2 paired points with strictly-ascending `soc`",
+                None,
+            ));
+        }
+        if p.power_w.iter().any(|&w| w < 0.0 || !w.is_finite()) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(ptr),
+                "peak-power `power_w` must be finite and non-negative (a positive-magnitude ceiling)",
+                None,
+            ));
+        }
+        Ok(())
+    };
+    check_power_curve(
+        &b.limits.peak_discharge_power_w_vs_soc,
+        "/limits/peak_discharge_power_w_vs_soc",
+    )?;
+    check_power_curve(
+        &b.limits.peak_regen_power_w_vs_soc,
+        "/limits/peak_regen_power_w_vs_soc",
+    )?;
+    // Cell-voltage bounds and the C-rate: an ascending window and a positive C-rate.
+    if !(b.limits.cell_v_min.is_finite()
+        && b.limits.cell_v_max.is_finite()
+        && b.limits.cell_v_min > 0.0
+        && b.limits.cell_v_min < b.limits.cell_v_max)
+    {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/limits"),
+            "`cell_v_min` and `cell_v_max` must be positive with `cell_v_min < cell_v_max`",
+            None,
+        ));
+    }
+    positive(
+        b.limits.max_c_rate,
+        "limits.max_c_rate",
+        "/limits/max_c_rate",
+        &s,
+        sources,
+    )?;
     Ok(())
 }
 

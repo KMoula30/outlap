@@ -413,6 +413,119 @@ fn pulse_response_matches_closed_form_thevenin() {
     assert!((st.v_rc_v - i * r1 * (1.0 - (-elapsed / tau).exp())).abs() < 1.0e-9);
 }
 
+/// A constant-parameter TWO-RC pack (`rc_pairs: 2`, `battery/1.2`) — same isolation trick as
+/// [`constant_pack`] but the sidecar additionally carries `r2_ohm`/`tau2_s`.
+fn constant_pack_2rc(
+    ocv: f64,
+    r0: f64,
+    r1: f64,
+    tau1: f64,
+    r2: f64,
+    tau2: f64,
+) -> (Pack, outlap_qss::PackState) {
+    let axis = |name: &str, v: f64| (name.to_owned(), vec![v, v, v, v]);
+    let cols = vec![
+        ("soc".to_owned(), vec![0.0, 0.0, 1.0, 1.0]),
+        ("temp_c".to_owned(), vec![0.0, 50.0, 0.0, 50.0]),
+        axis("ocv_v", ocv),
+        axis("r0_ohm", r0),
+        axis("r1_ohm", r1),
+        axis("tau1_s", tau1),
+        axis("dudt_v_per_k", 0.0),
+        axis("r2_ohm", r2),
+        axis("tau2_s", tau2),
+    ];
+    let table = GriddedTable::from_long(&cols, &["soc", "temp_c"]).unwrap();
+    let doc = BatteryDoc {
+        schema: SchemaVersion::new("battery", 1, 2),
+        model: BatteryModelKind::RcPairs,
+        topology: PackTopology { ns: 1, np: 1 },
+        capacity: PackCapacity {
+            q_pack_ah: 1.0e9,
+            e_pack_wh: 1.0,
+        },
+        soc_window: [0.0, 1.0],
+        ecm: Ecm {
+            rc_pairs: 2,
+            axes: EcmAxes {
+                soc: vec![0.0, 1.0],
+                temp_c: vec![0.0, 50.0],
+            },
+            tables: BatteryTables {
+                file: "x.parquet".into(),
+                level: TableLevel::Cell,
+            },
+        },
+        limits: PackLimits {
+            peak_discharge_power_w_vs_soc: PowerVsSoc {
+                soc: vec![0.0, 1.0],
+                power_w: vec![1.0e9, 1.0e9],
+            },
+            peak_regen_power_w_vs_soc: PowerVsSoc {
+                soc: vec![0.0, 1.0],
+                power_w: vec![1.0e9, 1.0e9],
+            },
+            regen_derate_vs_temp: None,
+            cell_v_min: 0.0,
+            cell_v_max: 100.0,
+            max_c_rate: 100.0,
+        },
+        thermal: PackThermal {
+            mass_kg: 1.0,
+            cp_j_per_kgk: 1000.0,
+            thermal_resistance_k_per_w: 0.0,
+            coolant_temp_c: 25.0,
+        },
+        meta: BatteryMeta::default(),
+    };
+    Pack::assemble(&doc, &table, Some(0.5)).unwrap()
+}
+
+#[test]
+fn two_rc_pulse_matches_double_exponential_closed_form() {
+    // A constant-current discharge on a 2-RC pack tracks the double-exponential Thevenin response:
+    // V(t) = OCV − I·R0 − I·R1·(1 − e^{−t/τ1}) − I·R2·(1 − e^{−t/τ2}).
+    let (ocv, r0, r1, tau1, r2, tau2, i, dt) = (4.0, 0.02, 0.01, 5.0, 0.006, 40.0, 50.0, 0.5);
+    let (pack, mut st) = constant_pack_2rc(ocv, r0, r1, tau1, r2, tau2);
+    let mut sum_sq = 0.0;
+    let mut n = 0.0;
+    for k in 1..=400 {
+        let out = pack.step_current(&mut st, i, dt);
+        let t = f64::from(k) * dt;
+        let closed = ocv
+            - i * r0
+            - i * r1 * (1.0 - (-t / tau1).exp())
+            - i * r2 * (1.0 - (-t / tau2).exp());
+        sum_sq += (out.terminal_v - closed).powi(2);
+        n += 1.0;
+    }
+    let rms = (sum_sq / n).sqrt();
+    assert!(rms < 1.0e-9 * ocv, "2-RC pulse RMS {rms} exceeds the closed form");
+    // The second branch is slower, so at t = 200·dt its arc is still climbing while the first has
+    // essentially settled — both overpotentials are strictly positive and ordered by their R·(1−e).
+    assert!(st.v_rc_v > 0.0 && st.v_rc2_v > 0.0);
+}
+
+#[test]
+fn two_rc_reduces_to_one_when_r2_is_zero() {
+    // The limit test D-M6-3 requires: with r2 = 0 the second branch is inert and the 2-RC pack is
+    // BIT-IDENTICAL to the 1-RC closed form (the same §13 machine-zero gate), and v_rc2 stays 0.
+    let (ocv, r0, r1, tau1, tau2, i, dt) = (4.0, 0.02, 0.01, 15.0, 30.0, 50.0, 0.5);
+    let (pack, mut st) = constant_pack_2rc(ocv, r0, r1, tau1, 0.0, tau2);
+    let mut sum_sq = 0.0;
+    let mut n = 0.0;
+    for k in 1..=200 {
+        let out = pack.step_current(&mut st, i, dt);
+        let t = f64::from(k) * dt;
+        let closed = ocv - i * r0 - i * r1 * (1.0 - (-t / tau1).exp());
+        sum_sq += (out.terminal_v - closed).powi(2);
+        n += 1.0;
+        assert_eq!(st.v_rc2_v, 0.0, "the inert 2nd branch must stay pinned at zero");
+    }
+    let rms = (sum_sq / n).sqrt();
+    assert!(rms < 1.0e-9 * ocv, "r2=0 must reduce exactly to the 1-RC response (RMS {rms})");
+}
+
 #[test]
 fn regen_pulse_raises_terminal_voltage() {
     // A charge (regen) current is negative: the terminal sits ABOVE the OCV by I·(R0+R1).
