@@ -68,6 +68,17 @@
       "description": "`x-*` extension keys (carried through, not interpreted).",
       "$ref": "#/$defs/Extensions"
     },
+    "fuel": {
+      "description": "On-board fuel (mass, CG offset, flow limit), if the car burns fuel. Absent ⇒ mass is the\nall-inclusive `chassis.mass_kg` and results reproduce v0.3.0 byte-identically (§8.1, D-M6-4).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Fuel"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "name": {
       "description": "Human-readable car name.",
       "type": "string"
@@ -730,6 +741,13 @@
             }
           }
         },
+        "shift_maps": {
+          "description": "Optional named up-shift maps selectable per station by a `u(s)` `shift_map_id` schedule\n(§8.3, D-M6-9). The DERIVED schedule (from the gear force curves) is the implicit default\nmap (id 0); a `shift_maps` entry with `name == \"default\"` overrides that default. Absent ⇒\nonly the derived default exists ⇒ byte-identical to pre-1.8.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ShiftMap"
+          }
+        },
         "units": {
           "description": "Torque sources and the coupler paths from each to its wheels.",
           "type": "array",
@@ -845,6 +863,81 @@
       "description": "The `x-*` extension bag: vendor/experimental keys that are carried through but not interpreted.\n\nOnly keys beginning `x-` may appear here; the unknown-key walk (stage 4) routes `x-*` keys into\nthis bag with a warning and rejects any other unknown key as a hard error (§9 versioning rule).",
       "type": "object",
       "additionalProperties": true
+    },
+    "Fuel": {
+      "description": "On-board fuel: initial race load, tank capacity, optional CG offset, LHV, and flow limit.\n\nThe tank centroid CG offset is expressed relative to the DRY-mass (empty-tank) centre of\ngravity in the ISO 8855 body frame (x forward, z up). The full-tank CG is the mass-weighted\nblend of the dry CG and the tank centroid; as fuel burns the CG migrates linearly back toward\nthe dry CG (D-M6-4d).",
+      "type": "object",
+      "properties": {
+        "cg_offset_m": {
+          "description": "Fuel-tank centroid `[x, z]` offset (m) from the DRY-mass CG, ISO 8855 (+x forward, +z up).\nAbsent ⇒ CG does not migrate (mass-only feedback).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "flow_limit": {
+          "description": "Optional fuel-flow limit (F1-style, §8.1 / FIA C5.2.3–C5.2.5). Energy-only form (D-M6-5):\na constraint on available ICE power, never a clamp on the ṁ accounting.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FuelFlowLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "initial_kg": {
+          "description": "Initial (race-start) fuel mass, kg. Typical F1 race load 70–80 kg. ADDS on top of the\nall-inclusive `chassis.mass_kg`: `m₀ = chassis.mass_kg + initial_kg`.",
+          "type": "number",
+          "format": "double"
+        },
+        "lhv_j_per_kg": {
+          "description": "Lower heating value, J/kg (defaults to 43.0e6). The config home of the fuel↔energy\nconversion; ṁ_fuel = P_chem / lhv.",
+          "type": "number",
+          "format": "double",
+          "default": 43000000.0
+        },
+        "tank_kg": {
+          "description": "Tank capacity, kg (`initial_kg ≤ tank_kg`). Fuel mass is clamped to `[0, tank_kg]`.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "initial_kg",
+        "tank_kg"
+      ]
+    },
+    "FuelFlowLimit": {
+      "description": "The fuel-flow limit as an ENERGY constraint (MJ/h). The kg/h ↔ MJ/h equivalence goes through\n[`Fuel::lhv_j_per_kg`]; §8.1's \"ṁ_max\" is recorded as satisfied-by-energy-equivalence.",
+      "type": "object",
+      "properties": {
+        "mj_per_h": {
+          "description": "Absolute energy-flow cap, MJ/h (the FIA C5.2.4 100 kg/h ≈ 4300 MJ/h at 43 MJ/kg).",
+          "type": "number",
+          "format": "double"
+        },
+        "rpm_line": {
+          "description": "Optional low-rpm line (FIA C5.2.5): below `below_rpm`, `EF(MJ/h) = slope·N + intercept`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpmFlowLine"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mj_per_h"
+      ]
     },
     "Gearbox": {
       "description": "A gearbox: ordered ratios, final drive, shift time, and efficiency.",
@@ -1003,6 +1096,32 @@
         "max_regen_frac"
       ]
     },
+    "RpmFlowLine": {
+      "description": "The FIA C5.2.5 low-rpm fuel-flow line: `EF(MJ/h) = slope·N + intercept` for `N < below_rpm`.\nF1 2026 values are `below_rpm = 10500`, `slope = 0.27`, `intercept = 165`.",
+      "type": "object",
+      "properties": {
+        "below_rpm": {
+          "description": "Crank speed (rpm) below which the linear line applies (at/above it, the flat `mj_per_h`).",
+          "type": "number",
+          "format": "double"
+        },
+        "intercept_mj_per_h": {
+          "description": "Intercept of the line, MJ/h.",
+          "type": "number",
+          "format": "double"
+        },
+        "slope_mj_per_h_per_rpm": {
+          "description": "Slope of the line, MJ/h per rpm.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "below_rpm",
+        "slope_mj_per_h_per_rpm",
+        "intercept_mj_per_h"
+      ]
+    },
     "SchemaVersion": {
       "description": "Schema version of the form <name>/<MAJOR>.<MINOR>, e.g. vehicle/1.0",
       "type": "string",
@@ -1010,6 +1129,50 @@
         "vehicle/1.0"
       ],
       "pattern": "^[a-z_]+/\\d+\\.\\d+$"
+    },
+    "ShiftMap": {
+      "description": "A named up-shift map: either explicit per-gear crossover speeds or a scalar factor on the\nderived schedule (D-M6-9). Selected per station by a `u(s)` `shift_map_id` schedule.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Map name — must be unique across `shift_maps`. `\"default\"` overrides the derived default.",
+          "type": "string"
+        }
+      },
+      "oneOf": [
+        {
+          "description": "Explicit per-gear up-shift crossover speeds, m/s (length must equal the up-shift count, i.e.\none fewer than the gear count). Index 0 = the 1→2 up-shift speed.",
+          "type": "object",
+          "properties": {
+            "upshift_speeds_mps": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              }
+            }
+          },
+          "required": [
+            "upshift_speeds_mps"
+          ]
+        },
+        {
+          "description": "A single positive multiplier applied to every derived up-shift speed (`> 1` shifts later,\n`< 1` shifts earlier). A factor of exactly `1.0` reproduces the derived default.",
+          "type": "object",
+          "properties": {
+            "factor": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "factor"
+          ]
+        }
+      ],
+      "required": [
+        "name"
+      ]
     },
     "SpeedTaper": {
       "description": "A power-vs-speed taper table (paired equal-length arrays; monotone non-increasing power).",
