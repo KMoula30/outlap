@@ -426,6 +426,16 @@ pre-computing control schedules `u(s)` as data. The ERS energy manager (`outlap-
 M6/PR1) is a pure struct with a policy enum consumed by the tiers' control phase — deliberately
 NOT plugin-registration machinery (that is the post-1.0 plugin surface).
 
+**Two-layer control contract (M6/PR4).** The step-boundary **controllers** (the shift FSM, the
+battery slow stack, and the ERS energy manager) decide ONCE per step at the boundary and publish
+frozen bus channels; the per-stage **blocks** stay pure consumers that read those channels on every
+RHS evaluation (the bus is cleared and rebuilt each eval, so a boundary value must be re-published
+every eval, never once per step). The manager reaches the blocks exactly this way — an additive
+MGU-K deploy force plus the realized electrical deploy/harvest the powertrain block republishes as
+the pack draw/charge — and the per-lap energy ledger accumulates on the fast path from post-step bus
+values, resetting at the start/finish line. Both tiers consume only the manager's `ErsCommand`, so
+tier parity (gate #4) compares one implementation of the regulations, never two copies.
+
 **Exactly three plugin points (#37)** — everything else is core enums (fast, curated):
 1. Custom blocks: Rust trait + compile-time registration (a plugin crate depends on `outlap-core`,
    registers its blocks; users build a custom binary or the project upstreams the block).
