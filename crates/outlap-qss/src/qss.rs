@@ -204,13 +204,34 @@ pub struct QssLap {
     /// Tyre-thermal slow-state channels (present iff a [`TireThermalMarch`] was supplied — the
     /// representative front tyre's `T_s/T_c/T_g`, wear, damage, and grip multiplier).
     pub tire: Option<TireSlowLog>,
-    /// The **terminal** representative-tyre state at the end of the lap (present iff a
-    /// [`TireThermalMarch`] was supplied) — the `(T_s/T_c/T_g, wear, damage)` a stint carries into the
-    /// next lap's seed so the tyre state continues across the lap boundary with no reset.
-    pub tire_terminal: Option<TireThermalState<f64>>,
+    /// The **terminal** slow state at the end of the lap — the representative-tyre state, the battery
+    /// pack state, and the machine-thermal network — bundled so a stint carries ONE object into the
+    /// next lap's seed and the slow states continue across the lap boundary with no reset.
+    pub slow_terminal: SlowSnapshot,
     /// The g-g-g-v envelope the lap ran on (the returnable `lap.envelope`; `None` for the degenerate
     /// no-envelope path).
     pub envelope: Option<GgvEnvelope>,
+}
+
+/// The terminal slow state at the end of a QSS lap: the representative-tyre thermal ring + wear
+/// state, the battery pack state (SoC / RC voltage / temperature), and the machine-thermal network.
+/// Bundled into ONE object (used as both the [`QssLap`] terminal and, for the state a stint carries,
+/// the next lap's seed) rather than parallel `Option`s. Each field is `None` when its subsystem did
+/// not march. (The fuel slow state joins this snapshot in M6 PR5.)
+///
+/// Carry policy across a stint lap boundary ([`solve_stint`]): the tyre state and the pack SoC +
+/// temperature carry; the pack's within-lap transients (RC voltage / last current) reset; the
+/// machine-thermal network is a per-lap **diagnostic only** (surfaced, not carried) — seeding a
+/// near-limit winding temperature into the quasi-steady distance march destabilises it.
+#[derive(Clone, Debug, Default)]
+pub struct SlowSnapshot {
+    /// Terminal representative-tyre state (present iff a [`TireThermalMarch`] ran).
+    pub tire: Option<TireThermalState<f64>>,
+    /// Terminal battery pack state (present iff an electro stack was coupled).
+    pub pack: Option<PackState>,
+    /// Terminal machine-thermal network (present iff a drive unit declared an `.emotor` and it was
+    /// marched — never under an energy manager, D-M6-10). A per-lap diagnostic; not carried.
+    pub machine: Option<MachineThermal>,
 }
 
 /// The electro slow-state stack the coupling marches: the T1 vehicle (its powertrain maps + the
@@ -339,6 +360,14 @@ struct MarchStats {
     soc_max: f64,
 }
 
+/// The full outcome of one slow-state march: the scalar [`MarchStats`] plus the **terminal** pack
+/// and machine-thermal state at the end of the lap (what a stint carries into the next lap's seed).
+struct MarchOutcome {
+    stats: MarchStats,
+    pack_terminal: PackState,
+    machine_terminal: Option<MachineThermal>,
+}
+
 /// March the slow states forward along a solved profile `(v, ax)`, filling the per-station
 /// buffers. Resets the thermal network, pack state, and lap ledger to their assembled values
 /// first, so every outer iteration marches the whole lap from the reference state
@@ -366,7 +395,7 @@ fn march_slow_states(
     v: &[f64],
     ax: &[f64],
     bufs: &mut SlowMarchBuffers,
-) -> MarchStats {
+) -> MarchOutcome {
     let mut thermal = c.thermal.clone();
     let mut st = c.pack_state;
     let pt = c.vehicle.powertrain();
@@ -465,7 +494,11 @@ fn march_slow_states(
     }
     stats.ledger_deploy_j = ledger.deploy_j();
     stats.ledger_harvest_j = ledger.harvest_j();
-    stats
+    MarchOutcome {
+        stats,
+        pack_terminal: st,
+        machine_terminal: thermal,
+    }
 }
 
 /// Build the manager's per-segment inputs and decide the command (electrical, unclipped by the
@@ -641,23 +674,15 @@ impl SwingBand {
 /// scales the powertrain's mechanical ceiling by the marched traction scale, and adds the
 /// manager's per-station deploy-force slice.
 // The 4-tuple return is the internal profile-solve contract (lap time + the two slow-state logs +
-// the tyre terminal state a stint carries); a struct would just rename the fields.
-#[allow(clippy::type_complexity)]
+// the terminal slow snapshot a stint carries); a struct would just rename the fields.
+#[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn solve_profile(
     t0: &T0Vehicle,
     env: &GgvEnvelope,
     couplings: &Couplings<'_>,
     path: &T0Path,
     ws: &mut T0Workspace,
-) -> Result<
-    (
-        f64,
-        Option<SlowLog>,
-        Option<TireSlowLog>,
-        Option<TireThermalState<f64>>,
-    ),
-    T0Error,
-> {
+) -> Result<(f64, Option<SlowLog>, Option<TireSlowLog>, SlowSnapshot), T0Error> {
     let n = path.len();
     let ers = couplings.ers;
     // Assembly-time activity: an inactive stack (no energy maps, no manager) cannot move a slow
@@ -666,7 +691,7 @@ fn solve_profile(
     let tire = couplings.tire;
     if coupling.is_none() && tire.is_none() {
         let lap_time = solve_into_ggv(t0, env, path, ws)?;
-        return Ok((lap_time, None, None, None));
+        return Ok((lap_time, None, None, SlowSnapshot::default()));
     }
     let mut ax = vec![0.0; n];
     let mut bufs = SlowMarchBuffers::new(n);
@@ -732,8 +757,15 @@ fn solve_profile(
     }
     // Final marches against the converged profile so the reported channels match it.
     derive_ax(path, &ws.v, &mut ax);
+    // The terminal pack + machine state the final march ends on (captured out of the closure so it
+    // can seed the next stint lap). `None` here means no electro stack marched.
+    let mut pack_terminal: Option<PackState> = None;
+    let mut machine_terminal: Option<MachineThermal> = None;
     let slow = coupling.map(|c| {
-        let stats = march_slow_states(t0, c, ers, env, path, &ws.v, &ax, &mut bufs);
+        let outcome = march_slow_states(t0, c, ers, env, path, &ws.v, &ax, &mut bufs);
+        pack_terminal = Some(outcome.pack_terminal);
+        machine_terminal = outcome.machine_terminal;
+        let stats = outcome.stats;
         SlowLog {
             state_of_charge: std::mem::take(&mut bufs.soc),
             // The machine-thermal network is NOT marched under an energy manager (D-M6-10: the
@@ -767,7 +799,12 @@ fn solve_profile(
         ));
         tire_log
     });
-    Ok((lap_time, slow, tire_slow, tire_terminal))
+    let terminal = SlowSnapshot {
+        tire: tire_terminal,
+        pack: pack_terminal,
+        machine: machine_terminal,
+    };
+    Ok((lap_time, slow, tire_slow, terminal))
 }
 
 /// Max elementwise |a − b| (equal lengths).
@@ -801,7 +838,7 @@ pub fn solve_t0(
 ) -> Result<QssLap, QssError> {
     check_couplings(couplings)?;
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow, tire_slow, tire_terminal) =
+    let (lap_time_s, slow, tire_slow, slow_terminal) =
         solve_profile(t0, &env, couplings, path, &mut ws)?;
     let notes = finish_notes(req.notes, couplings, slow.as_ref());
     let lap = lap_result_from_ws(path, &ws, lap_time_s, req.line, req.resolved_hash, notes);
@@ -814,7 +851,7 @@ pub fn solve_t0(
         setup: None,
         slow,
         tire: tire_slow,
-        tire_terminal,
+        slow_terminal,
         envelope: Some(env),
     })
 }
@@ -834,7 +871,7 @@ pub fn solve_t1(
 ) -> Result<QssLap, QssError> {
     check_couplings(couplings)?;
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow, tire_slow, tire_terminal) =
+    let (lap_time_s, slow, tire_slow, slow_terminal) =
         solve_profile(t0, &env, couplings, path, &mut ws)?;
 
     // Re-trim at each solved station for the per-wheel channels + setup metrics.
@@ -876,8 +913,194 @@ pub fn solve_t1(
         }),
         slow,
         tire: tire_slow,
-        tire_terminal,
+        slow_terminal,
         envelope: Some(env),
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// QSS stint: the multi-lap loop, pushed down from the Python binding so the lap-boundary carry
+// semantics (the M6 acceptance check — SoC falls with consumption, rises with regeneration, across
+// laps) are cargo-testable and the binding stops duplicating the solve_lap prologue (PR3a).
+// ---------------------------------------------------------------------------------------------
+
+/// The electro slow-stack ingredients a stint reuses across laps: the pack + optional machine
+/// thermal network are cloned into a fresh [`SlowCoupling`] each lap, seeded with the CARRIED
+/// pack/machine state (not the assembled one — that is the whole point of a stint).
+#[derive(Clone, Copy)]
+pub struct StintElectro<'a> {
+    /// The T1 vehicle carrying the installed drive units + mass (as in [`SlowCoupling`]).
+    pub vehicle: &'a T1Vehicle,
+    /// The battery pack (immutable maps + limits), cloned per lap.
+    pub pack: &'a Pack,
+    /// The assembled machine-thermal network, if a drive unit declared an `.emotor` — the lap-1
+    /// seed; later laps carry the terminal network forward (never marched under a manager).
+    pub thermal: Option<&'a MachineThermal>,
+    /// The lap-1 pack state (`initial_soc` already applied by assembly).
+    pub pack_state: PackState,
+    /// Assembly-time activity flag (installed energy maps), copied into each lap's coupling.
+    pub active: bool,
+}
+
+/// The borrowed, assembled artifacts a QSS stint runs its laps on (built once, reused every lap):
+/// the tier + vehicles + envelope + path, the optional electro stack / energy manager / tyre
+/// march, and the per-lap request template. Passed to [`solve_stint`] by value.
+pub struct StintPlan<'a> {
+    /// The resolved solver tier (`T0` / `T1`).
+    pub tier: Tier,
+    /// The point-mass vehicle (drives both `t0` and `t1` laps).
+    pub t0: &'a T0Vehicle,
+    /// The T1 vehicle (per-wheel channels + the slow-stack mass/maps).
+    pub t1: &'a T1Vehicle,
+    /// The g-g-g-v envelope (built once — cloned into each lap's solve).
+    pub env: &'a GgvEnvelope,
+    /// The shared arc-length path all laps run on.
+    pub path: &'a T0Path,
+    /// The electro slow stack, when the car carries a runnable battery. `None` → no SoC to carry.
+    pub electro: Option<StintElectro<'a>>,
+    /// The 2026 ERS energy manager (requires `electro`).
+    pub ers: Option<&'a ErsCoupling>,
+    /// The representative-tyre thermal march (built once; re-seeded per lap). `None` → frozen tyre.
+    pub base_march: Option<&'a TireThermalMarch>,
+    /// The per-lap request template (line / hash / fz-coupling / flat-track); cloned per lap with
+    /// the notes reset (the per-lap manager notes are surfaced separately).
+    pub request: LapRequest,
+}
+
+/// A single stint lap's lean result (no per-lap envelope — the stint reuses ONE): the lap time, the
+/// point-mass speed trace, the slow-state + tyre channels, and the terminal snapshot the next lap
+/// seeds from.
+#[derive(Clone, Debug)]
+pub struct StintLap {
+    /// Lap time, s.
+    pub lap_time_s: f64,
+    /// Per-station speed, m/s.
+    pub v: Vec<f64>,
+    /// Slow-state channels (SoC trace, machine temp, ERS ledger) — `None` when no active stack.
+    pub slow: Option<SlowLog>,
+    /// Tyre-thermal channels — `None` when the tyre march was off.
+    pub tire: Option<TireSlowLog>,
+    /// The terminal slow state at the end of this lap (the next lap's seed).
+    pub terminal: SlowSnapshot,
+    /// The lap's energy-manager + convergence notes (`finish_notes` output).
+    pub notes: Vec<String>,
+}
+
+/// The lap-1 seeds a stint starts from (beyond the pack state, which rides in [`StintElectro`]).
+#[derive(Clone, Debug, Default)]
+pub struct StintSeeds {
+    /// The lap-1 representative-tyre state (`None` → the march's warm-at-optimum default).
+    pub tire: Option<TireThermalState<f64>>,
+}
+
+/// A solved QSS stint: the shared stations, the resolved tier, and the per-lap lean results.
+pub struct QssStintResult {
+    /// The shared arc-length stations (from lap 1).
+    pub s: Vec<f64>,
+    /// The resolved tier (`T0` / `T1`).
+    pub tier: Tier,
+    /// The recorded normal-load coupling mode.
+    pub fz_coupling: FzCoupling,
+    /// Per-lap results, in lap order.
+    pub laps: Vec<StintLap>,
+}
+
+/// Run a QSS stint: `n_laps` laps on the shared [`StintPlan`] artifacts, carrying the FULL slow
+/// stack — representative-tyre state AND the battery pack (SoC / RC voltage / temperature) AND the
+/// machine-thermal network — across every lap boundary with no reset. Lap N+1 seeds from lap N's
+/// terminal [`SlowSnapshot`]; only the per-lap ERS ledger resets (the `s = 0` lap boundary).
+///
+/// # Errors
+/// Propagates any per-lap [`solve_t0`] / [`solve_t1`] failure.
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+pub fn solve_stint(
+    plan: &StintPlan<'_>,
+    n_laps: usize,
+    seeds: StintSeeds,
+) -> Result<QssStintResult, QssError> {
+    let mut laps = Vec::with_capacity(n_laps);
+    let mut s_grid = Vec::new();
+    // The carried seeds — updated from each lap's terminal snapshot (the stint's whole point).
+    let mut tire_seed = seeds.tire;
+    let mut pack_seed = plan.electro.map(|e| e.pack_state);
+    // The machine-thermal network re-seeds from the assembled state each lap (see the boundary note
+    // below): a constant lap-1 seed, never carried, so it is not `mut`.
+    let machine_seed = plan.electro.and_then(|e| e.thermal.cloned());
+
+    for lap_idx in 0..n_laps {
+        let march_lap = plan.base_march.map(|bm| {
+            bm.clone()
+                .with_state(tire_seed.expect("tyre seed set when a march is supplied"))
+        });
+        let electro = plan.electro.map(|e| SlowCoupling {
+            vehicle: e.vehicle,
+            thermal: machine_seed.clone(),
+            pack: e.pack.clone(),
+            pack_state: pack_seed.expect("pack seed set when an electro stack is supplied"),
+            active: e.active,
+        });
+        let couplings = Couplings {
+            electro: electro.as_ref(),
+            tire: march_lap.as_ref(),
+            ers: plan.ers,
+        };
+        let mut req = plan.request.clone();
+        req.notes = Vec::new();
+        let qss = if plan.tier == Tier::T0 {
+            solve_t0(plan.t0, plan.env.clone(), &couplings, plan.path, req)?
+        } else {
+            solve_t1(
+                plan.t1,
+                plan.t0,
+                plan.env.clone(),
+                &couplings,
+                plan.path,
+                req,
+            )?
+        };
+        if lap_idx == 0 {
+            s_grid.clone_from(&qss.lap.s);
+        }
+        // Carry the terminal slow state into the next lap's seed BEFORE moving the lap result. A
+        // `None` terminal (subsystem absent this lap) keeps the prior seed rather than resetting it.
+        tire_seed = qss.slow_terminal.tire.or(tire_seed);
+        if let Some(p) = qss.slow_terminal.pack {
+            // Carry the SLOW pack states — SoC and temperature — across the lap boundary (the
+            // headline acceptance check). The RC overpotential `v_rc_v` and the last-solved
+            // terminal `current_a` are within-lap transients (τ ~ seconds), re-established in the
+            // new lap's first segments; carrying them would feed a stale end-of-straight
+            // high-current terminal-voltage estimate into station 0. Reset them to match the
+            // single-lap entry, which starts from a rested pack.
+            pack_seed = Some(PackState {
+                v_rc_v: 0.0,
+                current_a: 0.0,
+                ..p
+            });
+        }
+        // The machine-thermal network is NOT carried across the QSS lap boundary — it re-seeds each
+        // lap (the terminal is still surfaced as an end-of-lap diagnostic). Coupling a near-limit
+        // winding temperature into the quasi-steady DISTANCE march creates a derate↔slowdown
+        // positive feedback (a slower lap integrates MORE heating over its longer time, so the
+        // winding gets hotter, derates harder, slows further) with no inter-lap cooling to arrest
+        // it — an artifact of the QSS march, not real thermal behaviour. Inter-lap machine-thermal
+        // continuity is the transient tier's job (T2, with real-time cooling); this QSS EV-stint
+        // asymmetry is recorded (§13 validation). Under an energy manager the machine is not marched
+        // at all (D-M6-10), so this only affects mapped-EV stints.
+        laps.push(StintLap {
+            lap_time_s: qss.lap.lap_time_s,
+            v: qss.lap.v,
+            slow: qss.slow,
+            tire: qss.tire,
+            terminal: qss.slow_terminal,
+            notes: qss.lap.notes,
+        });
+    }
+
+    Ok(QssStintResult {
+        s: s_grid,
+        tier: plan.tier,
+        fz_coupling: plan.request.fz_coupling,
+        laps,
     })
 }
 
