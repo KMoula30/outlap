@@ -6,11 +6,16 @@ mf61:
   FNOMIN: 4000.0
   UNLOADED_RADIUS: 0.33
   PCX1: 1.65
-  PDX1: 1.30
+  # Peak friction CALIBRATED to 2026 Barcelona GP telemetry (FastF1): the real car's reverse-
+  # engineered lateral grip envelope (v²·κ from position data, 143 pooled corner apexes) peaks at
+  # ~4.5 g in fast corners — a physical F1-slick peak μ of ~1.68 (was 1.25, ~2× too low), the level
+  # set by the low-speed apexes and the downforce (CzA) by the a_lat-vs-speed rise. PDX1 scaled to
+  # keep the friction-ellipse shape. Still SYNTHETIC (not a measured tyre file).
+  PDX1: 1.750
   PEX1: 0.10
   PKX1: 22.0
   PCY1: 1.40
-  PDY1: 1.25
+  PDY1: 1.680
   PEY1: -1.0
   PKY1: -20.0
   # Combined-slip weighting (Pacejka 4.E50-4.E67): book-magnitude SYNTHETIC values (same status as

@@ -72,11 +72,13 @@ def test_tyre_metadata_and_peaks(pacejka: Tyre) -> None:
 
 
 def test_slick_peaks_match_rust_closed_form() -> None:
-    # The synthetic slick: peak μ = PDX1/PDY1 exactly (Rust eval.rs pins 1.30/1.25).
+    # The synthetic slick: peak μ = PDX1/PDY1 exactly at nominal load (dfz = 0). Calibrated to
+    # 2026 Barcelona telemetry (PDX1 1.75 / PDY1 1.68); the closed-form identity is what's under
+    # test, not the specific magnitudes.
     slick = Tyre.load(F1_SLICK)
     mux, muy = slick.peak_mu(4000.0, 200_000.0)
-    assert mux == pytest.approx(1.30, abs=1e-6)
-    assert muy == pytest.approx(1.25, abs=1e-6)
+    assert mux == pytest.approx(1.75, abs=1e-6)
+    assert muy == pytest.approx(1.68, abs=1e-6)
 
 
 def test_tyre_forces_signs_and_broadcasting(pacejka: Tyre) -> None:

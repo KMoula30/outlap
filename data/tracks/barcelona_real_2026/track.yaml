@@ -1,0 +1,7 @@
+schema: track/1.0
+name: "Barcelona 2026 (real line)"
+closed: true
+centerline: centerline.csv
+meta:
+  source: fastf1-position
+  attribution: "FastF1 position data, 2026 Barcelona R"
