@@ -1191,7 +1191,23 @@ ends in something runnable and demo-able (public repo).
 | M4 | Transient tier (T2 in the **curvilinear 3D road frame**, split integrator, ideal driver model, shift events, rule-based TV controller) + QSS↔transient parity gate in CI + **time-weighted raceline QP + the deferred ≤1% Limebeer lap-time gate (Decision #48)** | 5–7 wk | 0.2.5 — shipped 2026-07-13. Parity re-scoped in-flight (Decision #48 pattern): hull containment asserted (0.0% on 3 cars); lap/apex parity + the ≤1% Limebeer gate + the 250k steps/s floor recorded-and-decomposed, not gated (driver corner margin ~+14–17%; RHS-bound ~62k steps/s at MF6.1 fidelity) — see `docs/validation/limebeer.md`. Driver gained a corner-scaled margin, sideslip damper + wheel-slip governor beyond plan; `spa_osm` shipped; Spa fast gate still deferred |
 | M5 | **Tire thermal ring + wear in both tiers — the headline. Stint-simulation demo** | 4–6 wk | 0.3.0 — shipped 2026-07-16. Reduced Farroni-TRT 3-node ring + Archard wear/cliff + thermal damage, marched as slow states in T0/T1 and T2; envelope gained real `T_tire`/`wear` axes (Decision #49). `outlap.wearcal` inverse-calibrates from stint pace (FastF1 opt-in, §15); reference `.tyr` recalibrated + soft/med/hard compound presets; `10_stint_strategy` capstone. Validation (Decision #48): thermal warm-up/steady band asserted; wear/cliff reproduced after calibration + QSS↔T2 decay 0.041 ≤ 0.1 s/lap asserted, decomposed in `docs/validation/{tire-thermal,wear-cliff}.md` |
 | M6 | ERS 2026-style (deploy taper, override mode, recharge phases) + battery ECM + fuel mass + T3 14-DOF | 4–5 wk | |
+| MT | **Track fidelity overhaul (standalone) — the tracks are now the dominant sim-vs-real error source once the car is calibrated.** Real track widths + racing surface (OSM boundary tags / trackmap, not defaulted widths); a curvature-clean centerline pipeline that preserves true apex radii (audited against telemetry-derived corner radii); elevation + banking properly fused (C² z; banking from DEM cross-sections or per-corner keypoints); a **telemetry-derived importer** (FastF1 X/Y position → outlap track, robust circle-fit/spline — prototyped in the M6 calibration); and a **track-quality validation gate**: real lap telemetry vs the calibrated car on the SAME geometry (grip-matched) → corner-radius + apex-speed agreement within tolerance. Re-import/validate the reference set (Catalunya/Spa/Silverstone) so M7 compares on trustworthy geometry. Prereq for the M7 hero demo. | 3–5 wk | |
 | M7 | `outlap-batch` (rayon, SoA) + sweep API + working CLI (§11.1b) + **all four reference vehicles** (Locked Decision #1) + the **hero demo as redefined by the author (Decision #22)**: F1 2026-config vs GT hybrid vs EV sports 2-DU AWD vs EV sports 1-DU RWD — each on **its own min-curvature line**, compared lap times + energy on Catalunya/Spa/Silverstone (4-DU TV + FWD ship as extra example configs) + docs site + WASM demo widget | 6–8 wk | **1.0** |
+
+**MT — Track Fidelity, why it is now a standalone milestone.** Through M1–M5 the *car* models
+(chassis, tyre thermal/wear, powertrain) were validated against oracles; M6 calibrated the f1_2026
+grip to real 2026 Barcelona telemetry (FastF1). With the car correct, the **track** is the largest
+remaining error: the calibrated f1 does **83 s on the real reverse-engineered Barcelona geometry**
+(real fastest lap 80.1 s) but **94 s on the shipped `catalunya_osm`** — an ~11 s gap that is *pure
+geometry*, not the vehicle. Root causes: OSM imports default their widths and leave banking
+unresolved (`track.yaml` meta says so); no track was ever ground-truthed against real lap data;
+reverse-engineering geometry from ~10 Hz telemetry position has curvature noise (tightest apex
+~31 m vs a ~34 m circle-fit, capping v_min ~10 % low). The seed exists — `data/tracks/barcelona_real_2026`
+(FastF1-derived) plus the M6 calibration scripts — but it needs a real pipeline and a validation
+gate. Diagnostic rule of thumb from the M6 overlay: a **uniform** sim-faster-than-real offset on
+every straight is a *vehicle-state* effect (race fuel mass — the sim runs 768 kg dry — plus race
+engine/ERS modes and lift-and-coast); a **localized** corner speed mismatch is *track geometry*.
+Only the latter is MT's problem; the former belongs to a future race-trim / fuel-load model.
 
 **Post-1.0 roadmap (in order):**
 1. **v1.x — sim-racing telemetry importers** (MoTeC `.ld`, ACC, iRacing; Locked Decision #10): the
