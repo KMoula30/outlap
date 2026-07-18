@@ -239,6 +239,8 @@ pub(crate) fn prepare_qss(
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
     tire_thermal: bool,
     initial_soc: Option<f64>,
+    override_active: bool,
+    us_schedule: Option<outlap_qss::ers::UsSchedule<f64>>,
 ) -> PyResult<PreparedQss> {
     if let Some(soc) = initial_soc {
         if !(0.0..=1.0).contains(&soc) {
@@ -321,13 +323,16 @@ pub(crate) fn prepare_qss(
     let stack = build_slow_stack(&resolved, &vl, &conditions, initial_soc, &mut notes)?;
     // The 2026 ERS energy manager (M6 PR2): governs the march whenever the car has an `ers:` block
     // AND a pack to schedule.
+    let ers_policy = us_schedule.map_or(outlap_qss::ers::ErsPolicy::RuleBased, |u| {
+        outlap_qss::ers::ErsPolicy::Schedule(u)
+    });
     let ers_coupling = build_ers_coupling(
         &resolved,
         &t0v,
         stack.is_some(),
         sim_cfg.allow_degraded,
-        outlap_qss::ers::ErsPolicy::RuleBased,
-        false,
+        ers_policy,
+        override_active,
         &mut notes,
     )?;
     // Tyre-thermal march (M5 PR5): opt-in, so the default run stays bit-identical to pre-M5.
@@ -378,7 +383,7 @@ pub(crate) fn prepare_qss(
 /// The call holds the GIL for its duration (envelope generation is a seconds-scale cold step in a
 /// debug build); releasing it is deferred to the batch/sweep API milestone.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = false, initial_soc = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = false, initial_soc = None, r#override = false, us_schedule = None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn solve_lap(
     vehicle_dir: &str,
@@ -393,8 +398,11 @@ pub(crate) fn solve_lap(
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
     tire_thermal: bool,
     initial_soc: Option<f64>,
+    r#override: bool,
+    us_schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<Lap> {
     check_ds(ds_m)?;
+    let us_schedule = crate::transient_entry::us_schedule_from_py(us_schedule)?;
     let PreparedQss {
         t0v,
         t1v,
@@ -419,6 +427,8 @@ pub(crate) fn solve_lap(
         sim,
         tire_thermal,
         initial_soc,
+        r#override,
+        us_schedule,
     )?;
 
     let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
@@ -735,7 +745,7 @@ impl QssStint {
 /// regeneration, with only the per-lap ERS budget ledger resetting at the start/finish. `initial_soc`
 /// seeds the pack (default: the middle of its usable window, matching T2).
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = true, initial_tire_temp_c = None, initial_soc = None))]
+#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = true, initial_tire_temp_c = None, initial_soc = None, r#override = false, us_schedule = None))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn solve_stint(
     vehicle_dir: &str,
@@ -752,6 +762,8 @@ pub(crate) fn solve_stint(
     tire_thermal: bool,
     initial_tire_temp_c: Option<f64>,
     initial_soc: Option<f64>,
+    r#override: bool,
+    us_schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<QssStint> {
     check_ds(ds_m)?;
     if !(1..=MAX_STINT_LAPS).contains(&n_laps) {
@@ -759,6 +771,7 @@ pub(crate) fn solve_stint(
             "n_laps must lie in 1..={MAX_STINT_LAPS}, got {n_laps}"
         )));
     }
+    let us_schedule = crate::transient_entry::us_schedule_from_py(us_schedule)?;
     let PreparedQss {
         t0v,
         t1v,
@@ -783,6 +796,8 @@ pub(crate) fn solve_stint(
         sim,
         tire_thermal,
         initial_soc,
+        r#override,
+        us_schedule,
     )?;
     notes.push(format!(
         "QSS stint: {n_laps} laps run back-to-back with the FULL slow stack — the representative-tyre \

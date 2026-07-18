@@ -3,7 +3,9 @@
 
 The **asserted** gate is **hull containment**: the T2 closed-loop operating points must stay inside
 the T1 g-g-g-v envelope the QSS tiers solve on (≤2% exceedance). That is the physics-fidelity parity
-check — it holds regardless of how competitive the driver is.
+check — it holds regardless of how competitive the driver is. **Exception (M6 PR4):** a hybrid whose
+MGU-K deploys at T2 (``f1_2026``) legitimately operates outside the ERS-free envelope, so its
+exceedance is recorded, not gated — see ``ERS_CARS`` below and gate #4 (PR8).
 
 The lap-time / apex deltas are **recorded, not gated**. The ideal driver tracks a stability margin
 (~0.85 of the QSS profile) and spins if pushed to the limit, so a T2 lap is ~+17% off T0 — a
@@ -30,6 +32,13 @@ _ROOT = Path(__file__).resolve().parents[2]
 _DATA = _ROOT / "data"
 CATALUNYA = str(_DATA / "tracks/catalunya_osm")
 CARS = ["limebeer_2014_f1", "f1_2026", "tesla_model3_rwd"]
+# Cars whose MGU-K deploys at T2 (M6 PR4). The T1 g-g-g-v envelope deliberately EXCLUDES the ERS
+# deploy (it is a separate rule-based mechanism, §8.3), so a hybrid that deploys ~350 kW at T2
+# legitimately operates OUTSIDE the ERS-free hull on the drive-out of corners — hull containment is
+# not the right parity measure for a deploying hybrid (that is gate #4, fuel + ERS energy per lap,
+# at PR8). For these cars the exceedance is RECORDED, not asserted (the Decision #48 pattern,
+# pre-authorized by D-M6-11); the non-ERS cars keep the hard ≤ 2 % assert (byte-identical trajectory).
+ERS_CARS = {"f1_2026"}
 # A moderate envelope keeps the three full T2 laps inside the CI budget while still being a real hull.
 PARITY_SIM: dict[str, object] = {
     "flat_track": True,
@@ -83,14 +92,25 @@ def test_t2_stays_inside_the_t1_hull(car: str, track: Track) -> None:
     hull_pct = 100.0 * exceed / max(samples, 1)
 
     lap_delta_pct = 100.0 * (t2_time - t0_time) / t0_time
-    # Recorded (not asserted): the driver-margin lap-time gap.
+    ers = car in ERS_CARS
+    # Recorded (not asserted): the driver-margin lap-time gap; for an ERS car the hull exceedance too.
     print(
         f"[parity {car}] T0={t0_time:.2f}s T2={t2_time:.2f}s Δlap={lap_delta_pct:+.1f}% "
-        f"(recorded) | hull exceed={hull_pct:.2f}% of {samples} (gate ≤2%)"
+        f"(recorded) | hull exceed={hull_pct:.2f}% of {samples} "
+        f"({'RECORDED — MGU-K deploys outside the ERS-free hull' if ers else 'gate ≤2%'})"
     )
-    assert hull_pct <= 2.0, (
-        f"{car}: T2 hull containment {hull_pct:.2f}% > 2% — operating points leave the T1 envelope"
-    )
+    if ers:
+        # The deploying hybrid leaves the ERS-free hull by design; record a sane upper bound so a
+        # runaway (a spun lap) still fails, but do not gate the deploy-driven exceedance itself.
+        assert hull_pct <= 25.0, (
+            f"{car}: T2 hull exceedance {hull_pct:.2f}% is implausibly large even for a deploying "
+            "hybrid — check the ERS deploy force, not just the envelope mismatch"
+        )
+    else:
+        assert hull_pct <= 2.0, (
+            f"{car}: T2 hull containment {hull_pct:.2f}% > 2% — operating points leave the T1 "
+            "envelope"
+        )
     # A sanity floor on the recorded delta: T2 is slower (driver margin), never implausibly faster.
     assert lap_delta_pct > -5.0, (
         f"{car}: T2 implausibly faster than T0 ({lap_delta_pct:+.1f}%)"
