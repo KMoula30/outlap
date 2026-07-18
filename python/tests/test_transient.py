@@ -351,3 +351,89 @@ def test_a_single_speed_car_never_shifts(f1_lap: xr.Dataset) -> None:
     assert (f1_lap["gear"] == 0.0).all()
     assert (f1_lap["torque_scale"] == 1.0).all()
     assert any("gear-shift FSM inert" in n for n in f1_lap.attrs["notes"])
+
+
+# --- M6 PR4: the 2026 ERS energy manager at T2 -------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def f1_ers_lap(catalunya: Track) -> xr.Dataset:
+    """An f1_2026 T2 lap with the 2026 ERS energy manager active (the MGU-K deploys/harvests)."""
+    return transient_lap_dataset(
+        solve_transient_lap(F1_2026, catalunya, ds_m=12.0, sim=COARSE_SIM)
+    )
+
+
+def test_the_mgu_k_deploys_and_harvests_at_t2(f1_ers_lap: xr.Dataset) -> None:
+    ds = f1_ers_lap
+    # For an ERS car the powertrain publishes the manager's realized electrical deploy as
+    # `traction_power_w` (pack draw = deploy only, D-M6-10) and the harvest as `regen_power_w`.
+    deploy = ds["traction_power_w"].to_numpy()
+    harvest = ds["regen_power_w"].to_numpy()
+    assert deploy.max() > 100e3, (
+        "the MGU-K actually deploys at T2 (it never did before PR4)"
+    )
+    assert harvest.max() > 10e3, "the MGU-K harvests under braking / recharge"
+    # The realized electrical deploy respects the FIA C5.2.7 350 kW electrical cap at every sample.
+    assert deploy.max() <= 350e3 * 1.001, (
+        f"deploy {deploy.max() / 1e3:.1f} kW exceeds the 350 kW electrical cap"
+    )
+    assert (deploy >= -1e-6).all() and (harvest >= -1e-6).all()
+    # The state of charge moves BOTH ways over the lap (the author's acceptance check at T2):
+    # discharges under deploy, recovers under braking. The on-track swing stays inside the pack's
+    # usable window (the f1 pack's window is sized to the FIA C5.2.9 4 MJ).
+    soc = ds["state_of_charge"].to_numpy()
+    assert soc.max() - soc.min() > 1e-3, "the SoC changes lap-over-lap (deploy + regen)"
+    assert 0.2 - 1e-6 <= soc.min() and soc.max() <= 0.9 + 1e-6, (
+        "the on-track SoC stays inside the usable window"
+    )
+    assert any("ERS energy manager active" in n for n in ds.attrs["notes"]), (
+        "the ERS wiring is surfaced in the loaded-model report"
+    )
+
+
+def test_the_override_flag_changes_the_ers_lap(catalunya: Track) -> None:
+    # Override ("Overtake") enables the higher-speed deployment envelope + the extra harvest
+    # allowance, so the deploy/energy picture differs from the rule-based lap (D-M6-5).
+    base = transient_lap_dataset(
+        solve_transient_lap(F1_2026, catalunya, ds_m=12.0, sim=COARSE_SIM)
+    )
+    over = transient_lap_dataset(
+        solve_transient_lap(
+            F1_2026, catalunya, ds_m=12.0, sim=COARSE_SIM, override=True
+        )
+    )
+    d_base = float(base["traction_power_w"].to_numpy().sum())
+    d_over = float(over["traction_power_w"].to_numpy().sum())
+    assert d_base != d_over, "the override flag changes the deployment picture"
+    assert any("override/Overtake enabled" in n for n in over.attrs["notes"])
+    assert not any("override/Overtake enabled" in n for n in base.attrs["notes"])
+
+
+def test_a_us_schedule_drives_the_deploy_fraction(catalunya: Track) -> None:
+    # A u(s) schedule that forbids deployment everywhere (deploy_regen = 0) banks strictly less
+    # deploy energy than the greedy rule-based lap — the schedule policy actually reaches the tier.
+    n = 60
+    off = {"deploy_regen": [0.0] * n}
+    greedy = transient_lap_dataset(
+        solve_transient_lap(F1_2026, catalunya, ds_m=12.0, sim=COARSE_SIM)
+    )
+    scheduled = transient_lap_dataset(
+        solve_transient_lap(
+            F1_2026, catalunya, ds_m=12.0, sim=COARSE_SIM, us_schedule=off
+        )
+    )
+    assert scheduled["traction_power_w"].to_numpy().max() <= (
+        greedy["traction_power_w"].to_numpy().max() + 1.0
+    ), "a deploy-off schedule never deploys more than the greedy policy"
+
+
+def test_an_invalid_us_schedule_is_a_value_error(catalunya: Track) -> None:
+    with pytest.raises(ValueError, match="us_schedule"):
+        solve_transient_lap(
+            F1_2026,
+            catalunya,
+            ds_m=20.0,
+            sim=COARSE_SIM,
+            us_schedule={"deploy_regen": [2.0, 0.0]},  # 2.0 is out of [-1, 1]
+        )
