@@ -227,7 +227,7 @@ pub(crate) struct PreparedQss {
 /// conditions, build the path, generate (or reuse) the g-g-g-v envelope, and build the electro
 /// slow stack (seeded from `initial_soc`), the energy manager, and the tyre march. A resolved `t2`
 /// tier redirects to the transient entry point; `t3` raises the typed not-implemented error.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn prepare_qss(
     kind: QssEntryKind,
     vehicle_dir: &str,

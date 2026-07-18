@@ -89,10 +89,21 @@ impl ErsController {
     }
 
     /// The `u(s)` schedule station for arc-length `s` (nearest breakpoint; `0` when rule-based).
+    ///
+    /// The solver hands the RAW cumulative arc-length (seeded at the straightest station, growing
+    /// unbounded across a multi-lap stint), so `s` is first wrapped into one lap `[0, length)` — the
+    /// schedule repeats every lap exactly as the road geometry does (the line table wraps `s` the
+    /// same way). Without the wrap a stint's laps 2..n (and even a single lap's `start_s` offset)
+    /// would edge-clamp to the last station.
     fn station(&self, s: f64) -> usize {
-        if self.schedule_s.is_empty() {
-            return 0;
-        }
+        let Some(&length) = self.schedule_s.last() else {
+            return 0; // rule-based (empty grid): station is unused
+        };
+        let s = if length > 0.0 {
+            s.rem_euclid(length)
+        } else {
+            0.0
+        };
         match self
             .schedule_s
             .binary_search_by(|x| x.partial_cmp(&s).unwrap_or(std::cmp::Ordering::Less))
@@ -181,6 +192,13 @@ impl outlap_transient::ErsGovernor for ErsController {
             harvest_w: 0.0,
             mode: cmd.mode,
         };
+        // NOTE (parity scope): the QSS march also enforces the FIA C5.2.9 *regulatory* swing band
+        // (an independent `max − min ≤ capacity_mj` clip) on top of the physical `soc_window`. At T2
+        // the physical window alone bounds the swing (the slow stack clamps SoC to it each step);
+        // the two coincide for a pack sized to the reg — the shipped f1 pack's window is exactly the
+        // 4 MJ reg — so f1 (and gate #4) are unaffected. A pack physically LARGER than the reg would
+        // see QSS clip at the reg while T2 clips at the larger physical window: a recorded follow-up,
+        // matching the QSS side's own "oversized pack" flag; no committed vehicle triggers it.
         if cmd.deploy_w > 0.0 {
             let p_elec = cmd.deploy_w.min(inp.discharge_limit_w.max(0.0));
             let (_p_mech, p_elec_real) = self.realized_deploy(p_elec);
