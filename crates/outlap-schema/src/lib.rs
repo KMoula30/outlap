@@ -110,7 +110,8 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// cap §8.0 + brakes `regen_blend` §7.6), 1.7 optional ERS
 /// `elec_mech_factor` + `recovery` recharge-phase fields (§8.3, M6/PR1); `ptm`: 1.1 optional Vdc
 /// axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block; `battery`: 1.1
-/// `regen_derate_vs_temp` (§7.6); `sim`: 1.1 `flat_track` analysis flag.
+/// `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` + `r2_ohm`/`tau2_s`
+/// sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag.
 ///
 /// # Validation-tightening policy
 ///
@@ -131,7 +132,8 @@ pub fn current_minor(name: &str) -> u16 {
     match name {
         schema_name::VEHICLE => 7,
         schema_name::PTM => 2,
-        schema_name::TYR | schema_name::BATTERY | schema_name::SIM => 1,
+        schema_name::BATTERY => 2,
+        schema_name::TYR | schema_name::SIM => 1,
         // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.
         _ => 0,
     }

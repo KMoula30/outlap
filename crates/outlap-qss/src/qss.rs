@@ -1109,6 +1109,7 @@ pub fn solve_stint(
             // single-lap entry, which starts from a rested pack.
             pack_seed = Some(PackState {
                 v_rc_v: 0.0,
+                v_rc2_v: 0.0,
                 current_a: 0.0,
                 ..p
             });

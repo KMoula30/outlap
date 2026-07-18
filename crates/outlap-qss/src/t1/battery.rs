@@ -8,9 +8,12 @@
 //! temperatures at the same lap-loop hook (wired in PR8):
 //!
 //! * **SoC** — Coulomb-counted, `ΔSoC = −I_pack·dt / (3600·Q_pack)`.
-//! * **`V_RC`** — the single-RC overpotential, advanced by the *exact* exponential integrator for a
+//! * **`V_RC`** — the RC overpotential(s), advanced by the *exact* exponential integrator for a
 //!   current held constant over the segment (so a constant-current pulse reproduces the closed-form
-//!   Thevenin response to machine precision — the §13 battery validation row).
+//!   Thevenin response to machine precision — the §13 battery validation row). A pack may declare
+//!   `ecm.rc_pairs: 2` (`battery/1.2`) to carry a second, slower branch (`r2`/`tau2` sidecar
+//!   columns) — the two overpotentials add in series (`V_RC = V_RC1 + V_RC2`); a `1`-pair pack
+//!   leaves the second branch inert and is byte-identical to the single-RC response.
 //! * **`T_batt`** — a lumped thermal node (`C = mass·c_p`) heated by the I²R / RC dissipation and the
 //!   entropic `I·T·dU/dT` term, cooled to the coolant through `R_th`; semi-implicit Euler on the
 //!   decay term (A-stable, matching §11's slow-state integrator).
@@ -48,6 +51,9 @@ const COL_R0: &str = "r0_ohm";
 const COL_R1: &str = "r1_ohm";
 const COL_TAU1: &str = "tau1_s";
 const COL_DUDT: &str = "dudt_v_per_k";
+/// The optional 2nd-RC-pair columns (`battery/1.2`), present only when `ecm.rc_pairs == 2`.
+const COL_R2: &str = "r2_ohm";
+const COL_TAU2: &str = "tau2_s";
 
 /// An assembled Thevenin battery pack: the ECM parameter maps, the pack scaling, the power/voltage
 /// limits, and the lumped thermal parameters. Cold-path (allocations allowed); the runtime state is
@@ -59,6 +65,11 @@ pub struct Pack {
     r0: GriddedMapN<f64>,
     r1: GriddedMapN<f64>,
     tau1: GriddedMapN<f64>,
+    /// Optional 2nd RC pair (`ecm.rc_pairs == 2`, `battery/1.2`) — a slower relaxation branch. Both
+    /// `r2` and `tau2` are `Some` together or both `None` (a 1-pair pack); the second overpotential
+    /// then stays pinned at zero and the response is byte-identical to the single-RC pack.
+    r2: Option<GriddedMapN<f64>>,
+    tau2: Option<GriddedMapN<f64>>,
     dudt: GriddedMapN<f64>,
     /// Voltage scale cell→pack (`ns`, or 1 for a pack-level table).
     scale_v: f64,
@@ -96,8 +107,11 @@ pub struct Pack {
 pub struct PackState {
     /// State of charge, 0..1.
     pub soc: f64,
-    /// Pack-level RC overpotential `V_RC`, V.
+    /// Pack-level RC overpotential of the first (faster) branch, V.
     pub v_rc_v: f64,
+    /// Pack-level RC overpotential of the optional second (slower) branch, V — always `0` on a
+    /// single-RC pack (`ecm.rc_pairs == 1`), so a 1-pair pack is byte-identical to before.
+    pub v_rc2_v: f64,
     /// Lumped pack temperature, K.
     pub temp_k: f64,
     /// Last solved terminal current, A (discharge positive).
@@ -139,9 +153,10 @@ impl Pack {
         table: &GriddedTable<f64>,
         initial_soc: Option<f64>,
     ) -> Result<(Self, PackState), T1Error> {
-        if doc.ecm.rc_pairs != 1 {
+        if !matches!(doc.ecm.rc_pairs, 1 | 2) {
             return Err(T1Error::Battery(format!(
-                "only 1 RC pair is supported (the ECM tables carry r1/tau1); got rc_pairs = {}",
+                "only 1 or 2 RC pairs are supported (a 2nd pair carries the `r2_ohm`/`tau2_s` \
+                 columns); got rc_pairs = {}",
                 doc.ecm.rc_pairs
             )));
         }
@@ -181,11 +196,20 @@ impl Pack {
             );
         }
 
+        // The 2nd RC pair columns are decoded only when declared; a `battery/1.1` sidecar without
+        // them stays valid (the extra columns are additive, name-selected — never required).
+        let (r2, tau2) = if doc.ecm.rc_pairs == 2 {
+            (Some(m(COL_R2)?), Some(m(COL_TAU2)?))
+        } else {
+            (None, None)
+        };
         let pack = Self {
             ocv: m(COL_OCV)?,
             r0: m(COL_R0)?,
             r1: m(COL_R1)?,
             tau1: m(COL_TAU1)?,
+            r2,
+            tau2,
             dudt: m(COL_DUDT)?,
             scale_v,
             scale_r,
@@ -207,6 +231,7 @@ impl Pack {
         let state = PackState {
             soc: soc0.clamp(0.0, 1.0),
             v_rc_v: 0.0,
+            v_rc2_v: 0.0,
             temp_k: pack.t_coolant_k,
             current_a: 0.0,
         };
@@ -224,7 +249,7 @@ impl Pack {
     #[must_use]
     pub fn terminal_voltage_v(&self, st: &PackState) -> f64 {
         let r0 = self.r0_pack(st);
-        self.open_circuit_voltage_v(st) - st.current_a * r0 - st.v_rc_v
+        self.open_circuit_voltage_v(st) - st.current_a * r0 - st.v_rc_v - st.v_rc2_v
     }
 
     /// The instantaneous discharge power ceiling at the current SoC, W (0 below the SoC window). The
@@ -309,7 +334,7 @@ impl Pack {
     /// [`Self::regen_power_limit_w`] ceiling 3.
     #[must_use]
     pub fn voltage_limited_charge_power_w(&self, st: &PackState) -> f64 {
-        let emf = self.open_circuit_voltage_v(st) - st.v_rc_v;
+        let emf = self.open_circuit_voltage_v(st) - st.v_rc_v - st.v_rc2_v;
         let headroom = self.v_max_pack_v - emf;
         if headroom <= 0.0 {
             return 0.0;
@@ -356,6 +381,13 @@ impl Pack {
         // Exact exponential RC advance for a current constant over the segment.
         let decay = (-dt_s / tau).exp();
         st.v_rc_v = st.v_rc_v * decay + i_pack_a * r1 * (1.0 - decay);
+        // Optional 2nd RC branch (byte-identical no-op when the pack declares only 1 pair).
+        if let (Some(r2_map), Some(tau2_map)) = (self.r2.as_ref(), self.tau2.as_ref()) {
+            let r2 = (self.scale_r * r2_map.eval(&[st.soc, st.temp_k - CELSIUS_K])).max(0.0);
+            let tau2 = tau2_map.eval(&[st.soc, st.temp_k - CELSIUS_K]).max(1.0e-6);
+            let decay2 = (-dt_s / tau2).exp();
+            st.v_rc2_v = st.v_rc2_v * decay2 + i_pack_a * r2 * (1.0 - decay2);
+        }
         // Coulomb counting: discharge lowers SoC.
         st.soc = (st.soc - i_pack_a * dt_s / self.q_pack_coulomb).clamp(0.0, 1.0);
         // Lumped-node temperature: I²R0 + RC dissipation + entropic, cooled through R_th.
@@ -380,8 +412,12 @@ impl Pack {
         let r0 = self.r0_pack(st);
         let r1 = self.r1_pack(st);
         let dudt = self.scale_v * self.dudt.eval(&[st.soc, st.temp_k - CELSIUS_K]);
-        // Irreversible ohmic (series R0 + the RC branch v²/R1) always heats; entropic can cool.
-        let q_irrev = i_pack_a * i_pack_a * r0 + st.v_rc_v * st.v_rc_v / r1.max(R0_FLOOR);
+        // Irreversible ohmic (series R0 + each RC branch's v²/R) always heats; entropic can cool.
+        let mut q_irrev = i_pack_a * i_pack_a * r0 + st.v_rc_v * st.v_rc_v / r1.max(R0_FLOOR);
+        if let Some(r2_map) = self.r2.as_ref() {
+            let r2 = (self.scale_r * r2_map.eval(&[st.soc, st.temp_k - CELSIUS_K])).max(0.0);
+            q_irrev += st.v_rc2_v * st.v_rc2_v / r2.max(R0_FLOOR);
+        }
         let q_entropic = i_pack_a * st.temp_k * dudt;
         let q_gen = q_irrev + q_entropic;
         let a = dt_s / self.c_th_j_per_k;
@@ -407,7 +443,7 @@ impl Pack {
             return 0.0;
         }
         let r0 = self.r0_pack(st);
-        let emf = self.open_circuit_voltage_v(st) - st.v_rc_v; // the driving EMF behind R0
+        let emf = self.open_circuit_voltage_v(st) - st.v_rc_v - st.v_rc2_v; // the driving EMF behind R0
                                                                // R0·I² − emf·I + P = 0 ⇒ I = [emf − sqrt(emf² − 4·R0·P)] / (2·R0).
         let disc = emf * emf - 4.0 * r0 * power_w;
         if disc <= 0.0 {

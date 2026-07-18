@@ -7,8 +7,11 @@
 # electrical caps away from the window edges — the regulation binds, not the pack.
 # coolant_temp_c is the car's radiator-loop hot side (car data, not weather): 45 °C, where
 # the kinetic charge-acceptance derate saturates at 1.0.
+# The ECM is a 2-RC-pair (battery/1.2) Thevenin fit — a fast charge-transfer branch (tau1) plus
+# a slow diffusion branch (tau2), the multi-timescale structure of the model3_awd 800 V-class pack
+# study this ES is scaled down from; both branches are synthetic (firewall) and approximate.
 # Regenerate the tables with: python python/tools/gen_f1_es_pack.py
-schema: battery/1.1
+schema: battery/1.2
 model: rc_pairs
 topology:
   ns: 180
@@ -18,7 +21,7 @@ capacity:
   e_pack_wh: 1587.3016
 soc_window: [0.2, 0.9]
 ecm:
-  rc_pairs: 1
+  rc_pairs: 2
   axes:
     soc: [0.00, 0.20, 0.40, 0.60, 0.80, 1.00]
     temp_c: [20.0, 45.0, 60.0]

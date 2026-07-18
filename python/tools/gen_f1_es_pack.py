@@ -86,7 +86,13 @@ def _emit_f1_tables(path: Path) -> None:
     r1 = 8.0e-5 + 4.0e-5 * (1.0 - soc)
     tau1 = np.full(soc.size, 8.0)
     dudt = np.full(soc.size, -5.0e-5)
-    _write_tables(path, soc, temp, ocv, r0, r1, tau1, dudt)
+    # 2nd RC pair (battery/1.2) — a second, SLOWER relaxation branch. A real multi-timescale
+    # Thevenin fit (as in the model3_awd 800 V-class study this ERS is scaled from) separates a
+    # fast charge-transfer arc from a slow diffusion arc; here the slow branch is ~40 % of R1 at
+    # ~5.5× the time constant. Synthetic and approximate — the regulation caps still bind the pack.
+    r2 = 0.4 * r1
+    tau2 = np.full(soc.size, 45.0)
+    _write_tables(path, soc, temp, ocv, r0, r1, tau1, dudt, r2=r2, tau2=tau2)
 
 
 def _emit_f1_yaml(path: Path) -> None:
@@ -100,8 +106,11 @@ def _emit_f1_yaml(path: Path) -> None:
 # electrical caps away from the window edges — the regulation binds, not the pack.
 # coolant_temp_c is the car's radiator-loop hot side (car data, not weather): 45 °C, where
 # the kinetic charge-acceptance derate saturates at 1.0.
+# The ECM is a 2-RC-pair (battery/1.2) Thevenin fit — a fast charge-transfer branch (tau1) plus
+# a slow diffusion branch (tau2), the multi-timescale structure of the model3_awd 800 V-class pack
+# study this ES is scaled down from; both branches are synthetic (firewall) and approximate.
 # Regenerate the tables with: python python/tools/gen_f1_es_pack.py
-schema: battery/1.1
+schema: battery/1.2
 model: rc_pairs
 topology:
   ns: {F1_NS}
@@ -111,7 +120,7 @@ capacity:
   e_pack_wh: {F1_E_PACK_WH:.4f}
 soc_window: [0.2, 0.9]
 ecm:
-  rc_pairs: 1
+  rc_pairs: 2
   axes:
     soc: {_fmt_list(F1_SOC, 2)}
     temp_c: {_fmt_list(F1_TEMP_C, 1)}
@@ -234,18 +243,23 @@ def _write_tables(
     r1: np.ndarray,
     tau1: np.ndarray,
     dudt: np.ndarray,
+    r2: np.ndarray | None = None,
+    tau2: np.ndarray | None = None,
 ) -> None:
-    table = pa.table(
-        {
-            "soc": soc.astype(np.float64),
-            "temp_c": temp.astype(np.float64),
-            "ocv_v": ocv.astype(np.float64),
-            "r0_ohm": r0.astype(np.float64),
-            "r1_ohm": r1.astype(np.float64),
-            "tau1_s": tau1.astype(np.float64),
-            "dudt_v_per_k": dudt.astype(np.float64),
-        }
-    )
+    columns = {
+        "soc": soc.astype(np.float64),
+        "temp_c": temp.astype(np.float64),
+        "ocv_v": ocv.astype(np.float64),
+        "r0_ohm": r0.astype(np.float64),
+        "r1_ohm": r1.astype(np.float64),
+        "tau1_s": tau1.astype(np.float64),
+        "dudt_v_per_k": dudt.astype(np.float64),
+    }
+    # The 2nd RC pair columns (battery/1.2) are additive: present only for a 2-pair pack.
+    if r2 is not None and tau2 is not None:
+        columns["r2_ohm"] = r2.astype(np.float64)
+        columns["tau2_s"] = tau2.astype(np.float64)
+    table = pa.table(columns)
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, path)
     print(f"wrote {path} ({path.stat().st_size} bytes)")
