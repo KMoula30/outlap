@@ -291,6 +291,19 @@ impl PtUnit {
         best
     }
 
+    /// The machine's representative drive-quadrant efficiency at vehicle speed `v`, `0..1` — the
+    /// installed `.ptm` efficiency map sampled at the best-gear peak-torque operating point. `None`
+    /// for an ICE (fuel, not charge), a unit with no efficiency map, or a speed with no on-envelope
+    /// gear. Zero-allocation.
+    fn machine_efficiency(&self, v: f64) -> Option<f64> {
+        if self.kind == PtmKind::Ice {
+            return None;
+        }
+        let eff = self.eff_map.as_ref()?;
+        let (rpm, torque) = self.source_op(v, self.max_wheel_force(v))?;
+        Some(self.eval_map(eff, rpm, torque, None).clamp(1e-3, 1.0))
+    }
+
     /// Evaluate an installed value map at `(rpm, torque)` and, for a 3-D Vdc-stacked map, `vdc`
     /// (falling back to the reference Vdc when the caller passes `None`). Zero-allocation.
     fn eval_map(&self, map: &GriddedMapN<f64>, rpm: f64, torque: f64, vdc: Option<f64>) -> f64 {
@@ -598,6 +611,34 @@ impl T1Powertrain {
             axle[1] += force * rw / tw;
         }
         axle
+    }
+
+    /// The representative machine efficiency `[front, rear]` at vehicle speed `v` — the mean over the
+    /// machines driving each axle, sampled from their `.ptm` efficiency maps at the peak-torque
+    /// operating point (§8.4). `None` for an axle with no efficiency-mapped machine, so the caller
+    /// keeps its documented constant fallback (the T2 series-regen blend and electric traction draw
+    /// then run a speed-varying efficiency instead of the flat proxy). Zero-allocation.
+    #[must_use]
+    pub fn machine_efficiency_by_axle(&self, v: f64) -> [Option<f64>; 2] {
+        let mut sum = [0.0_f64, 0.0];
+        let mut cnt = [0_u32, 0];
+        for u in &self.units {
+            let Some(eta) = u.machine_efficiency(v) else {
+                continue;
+            };
+            if u.driven[0] || u.driven[1] {
+                sum[0] += eta;
+                cnt[0] += 1;
+            }
+            if u.driven[2] || u.driven[3] {
+                sum[1] += eta;
+                cnt[1] += 1;
+            }
+        }
+        [
+            (cnt[0] > 0).then(|| sum[0] / f64::from(cnt[0])),
+            (cnt[1] > 0).then(|| sum[1] / f64::from(cnt[1])),
+        ]
     }
 
     /// The primary driven axle's differential + geometry for the trim's diff residual: the first

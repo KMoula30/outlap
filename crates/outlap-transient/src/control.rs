@@ -190,6 +190,13 @@ pub trait SlowStack {
     fn on_slow_step(&mut self, dt_s: f64, net_charge_power_w: f64);
     /// The current battery regen (charge) power ceiling, W (0 at full charge / no battery).
     fn regen_power_limit_w(&self) -> f64;
+    /// The current battery **discharge** (draw) power ceiling, W — the mirror of
+    /// [`Self::regen_power_limit_w`], refreshed on the same slow clock and consumed by the ERS
+    /// deploy realization (`0` below the SoC window floor, so a SoC-starved MGU-K stops deploying).
+    /// Defaults to "no cap" so the energy-double test mock and any pack-free stack keep compiling.
+    fn discharge_power_limit_w(&self) -> f64 {
+        f64::INFINITY
+    }
     /// The current pack state of charge, 0..1.
     fn soc(&self) -> f64;
     /// The current pack temperature, °C.

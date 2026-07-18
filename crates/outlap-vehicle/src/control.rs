@@ -241,10 +241,13 @@ pub struct AxleRegen<T> {
     /// Peak regen **braking wheel force** this axle's machine can produce vs vehicle speed, N (≥ 0)
     /// — `outlap_qss::T1Vehicle::max_regen_force_by_axle` sampled into the shared monotone cubic.
     pub force_max: MonotoneCubic<T>,
-    /// Mechanical→electrical recovery efficiency (machine + inverter + driveline), `0..1`. A
-    /// documented constant proxy: the mapped `.ptm` efficiency drives QSS energy accounting, and the
-    /// wasm-clean block must never touch a `.ptm` table.
-    pub efficiency: T,
+    /// Machine recovery/motoring efficiency vs vehicle speed, `0..1` — the machine's `.ptm`
+    /// efficiency map sampled into the shared monotone cubic at assembly (M6/PR4), falling back to
+    /// the documented constant proxy where the machine carries no efficiency map. Applied to both the
+    /// regen recovery ([`Powertrain::blend_regen`]) and the electric traction draw
+    /// ([`Powertrain::traction_draw`]) so both tiers share one speed-varying efficiency seam; the
+    /// wasm-clean block still never touches a `.ptm` table (it evaluates this pre-sampled curve).
+    pub efficiency: MonotoneCubic<T>,
     /// Blend authority: the largest fraction of *this axle's* commanded brake torque the machine is
     /// allowed to take (`brakes.regen_blend.max_regen_frac`). `1` ⇒ take everything the envelope and
     /// the pack allow; the calipers always supply whatever is left.
@@ -443,12 +446,13 @@ impl<T: Float> Powertrain<T> {
         let mut elec = zero;
         for (a, machine) in machines.iter().enumerate() {
             let Some(m) = machine else { continue };
-            if m.efficiency <= zero {
+            let eta = m.efficiency.eval(vx);
+            if eta <= zero {
                 continue;
             }
             let axle_weight = self.drive_weight[2 * a] + self.drive_weight[2 * a + 1];
             let mech = (f_avail * axle_weight * vx).max(zero); // mechanical drive power on this axle
-            elec = elec + mech / m.efficiency;
+            elec = elec + mech / eta;
         }
         elec
     }
@@ -496,7 +500,7 @@ impl<T: Float> Powertrain<T> {
         let mut elec = [zero; 2];
         for a in 0..2 {
             if let Some(m) = machines[a] {
-                elec[a] = mech[a] * m.efficiency;
+                elec[a] = mech[a] * m.efficiency.eval(vx);
             }
         }
         let demand_w = elec[0] + elec[1];
@@ -896,7 +900,7 @@ mod tests {
                 front: None,
                 rear: Some(AxleRegen {
                     force_max: MonotoneCubic::new(vec![0.0, 100.0], vec![1.0e9, 1.0e9]).unwrap(),
-                    efficiency: 0.9,
+                    efficiency: MonotoneCubic::new(vec![0.0, 100.0], vec![0.9, 0.9]).unwrap(),
                     authority: 1.0,
                 }),
             },
@@ -956,11 +960,16 @@ mod regen_tests {
     const R: f64 = 0.33; // rolling radius, m
     const ETA: f64 = 0.9; // machine + inverter recovery
 
+    /// A flat efficiency curve at `eta` for every speed (the pre-PR4 constant-proxy behaviour).
+    fn const_eff(eta: f64) -> MonotoneCubic<f64> {
+        MonotoneCubic::new(vec![0.0, 200.0], vec![eta, eta]).unwrap()
+    }
+
     /// A machine whose braking envelope is a flat `force_max` newtons at every speed.
     fn machine(force_max: f64, authority: f64) -> AxleRegen<f64> {
         AxleRegen {
             force_max: MonotoneCubic::new(vec![0.0, 200.0], vec![force_max, force_max]).unwrap(),
-            efficiency: ETA,
+            efficiency: const_eff(ETA),
             authority,
         }
     }
