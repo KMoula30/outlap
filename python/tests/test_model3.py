@@ -98,7 +98,9 @@ def test_slow_state_coupling_live(nuerburgring_lap: xr.Dataset) -> None:
     # It is NOT the pre-PR3 discharge-only monotone trace.
     assert dsoc.min() < 0.0, "SoC falls under traction draw"
     assert dsoc.max() > 0.0, "SoC rises under braking — the machine regenerates"
-    assert soc[-1] < soc[0], "a full-throttle lap still draws net charge (consumption > regen)"
+    assert soc[-1] < soc[0], (
+        "a full-throttle lap still draws net charge (consumption > regen)"
+    )
     assert 0.0 < soc[-1] < 0.98, f"end SoC {soc[-1]:.3f}"
     temp = ds.machine_temp_c.to_numpy()
     assert temp.max() > temp[0] + 5.0, "the winding must heat under traction loss"
