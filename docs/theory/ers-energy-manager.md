@@ -306,7 +306,16 @@ Recorded per §15; all are event config or stage-2 territory:
   input on both tiers' entry points, and the manager **executes** the deploy/regen fraction and the
   override flag; the `lift_point` → driver-speed-loop hook and the `shift_map_id` → gearbox-FSM
   selection are accepted-but-inert (they touch the closed-loop driver and a new vehicle-schema
-  surface — deferred to keep this PR's green state, resumable without touching the plumbing).
+  surface — deferred to keep this PR's green state, resumable without touching the plumbing);
+- the `u(s)` per-station **alignment across tiers**: the schedule is indexed by the path segment at
+  T0/T1 and by arc-length breakpoint (`s` wrapped into one lap) at T2 — consistent within a tier, but
+  a schedule authored for one tier is not station-for-station identical on the other. A formal
+  `s`-anchored index (and the `u(s)` file format itself) is stage-2 (D-M6-9); v1 exposes the schedule
+  as an API input for the tier being run;
+- the FIA C5.2.9 independent regulatory swing band at T2: the transient tier bounds the on-track SoC
+  swing with the physical usable window only, which coincides with the 4 MJ reg for the shipped f1
+  pack (window == reg); a pack physically larger than the reg would need the QSS-style running-band
+  clip at T2 too (a recorded follow-up — no committed vehicle triggers it).
 
 ## Provenance
 
