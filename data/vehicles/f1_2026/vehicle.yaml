@@ -14,12 +14,15 @@ aero:
   map: aero/f1_2026.parquet
   axes: [ride_height_f_mm, ride_height_r_mm, yaw_deg, drs_flag]
   # SYNTHETIC constant-coefficient fallback (Locked Decision #15) — used by the T0 point-mass tier
-  # until the ride-height aero map is consumed (T1). Physically-plausible high-downforce values:
-  # total CzA 4.5 m² gives ~1.7x car-weight downforce at 250 km/h; L/D ~3.6. NOT measured data.
+  # until the ride-height aero map is consumed (T1). CALIBRATED to 2026 Barcelona GP telemetry
+  # (FastF1, HAM fastest lap + 143 pooled corner apexes): total CzA 5.5 m² reproduces the measured
+  # lateral-g rise with speed (~2.1 g @ 99 km/h → ~4.5 g @ 229 km/h; the downforce signature — a
+  # 3-param load-sensitive fit drove PDY2→0, i.e. constant-μ + downforce fits the data);
+  # ~2.1x car-weight downforce at 250 km/h. NOT measured aero-map data.
   constant:
     cx_a_m2: 1.25
-    cz_front_a_m2: 1.9
-    cz_rear_a_m2: 2.6
+    cz_front_a_m2: 2.323
+    cz_rear_a_m2: 3.178
 suspension:
   model: lumped_kc
   front:
