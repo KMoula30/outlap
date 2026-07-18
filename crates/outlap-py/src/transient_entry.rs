@@ -24,6 +24,12 @@ impl outlap_transient::SlowStack for PackSlowStack {
         let _ = self
             .pack
             .step_power(&mut self.state, -net_charge_power_w, dt_s);
+        // Belt-and-suspenders clamp to the usable window (the same clamp the QSS march applies): the
+        // pack's own regen/discharge ceilings go to zero at the window edges, but the slow clock is
+        // decimated, so a step that begins just inside an edge can overshoot it by one slow window.
+        // Clamping here bounds the on-track swing to the window exactly, matching the QSS tier.
+        let [lo, hi] = self.pack.soc_window();
+        self.state.soc = self.state.soc.clamp(lo, hi);
     }
     fn regen_power_limit_w(&self) -> f64 {
         self.pack.regen_power_limit_w(&self.state)
