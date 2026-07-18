@@ -20,6 +20,36 @@ pub struct Drivetrain {
     /// Static splits and torque-vectoring control (defaulted).
     #[serde(default)]
     pub control: DriveControl,
+    /// Optional named up-shift maps selectable per station by a `u(s)` `shift_map_id` schedule
+    /// (§8.3, D-M6-9). The DERIVED schedule (from the gear force curves) is the implicit default
+    /// map (id 0); a `shift_maps` entry with `name == "default"` overrides that default. Absent ⇒
+    /// only the derived default exists ⇒ byte-identical to pre-1.8.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shift_maps: Vec<ShiftMap>,
+}
+
+/// A named up-shift map: either explicit per-gear crossover speeds or a scalar factor on the
+/// derived schedule (D-M6-9). Selected per station by a `u(s)` `shift_map_id` schedule.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ShiftMap {
+    /// Map name — must be unique across `shift_maps`. `"default"` overrides the derived default.
+    pub name: String,
+    /// How this map defines its up-shift speeds.
+    #[serde(flatten)]
+    pub kind: ShiftMapKind,
+}
+
+/// The two ways a [`ShiftMap`] can define its up-shift crossover speeds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShiftMapKind {
+    /// Explicit per-gear up-shift crossover speeds, m/s (length must equal the up-shift count, i.e.
+    /// one fewer than the gear count). Index 0 = the 1→2 up-shift speed.
+    UpshiftSpeedsMps(Vec<f64>),
+    /// A single positive multiplier applied to every derived up-shift speed (`> 1` shifts later,
+    /// `< 1` shifts earlier). A factor of exactly `1.0` reproduces the derived default.
+    Factor(f64),
 }
 
 /// A single torque source and the ordered coupler path from it to the wheels it drives.

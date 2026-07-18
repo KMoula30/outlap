@@ -108,7 +108,9 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// Per-document history — `vehicle`: 1.2 suspension `static_ride_height_m` (§7.4), 1.5 optional
 /// `driver` section (§7.7), 1.6 rule-based control layer (torque-vectoring `max_yaw_moment_nm`
 /// cap §8.0 + brakes `regen_blend` §7.6), 1.7 optional ERS
-/// `elec_mech_factor` + `recovery` recharge-phase fields (§8.3, M6/PR1); `ptm`: 1.1 optional Vdc
+/// `elec_mech_factor` + `recovery` recharge-phase fields (§8.3, M6/PR1), 1.8 optional `fuel`
+/// block (§8.1 mass/CG/flow-limit, M6/PR5) + drivetrain `shift_maps` (§8.3 named up-shift maps,
+/// M6/PR5); `ptm`: 1.1 optional Vdc
 /// axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block; `battery`: 1.1
 /// `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` + `r2_ohm`/`tau2_s`
 /// sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag.
@@ -130,7 +132,7 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// rulebook consumes it — any further semantics change is MAJOR.
 pub fn current_minor(name: &str) -> u16 {
     match name {
-        schema_name::VEHICLE => 7,
+        schema_name::VEHICLE => 8,
         schema_name::PTM | schema_name::BATTERY => 2,
         schema_name::TYR | schema_name::SIM => 1,
         // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.

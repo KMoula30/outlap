@@ -245,6 +245,57 @@ pub fn check_vehicle(
         }
     }
 
+    // Fuel (optional; range-check the FULL block — the consumer lands the checks, M6/PR5, §8.1).
+    if let Some(fuel) = &spec.fuel {
+        check_fuel(fuel, &s, sources)?;
+    }
+
+    Ok(())
+}
+
+/// Range-check the fuel block: masses non-negative, `initial_kg ≤ tank_kg`, LHV positive, and the
+/// flow-limit caps positive (§8.1, D-M6-4/5).
+fn check_fuel(fuel: &crate::vehicle::Fuel, s: &Spans, sources: &Sources) -> Result<()> {
+    non_negative(fuel.initial_kg, "fuel.initial_kg", "/fuel/initial_kg", s, sources)?;
+    positive(fuel.tank_kg, "fuel.tank_kg", "/fuel/tank_kg", s, sources)?;
+    if fuel.initial_kg > fuel.tank_kg {
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/fuel/initial_kg"),
+            format!(
+                "`fuel.initial_kg` ({}) must not exceed `fuel.tank_kg` ({})",
+                fuel.initial_kg, fuel.tank_kg
+            ),
+            None,
+        ));
+    }
+    positive(fuel.lhv_j_per_kg, "fuel.lhv_j_per_kg", "/fuel/lhv_j_per_kg", s, sources)?;
+    if let Some(fl) = &fuel.flow_limit {
+        positive(fl.mj_per_h, "fuel.flow_limit.mj_per_h", "/fuel/flow_limit/mj_per_h", s, sources)?;
+        if let Some(line) = &fl.rpm_line {
+            positive(
+                line.below_rpm,
+                "fuel.flow_limit.rpm_line.below_rpm",
+                "/fuel/flow_limit/rpm_line/below_rpm",
+                s,
+                sources,
+            )?;
+            positive(
+                line.slope_mj_per_h_per_rpm,
+                "fuel.flow_limit.rpm_line.slope_mj_per_h_per_rpm",
+                "/fuel/flow_limit/rpm_line/slope_mj_per_h_per_rpm",
+                s,
+                sources,
+            )?;
+            non_negative(
+                line.intercept_mj_per_h,
+                "fuel.flow_limit.rpm_line.intercept_mj_per_h",
+                "/fuel/flow_limit/rpm_line/intercept_mj_per_h",
+                s,
+                sources,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -363,6 +414,93 @@ fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
             s,
             sources,
         )?;
+    }
+    check_shift_maps(spec, s, sources)?;
+    Ok(())
+}
+
+/// Range-check the named `shift_maps` (§8.3, D-M6-9): names unique (mirror [`check_emotor`]),
+/// `factor` positive+finite, and explicit up-shift speeds strictly increasing, positive, finite,
+/// and one fewer than the gear count of the up-shift unit (the runtime picks the unit with the
+/// most gears — same rule as the derived default). Absent ⇒ nothing to check (derived default only).
+fn check_shift_maps(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> {
+    use crate::vehicle::{Coupler, ShiftMapKind};
+    if spec.drivetrain.shift_maps.is_empty() {
+        return Ok(());
+    }
+    // The gear count the up-shift schedule addresses = the max gearbox ratio count across units.
+    let max_gears = spec
+        .drivetrain
+        .units
+        .iter()
+        .flat_map(|u| u.path.iter())
+        .filter_map(|c| match c {
+            Coupler::Gearbox(g) => Some(g.ratios.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (i, map) in spec.drivetrain.shift_maps.iter().enumerate() {
+        let base = format!("/drivetrain/shift_maps/{i}");
+        if !names.insert(map.name.as_str()) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(&format!("{base}/name")),
+                format!("duplicate shift-map name `{}`", map.name),
+                Some("each `shift_maps` entry needs a unique `name`".into()),
+            ));
+        }
+        match &map.kind {
+            ShiftMapKind::Factor(f) => {
+                if !(f.is_finite() && *f > 0.0) {
+                    return Err(SchemaError::semantic(
+                        sources,
+                        s.at(&format!("{base}/factor")),
+                        format!("shift-map `{}` `factor` must be a finite, positive multiplier", map.name),
+                        None,
+                    ));
+                }
+            }
+            ShiftMapKind::UpshiftSpeedsMps(speeds) => {
+                if max_gears >= 2 && speeds.len() != max_gears - 1 {
+                    return Err(SchemaError::semantic(
+                        sources,
+                        s.at(&format!("{base}/upshift_speeds_mps")),
+                        format!(
+                            "shift-map `{}` has {} up-shift speeds but the gearbox needs {} (gears − 1)",
+                            map.name,
+                            speeds.len(),
+                            max_gears - 1
+                        ),
+                        None,
+                    ));
+                }
+                let mut prev = f64::NEG_INFINITY;
+                for (j, v) in speeds.iter().enumerate() {
+                    if !(v.is_finite() && *v > 0.0) {
+                        return Err(SchemaError::semantic(
+                            sources,
+                            s.at(&format!("{base}/upshift_speeds_mps/{j}")),
+                            format!("shift-map `{}` up-shift speed {j} must be finite and positive", map.name),
+                            None,
+                        ));
+                    }
+                    if *v <= prev {
+                        return Err(SchemaError::semantic(
+                            sources,
+                            s.at(&format!("{base}/upshift_speeds_mps/{j}")),
+                            format!(
+                                "shift-map `{}` up-shift speeds must strictly increase (speed {j} = {v} ≤ previous {prev})",
+                                map.name
+                            ),
+                            None,
+                        ));
+                    }
+                    prev = *v;
+                }
+            }
+        }
     }
     Ok(())
 }

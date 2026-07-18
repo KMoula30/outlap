@@ -9,6 +9,7 @@ mod chassis;
 mod driver;
 mod drivetrain;
 mod ers;
+mod fuel;
 mod suspension;
 mod tires;
 
@@ -18,9 +19,10 @@ pub use brakes::{AxlePair, BrakeDisc, Brakes, RegenBlend};
 pub use chassis::Chassis;
 pub use driver::Driver;
 pub use drivetrain::{
-    Coupler, Diff, DiffKind, DriveControl, DriveUnit, Drivetrain, Efficiency, Gearbox, Split,
-    TorqueVectoring, Wheel,
+    Coupler, Diff, DiffKind, DriveControl, DriveUnit, Drivetrain, Efficiency, Gearbox, ShiftMap,
+    ShiftMapKind, Split, TorqueVectoring, Wheel,
 };
+pub use fuel::{default_lhv_j_per_kg, Fuel, FuelFlowLimit, RpmFlowLine};
 pub use ers::{Activation, Deployment, EnergyStore, Ers, OverrideMode, Recovery, SpeedTaper};
 pub use suspension::{AxleKc, Suspension, SuspensionModel};
 pub use tires::Tires;
@@ -65,6 +67,10 @@ pub struct Vehicle {
     pub battery: Option<Battery>,
     /// Brakes (balance, discs, ABS, regen blending).
     pub brakes: Brakes,
+    /// On-board fuel (mass, CG offset, flow limit), if the car burns fuel. Absent ⇒ mass is the
+    /// all-inclusive `chassis.mass_kg` and results reproduce v0.3.0 byte-identically (§8.1, D-M6-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuel: Option<Fuel>,
     /// Ideal-driver preview/tracking gains for the transient tiers (defaulted; MacAdam preview + PI
     /// speed tracking, §7.7). Absent ⇒ literature defaults, surfaced as estimated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
