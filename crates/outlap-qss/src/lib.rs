@@ -49,8 +49,9 @@ pub use ers::ErsCoupling;
 pub use margin::corner_scaled_targets;
 pub use path::T0Path;
 pub use qss::{
-    solve_t0, solve_t1, tier_not_implemented, Couplings, ErsSlowLog, LapRequest, MarchConvergence,
-    QssError, QssLap, SetupLog, SlowCoupling, SlowLog, WheelLog, WHEEL_ORDER,
+    solve_stint, solve_t0, solve_t1, tier_not_implemented, Couplings, ErsSlowLog, LapRequest,
+    MarchConvergence, QssError, QssLap, QssStintResult, SetupLog, SlowCoupling, SlowLog,
+    SlowSnapshot, StintElectro, StintLap, StintPlan, StintSeeds, WheelLog, WHEEL_ORDER,
 };
 pub use result::{LapResult, LineDescriptor, T0Workspace};
 pub use solver::{
@@ -67,7 +68,7 @@ pub use tire::{TireSlowLog, TireThermalMarch};
 pub use vehicle::{T0Options, T0Vehicle};
 
 // Re-export the tyre ring state so callers can name the terminal state a QSS stint carries lap-to-lap
-// ([`QssLap::tire_terminal`]) without depending on `outlap-tire` directly.
+// ([`SlowSnapshot::tire`]) without depending on `outlap-tire` directly.
 pub use outlap_tire::TireThermalState;
 
 /// Default arc-length step for the T0 passes, metres (§11.2). Overridable via [`T0Options::ds_m`];

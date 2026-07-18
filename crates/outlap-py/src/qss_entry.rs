@@ -196,40 +196,57 @@ impl Lap {
     }
 }
 
-/// Solve a QSS lap of `track` for the vehicle in `vehicle_dir` at the tier `sim.tier` selects.
-///
-/// `vehicle_dir` must hold a `vehicle.yaml` (plus its referenced `.ptm`/`.tyr` files); optional
-/// `conditions.yaml` / `sim.yaml` next to it override the defaults (a *malformed* one is an error —
-/// never silently ignored). `tier=` (`"t0"`/`"t1"`) and `sim=` (a nested override dict, e.g.
-/// `{"flat_track": True, "envelope": {"v_points": 24}}`) override the file/defaults; `tier=` wins.
-///
-/// `t0` runs the point-mass velocity profile on the corrected g-g-g-v envelope; `t1` adds a
-/// per-station re-trim for per-wheel loads/slips/forces + setup metrics. `t2` is the transient tier
-/// and is time-indexed, so it has its own entry point ([`solve_transient_lap`]); `t3` raises (M6).
-/// When `track` is a generated racing line, pass `raceline_ds_m` for honest provenance.
-///
-/// What-if experiments (Decision #35): `overrides` is a `{dotted.path: value}` vehicle patch;
-/// `conditions` is a nested dict deep-merged onto the session conditions.
-///
-/// The call holds the GIL for its duration (envelope generation is a seconds-scale cold step in a
-/// debug build); releasing it is deferred to the batch/sweep API milestone.
-#[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = false))]
+/// Which QSS entry point is assembling — selects the transient-redirect message when the resolved
+/// tier is `t2` (the single lap and the stint point at different transient entry points).
+#[derive(Clone, Copy)]
+pub(crate) enum QssEntryKind {
+    Lap,
+    Stint,
+}
+
+/// The assembled QSS artifacts shared by [`solve_lap`] and [`solve_stint`] — the resolved tier +
+/// vehicles + envelope + path, the optional electro stack / energy manager / tyre march, and the
+/// recorded numerics. Built once by [`prepare_qss`] (the T2 `prepare_transient` mirror), so the
+/// ~80-line lap/stint prologue lives in one place (PR3a).
+pub(crate) struct PreparedQss {
+    pub t0v: T0Vehicle,
+    pub t1v: T1Vehicle,
+    pub env: GgvEnvelope,
+    pub path: T0Path,
+    pub stack: Option<(Option<MachineThermal>, Pack, PackState)>,
+    pub ers_coupling: Option<ErsCoupling>,
+    pub base_march: Option<TireThermalMarch>,
+    pub wanted: Tier,
+    pub hash: String,
+    pub fzc: outlap_schema::sim::FzCoupling,
+    pub flat: bool,
+    pub notes: Vec<String>,
+}
+
+/// Assemble the QSS artifacts for a `t0`/`t1` run: resolve the vehicle (with overrides), merge
+/// conditions, build the path, generate (or reuse) the g-g-g-v envelope, and build the electro
+/// slow stack (seeded from `initial_soc`), the energy manager, and the tyre march. A resolved `t2`
+/// tier redirects to the transient entry point; `t3` raises the typed not-implemented error.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn solve_lap(
+pub(crate) fn prepare_qss(
+    kind: QssEntryKind,
     vehicle_dir: &str,
     track: &Track,
     ds_m: f64,
-    raceline_ds_m: Option<f64>,
-    raceline_generator: Option<&str>,
-    raceline_iterations: Option<usize>,
     overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
     conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
     tier: Option<&str>,
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
     tire_thermal: bool,
-) -> PyResult<Lap> {
-    check_ds(ds_m)?;
+    initial_soc: Option<f64>,
+) -> PyResult<PreparedQss> {
+    if let Some(soc) = initial_soc {
+        if !(0.0..=1.0).contains(&soc) {
+            return Err(PyValueError::new_err(format!(
+                "initial_soc must lie in [0, 1]; got {soc}"
+            )));
+        }
+    }
     // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
     let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, tier)?;
     let (vl, resolved) =
@@ -244,6 +261,29 @@ pub(crate) fn solve_lap(
         Some(patch) => merge_conditions(base_conditions, &py_to_json(patch.as_any())?)?,
         None => base_conditions,
     };
+
+    // Enum dispatch on the resolved tier (assembly-time, never in the loop). T2 is time-indexed and
+    // T3 is unimplemented — both before any T0/T1 assembly work.
+    let wanted = match sim_cfg.tier {
+        Tier::T2 => {
+            let msg = match kind {
+                QssEntryKind::Lap => {
+                    "the transient tier (t2) produces a time-indexed lap: call \
+                     `outlap.solve_transient_lap(...)`, or `outlap.solve_lap_dataset(..., \
+                     tier=\"t2\")` for an xarray view"
+                }
+                QssEntryKind::Stint => {
+                    "the transient tier (t2) integrates in time and is time-indexed: call \
+                     `outlap.solve_transient_stint(...)` (or `outlap.solve_stint_dataset(..., \
+                     tier=\"t2\")`) for a T2 stint"
+                }
+            };
+            return Err(PyValueError::new_err(msg));
+        }
+        tier @ Tier::T3 => return Err(err(tier_not_implemented(tier))),
+        wanted => wanted,
+    };
+
     let opts = T0Options {
         ds_m,
         allow_degraded: sim_cfg.allow_degraded,
@@ -254,92 +294,154 @@ pub(crate) fn solve_lap(
     } else {
         T0Path::from_track(&track.inner, ds_m)
     };
-    let line = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
     let hash = resolved.report.resolved_hash.clone();
+    let fzc = sim_cfg.resolved_fz_coupling();
+    let flat = sim_cfg.flat_track;
 
-    // Enum dispatch on the resolved tier (assembly-time, never in the loop).
-    let qss: QssLap = match sim_cfg.tier {
-        // The transient tier is time-indexed, not station-indexed, so it returns a different
-        // artifact. Point the caller at it rather than at a bare "not implemented".
-        Tier::T2 => {
-            return Err(PyValueError::new_err(
-                "the transient tier (t2) produces a time-indexed lap: call \
-                 `outlap.solve_transient_lap(...)`, or `outlap.solve_lap_dataset(..., tier=\"t2\")` \
-                 for an xarray view",
-            ))
-        }
-        tier @ Tier::T3 => return Err(err(tier_not_implemented(tier))),
-        wanted => {
-            let mut t1v = T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded)
-                .map_err(err)?;
-            let mut notes = Vec::new();
-            // Native-edge sidecar decode: the aero map + `.ptm` tables (skipped with a note when
-            // the files are not present).
-            let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
-            // With the tyre-thermal march opted in the envelope needs the (T_tire, wear) axes (a
-            // full re-solve across the axis product — not cached; see PR4's recorded build cost).
-            // Otherwise the cheap frozen envelope (bit-identical to pre-M5).
-            let env = if tire_thermal {
-                let coupling = sim_cfg.resolved_fz_coupling();
-                GgvEnvelope::generate_with_tire_state(
-                    &t1v,
-                    &sim_cfg.envelope,
-                    coupling,
-                    TireStateRes::default(),
-                )
-                .map_err(err)?
-            } else {
-                cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?
-            };
-            let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
-            notes.extend(t0v.notes().iter().cloned());
-            notes.extend(t1v.notes().iter().cloned());
-            notes.extend(env.notes().iter().cloned());
-            // Slow-state coupling from the vehicle's own battery (+ optional `.emotor`) refs
-            // (inert with a note when the stack files are not present).
-            let stack = build_slow_stack(&resolved, &vl, &conditions, &mut notes)?;
-            let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
-                vehicle: &t1v,
-                thermal: thermal.clone(),
-                pack: pack.clone(),
-                pack_state: *state,
-                active: t1v.has_energy_maps(),
-            });
-            // The 2026 ERS energy manager (M6 PR2): governs the march whenever the car has an
-            // `ers:` block AND a pack to schedule; without a pack the greedy budget-free curve
-            // still shapes the pedal availability, recorded as such.
-            let ers_coupling = build_ers_coupling(
-                &resolved,
-                &t0v,
-                coupling.is_some(),
-                sim_cfg.allow_degraded,
-                &mut notes,
-            )?;
-            // Tyre-thermal march (M5 PR5): opt-in, so the default lap stays bit-identical to pre-M5
-            // (the synthetic .tyr params are pre-calibration — the default flips on at PR8).
-            let tire_march = if tire_thermal {
-                Some(build_tire_march(&t1v, &resolved, &conditions, &vl, &mut notes)?)
-            } else {
-                None
-            };
-            let couplings = Couplings {
-                electro: coupling.as_ref(),
-                tire: tire_march.as_ref(),
-                ers: ers_coupling.as_ref(),
-            };
-            let req = LapRequest {
-                line,
-                resolved_hash: hash,
-                notes,
-                fz_coupling: sim_cfg.resolved_fz_coupling(),
-                flat_track: sim_cfg.flat_track,
-            };
-            if wanted == Tier::T0 {
-                solve_t0(&t0v, env, &couplings, &path, req).map_err(err)?
-            } else {
-                solve_t1(&t1v, &t0v, env, &couplings, &path, req).map_err(err)?
-            }
-        }
+    let mut t1v =
+        T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
+    let mut notes = Vec::new();
+    // Native-edge sidecar decode: the aero map + `.ptm` tables (skipped with a note when absent).
+    let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
+    // With the tyre-thermal march opted in the envelope needs the (T_tire, wear) axes (a full
+    // re-solve across the axis product — not cached). Otherwise the cheap frozen envelope
+    // (bit-identical to pre-M5).
+    let env = if tire_thermal {
+        GgvEnvelope::generate_with_tire_state(&t1v, &sim_cfg.envelope, fzc, TireStateRes::default())
+            .map_err(err)?
+    } else {
+        cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?
+    };
+    let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
+    notes.extend(t0v.notes().iter().cloned());
+    notes.extend(t1v.notes().iter().cloned());
+    notes.extend(env.notes().iter().cloned());
+    // The electrified slow stack (inert with a note when the stack files are absent), seeded from
+    // `initial_soc` when given, else mid-window (ers) / top-of-window (mapped EV — bit-identity).
+    let stack = build_slow_stack(&resolved, &vl, &conditions, initial_soc, &mut notes)?;
+    // The 2026 ERS energy manager (M6 PR2): governs the march whenever the car has an `ers:` block
+    // AND a pack to schedule.
+    let ers_coupling = build_ers_coupling(
+        &resolved,
+        &t0v,
+        stack.is_some(),
+        sim_cfg.allow_degraded,
+        &mut notes,
+    )?;
+    // Tyre-thermal march (M5 PR5): opt-in, so the default run stays bit-identical to pre-M5.
+    let base_march = if tire_thermal {
+        Some(build_tire_march(
+            &t1v,
+            &resolved,
+            &conditions,
+            &vl,
+            &mut notes,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(PreparedQss {
+        t0v,
+        t1v,
+        env,
+        path,
+        stack,
+        ers_coupling,
+        base_march,
+        wanted,
+        hash,
+        fzc,
+        flat,
+        notes,
+    })
+}
+
+/// Solve a QSS lap of `track` for the vehicle in `vehicle_dir` at the tier `sim.tier` selects.
+///
+/// `vehicle_dir` must hold a `vehicle.yaml` (plus its referenced `.ptm`/`.tyr` files); optional
+/// `conditions.yaml` / `sim.yaml` next to it override the defaults (a *malformed* one is an error —
+/// never silently ignored). `tier=` (`"t0"`/`"t1"`) and `sim=` (a nested override dict, e.g.
+/// `{"flat_track": True, "envelope": {"v_points": 24}}`) override the file/defaults; `tier=` wins.
+///
+/// `t0` runs the point-mass velocity profile on the corrected g-g-g-v envelope; `t1` adds a
+/// per-station re-trim for per-wheel loads/slips/forces + setup metrics. `t2` is the transient tier
+/// and is time-indexed, so it has its own entry point ([`solve_transient_lap`]); `t3` raises (M6).
+/// When `track` is a generated racing line, pass `raceline_ds_m` for honest provenance.
+///
+/// What-if experiments (Decision #35): `overrides` is a `{dotted.path: value}` vehicle patch;
+/// `conditions` is a nested dict deep-merged onto the session conditions. `initial_soc` seeds the
+/// battery pack (default: the middle of its usable window) for an electrified car.
+///
+/// The call holds the GIL for its duration (envelope generation is a seconds-scale cold step in a
+/// debug build); releasing it is deferred to the batch/sweep API milestone.
+#[pyfunction]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = false, initial_soc = None))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_lap(
+    vehicle_dir: &str,
+    track: &Track,
+    ds_m: f64,
+    raceline_ds_m: Option<f64>,
+    raceline_generator: Option<&str>,
+    raceline_iterations: Option<usize>,
+    overrides: Option<&Bound<'_, pyo3::types::PyDict>>,
+    conditions: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tier: Option<&str>,
+    sim: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tire_thermal: bool,
+    initial_soc: Option<f64>,
+) -> PyResult<Lap> {
+    check_ds(ds_m)?;
+    let PreparedQss {
+        t0v,
+        t1v,
+        env,
+        path,
+        stack,
+        ers_coupling,
+        base_march: tire_march,
+        wanted,
+        hash,
+        fzc,
+        flat,
+        notes,
+    } = prepare_qss(
+        QssEntryKind::Lap,
+        vehicle_dir,
+        track,
+        ds_m,
+        overrides,
+        conditions,
+        tier,
+        sim,
+        tire_thermal,
+        initial_soc,
+    )?;
+
+    let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
+        vehicle: &t1v,
+        thermal: thermal.clone(),
+        pack: pack.clone(),
+        pack_state: *state,
+        active: t1v.has_energy_maps(),
+    });
+    let couplings = Couplings {
+        electro: coupling.as_ref(),
+        tire: tire_march.as_ref(),
+        ers: ers_coupling.as_ref(),
+    };
+    let req = LapRequest {
+        line: line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations),
+        resolved_hash: hash,
+        notes,
+        fz_coupling: fzc,
+        flat_track: flat,
+    };
+    let qss: QssLap = if wanted == Tier::T0 {
+        solve_t0(&t0v, env, &couplings, &path, req).map_err(err)?
+    } else {
+        solve_t1(&t1v, &t0v, env, &couplings, &path, req).map_err(err)?
     };
 
     Ok(qss_lap_to_py(qss, track))
@@ -509,6 +611,13 @@ pub struct QssStint {
     tire_wear_mm: Option<Vec<f64>>,
     tire_damage: Option<Vec<f64>>,
     tire_grip: Option<Vec<f64>>,
+    // Per-`(lap × station)` pack state of charge (0..1), carried continuously across lap boundaries;
+    // `None` when the car has no active electro stack.
+    state_of_charge: Option<Vec<f64>>,
+    // Per-lap END-of-lap pack + machine temperatures, °C (n_laps); `None` when absent (machine temp
+    // is never surfaced under an energy manager — D-M6-10).
+    pack_temp_c: Option<Vec<f64>>,
+    machine_temp_c: Option<Vec<f64>>,
     /// The resolved solver tier (`"t0"`/`"t1"`).
     #[pyo3(get)]
     tier: String,
@@ -588,6 +697,27 @@ impl QssStint {
             .as_ref()
             .map(|f| array2d(py, f, self.n_laps, n))
     }
+    /// Pack state of charge `SoC ∈ [0, 1]` (`n_laps × station`), continuous across lap boundaries,
+    /// or `None` when the car carries no active battery.
+    fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.state_of_charge
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// End-of-lap pack temperature, °C (`n_laps`), or `None` when the car carries no battery.
+    fn pack_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.pack_temp_c
+            .as_ref()
+            .map(|f| f.clone().into_pyarray(py))
+    }
+    /// End-of-lap machine winding temperature, °C (`n_laps`), or `None` (never surfaced under an
+    /// energy manager — the caps apply to the electrical share, D-M6-10).
+    fn machine_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.machine_temp_c
+            .as_ref()
+            .map(|f| f.clone().into_pyarray(py))
+    }
     fn __len__(&self) -> usize {
         self.n_laps
     }
@@ -601,11 +731,12 @@ impl QssStint {
 /// `tire_thermal` (default **on** — degradation is the point of a stint) drives the tyre-state axes;
 /// with it off every lap is identical (a frozen-tyre stint). `initial_tire_temp_c` seeds the tyres
 /// cold-uniform (the out-lap warm-up); the default seeds warm at the grip optimum. The electrified
-/// slow stack (pack SoC / machine temperature), where present, is **not** carried lap-to-lap in the
-/// QSS stint (it re-seeds each lap — recovery arrives with the ERS energy manager in M6); the tyre
-/// state is what carries.
+/// slow stack — pack SoC / RC voltage / temperature, and the machine-thermal network — **carries**
+/// lap-to-lap too (M6 PR3): a multi-lap run shows SoC falling with net consumption and rising with
+/// regeneration, with only the per-lap ERS budget ledger resetting at the start/finish. `initial_soc`
+/// seeds the pack (default: the middle of its usable window, matching T2).
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = true, initial_tire_temp_c = None))]
+#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, tier = None, sim = None, tire_thermal = true, initial_tire_temp_c = None, initial_soc = None))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn solve_stint(
     vehicle_dir: &str,
@@ -621,6 +752,7 @@ pub(crate) fn solve_stint(
     sim: Option<&Bound<'_, pyo3::types::PyDict>>,
     tire_thermal: bool,
     initial_tire_temp_c: Option<f64>,
+    initial_soc: Option<f64>,
 ) -> PyResult<QssStint> {
     check_ds(ds_m)?;
     if !(1..=MAX_STINT_LAPS).contains(&n_laps) {
@@ -628,93 +760,43 @@ pub(crate) fn solve_stint(
             "n_laps must lie in 1..={MAX_STINT_LAPS}, got {n_laps}"
         )));
     }
-    // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
-    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, tier)?;
-    let (vl, resolved) =
-        resolve_with_overrides_opts(vehicle_dir, overrides, sim_cfg.allow_degraded)?;
-    let base_conditions = match load_conditions("conditions.yaml", &vl) {
-        Ok(c) => c,
-        Err(e) if is_not_found(&e) => Conditions::default(),
-        Err(e) => return Err(schema_err(e)),
-    };
-    let conditions = match conditions {
-        Some(patch) => merge_conditions(base_conditions, &py_to_json(patch.as_any())?)?,
-        None => base_conditions,
-    };
-    let opts = T0Options {
+    let PreparedQss {
+        t0v,
+        t1v,
+        env,
+        path,
+        stack,
+        ers_coupling,
+        base_march,
+        wanted,
+        hash,
+        fzc,
+        flat,
+        mut notes,
+    } = prepare_qss(
+        QssEntryKind::Stint,
+        vehicle_dir,
+        track,
         ds_m,
-        allow_degraded: sim_cfg.allow_degraded,
-        ..T0Options::default()
-    };
-    let path = if sim_cfg.flat_track {
-        T0Path::from_track_flat(&track.inner, ds_m)
-    } else {
-        T0Path::from_track(&track.inner, ds_m)
-    };
-    let hash = resolved.report.resolved_hash.clone();
-    let fzc = sim_cfg.resolved_fz_coupling();
-    let flat = sim_cfg.flat_track;
-
-    let wanted = match sim_cfg.tier {
-        Tier::T2 => {
-            return Err(PyValueError::new_err(
-                "the transient tier (t2) integrates in time: call \
-                 `outlap.solve_transient_stint(...)` (or `outlap.solve_stint_dataset(..., \
-                 tier=\"t2\")`) for a T2 stint",
-            ))
-        }
-        tier @ Tier::T3 => return Err(err(tier_not_implemented(tier))),
-        wanted => wanted,
-    };
-
-    let mut t1v =
-        T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
-    let mut notes = Vec::new();
-    let sidecar_fp = install_sidecars(&mut t1v, &resolved, &vl, &mut notes)?;
-    // With the tyre march on the envelope needs the (T_tire, wear) axes (built once, reused across
-    // laps); otherwise the cheap frozen envelope (a frozen-tyre stint — every lap identical).
-    let env = if tire_thermal {
-        GgvEnvelope::generate_with_tire_state(&t1v, &sim_cfg.envelope, fzc, TireStateRes::default())
-            .map_err(err)?
-    } else {
-        cached_envelope(&t1v, &sim_cfg, &hash, sidecar_fp, &conditions)?
-    };
-    let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &opts).map_err(err)?;
-    notes.extend(t0v.notes().iter().cloned());
-    notes.extend(t1v.notes().iter().cloned());
-    notes.extend(env.notes().iter().cloned());
-    // The electrified coupling (inert unless the car's stack files are present). It re-seeds per lap in
-    // the QSS stint (SoC is not carried across laps here — M6 PR3); the tyre state is what carries.
-    let stack = build_slow_stack(&resolved, &vl, &conditions, &mut notes)?;
-    // The 2026 ERS energy manager (per-lap budgets; the ledger resets each lap by construction).
-    let ers_coupling = build_ers_coupling(
-        &resolved,
-        &t0v,
-        stack.is_some(),
-        sim_cfg.allow_degraded,
-        &mut notes,
+        overrides,
+        conditions,
+        tier,
+        sim,
+        tire_thermal,
+        initial_soc,
     )?;
-    let base_march = if tire_thermal {
-        Some(build_tire_march(
-            &t1v,
-            &resolved,
-            &conditions,
-            &vl,
-            &mut notes,
-        )?)
-    } else {
-        None
-    };
     notes.push(format!(
-        "QSS stint: {n_laps} laps run back-to-back with the representative-tyre thermal ring + wear \
-         state carried across each lap boundary (§6.1 explicit-Euler march, extended across laps — no \
-         reset); the tyre-state g-g-g-v envelope is built once and reused. Per-lap lap time responds \
-         to the evolving tyre state."
+        "QSS stint: {n_laps} laps run back-to-back with the FULL slow stack — the representative-tyre \
+         thermal ring + wear AND the battery pack (SoC / RC voltage / temperature) AND the \
+         machine-thermal network — carried across each lap boundary (§6.1 march, extended across laps \
+         — only the per-lap ERS ledger resets at s = 0); the g-g-g-v envelope is built once and \
+         reused. Per-lap lap time and SoC respond to the evolving slow state."
     ));
 
-    // The seed lap 1 starts from: an explicit cold-uniform temperature (the out-lap warm-up), else the
-    // march's parity-safe warm-at-optimum default.
-    let mut seed_state: Option<TireThermalState<f64>> = if tire_thermal {
+    // The lap-1 tyre seed: an explicit cold-uniform temperature (the out-lap warm-up), else the
+    // march's parity-safe warm-at-optimum default. (The pack seed rides in the stack, seeded by
+    // `initial_soc` / mid-window in `prepare_qss`.)
+    let tire_seed: Option<TireThermalState<f64>> = if tire_thermal {
         Some(match initial_tire_temp_c {
             Some(t) => TireThermalState::uniform(t + 273.15),
             None => base_march
@@ -726,64 +808,62 @@ pub(crate) fn solve_stint(
         None
     };
 
-    let n_stations = path.len();
-    let mut s_grid: Vec<f64> = Vec::new();
-    let mut lap_time_s = Vec::with_capacity(n_laps);
-    let mut v_flat = Vec::with_capacity(n_laps * n_stations);
-    let (mut surf, mut carc, mut gas) = (Vec::new(), Vec::new(), Vec::new());
-    let (mut wear, mut dmg, mut grip) = (Vec::new(), Vec::new(), Vec::new());
-    let mut have_tire = false;
-    let (mut tier_out, mut fz_out, mut hash_out) = (String::new(), String::new(), String::new());
-
-    for lap_idx in 0..n_laps {
-        let march_lap = base_march.as_ref().map(|bm| {
-            bm.clone()
-                .with_state(seed_state.expect("seed set when tire_thermal"))
-        });
-        let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
+    // Run the multi-lap loop in `outlap-qss` (PR3a): the lap-boundary carry lives there, cargo-tested.
+    let electro = stack
+        .as_ref()
+        .map(|(thermal, pack, state)| outlap_qss::StintElectro {
             vehicle: &t1v,
-            thermal: thermal.clone(),
-            pack: pack.clone(),
+            pack,
+            thermal: thermal.as_ref(),
             pack_state: *state,
             active: t1v.has_energy_maps(),
         });
-        let line = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
-        let couplings = Couplings {
-            electro: coupling.as_ref(),
-            tire: march_lap.as_ref(),
-            ers: ers_coupling.as_ref(),
-        };
-        let req = LapRequest {
-            line,
+    let plan = outlap_qss::StintPlan {
+        tier: wanted,
+        t0: &t0v,
+        t1: &t1v,
+        env: &env,
+        path: &path,
+        electro,
+        ers: ers_coupling.as_ref(),
+        base_march: base_march.as_ref(),
+        request: LapRequest {
+            line: line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations),
             resolved_hash: hash.clone(),
             notes: Vec::new(),
             fz_coupling: fzc,
             flat_track: flat,
-        };
-        let qss: QssLap = if wanted == Tier::T0 {
-            solve_t0(&t0v, env.clone(), &couplings, &path, req).map_err(err)?
-        } else {
-            solve_t1(&t1v, &t0v, env.clone(), &couplings, &path, req).map_err(err)?
-        };
-        if lap_idx == 0 {
-            s_grid.clone_from(&qss.lap.s);
-            tier_out = format!("{:?}", qss.tier).to_lowercase();
-            fz_out = fz_coupling_str(qss.fz_coupling);
-            hash_out.clone_from(&qss.lap.resolved_hash);
-        }
-        // Surface the per-lap ERS record (manager mode, ledger MJ, C5.2.9 swing, convergence)
-        // from the LAST lap — the per-lap request carries no assembly notes, so `qss.lap.notes`
-        // here is exactly the manager's `finish_notes` output. Nothing silent (D-M6-3).
-        if lap_idx + 1 == n_laps {
-            for note in &qss.lap.notes {
-                if !notes.contains(note) {
-                    notes.push(format!("lap {}: {note}", lap_idx + 1));
-                }
+        },
+    };
+    let result = outlap_qss::solve_stint(&plan, n_laps, outlap_qss::StintSeeds { tire: tire_seed })
+        .map_err(err)?;
+
+    // Surface the LAST lap's energy-manager + convergence notes (manager mode, ledger MJ, C5.2.9
+    // swing, convergence) — nothing silent (D-M6-3).
+    if let Some(last) = result.laps.last() {
+        for note in &last.notes {
+            let tagged = format!("lap {n_laps}: {note}");
+            if !notes.contains(&tagged) {
+                notes.push(tagged);
             }
         }
-        lap_time_s.push(qss.lap.lap_time_s);
-        v_flat.extend_from_slice(&qss.lap.v);
-        if let Some(t) = &qss.tire {
+    }
+
+    // Aggregate the per-lap lean results into the `(lap, station)` block channels.
+    let n_stations = path.len();
+    let mut lap_time_s = Vec::with_capacity(n_laps);
+    let mut v_flat = Vec::with_capacity(n_laps * n_stations);
+    let (mut surf, mut carc, mut gas) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut wear, mut dmg, mut grip) = (Vec::new(), Vec::new(), Vec::new());
+    let mut soc_flat: Vec<f64> = Vec::new();
+    let (mut pack_temp, mut machine_temp) = (Vec::new(), Vec::new());
+    let mut have_tire = false;
+    let (mut have_soc, mut have_pack_temp, mut have_machine_temp) = (false, false, false);
+
+    for lap in &result.laps {
+        lap_time_s.push(lap.lap_time_s);
+        v_flat.extend_from_slice(&lap.v);
+        if let Some(t) = &lap.tire {
             surf.extend_from_slice(&t.surface_temp_c);
             carc.extend_from_slice(&t.carcass_temp_c);
             gas.extend_from_slice(&t.gas_temp_c);
@@ -792,13 +872,24 @@ pub(crate) fn solve_stint(
             grip.extend_from_slice(&t.grip_scale);
             have_tire = true;
         }
-        // Carry the terminal tyre state into the next lap's seed (the stint's whole point).
-        seed_state = qss.tire_terminal.or(seed_state);
+        if let Some(s) = &lap.slow {
+            soc_flat.extend_from_slice(&s.state_of_charge);
+            have_soc = true;
+        }
+        // End-of-lap pack + machine temperature from the terminal snapshot the next lap seeded from.
+        if let Some(p) = &lap.terminal.pack {
+            pack_temp.push(p.temp_k - 273.15);
+            have_pack_temp = true;
+        }
+        if let Some(m) = &lap.terminal.machine {
+            machine_temp.push(m.winding_temp_c());
+            have_machine_temp = true;
+        }
     }
 
     Ok(QssStint {
         n_laps,
-        s: s_grid,
+        s: result.s,
         lap_time_s,
         v: v_flat,
         tire_surface_c: have_tire.then_some(surf),
@@ -807,10 +898,13 @@ pub(crate) fn solve_stint(
         tire_wear_mm: have_tire.then_some(wear),
         tire_damage: have_tire.then_some(dmg),
         tire_grip: have_tire.then_some(grip),
-        tier: tier_out,
-        fz_coupling: fz_out,
+        state_of_charge: have_soc.then_some(soc_flat),
+        pack_temp_c: have_pack_temp.then_some(pack_temp),
+        machine_temp_c: have_machine_temp.then_some(machine_temp),
+        tier: format!("{:?}", result.tier).to_lowercase(),
+        fz_coupling: fz_coupling_str(result.fz_coupling),
         flat_track: flat,
-        resolved_hash: hash_out,
+        resolved_hash: hash,
         notes,
     })
 }

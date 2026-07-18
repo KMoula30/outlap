@@ -316,6 +316,8 @@ def solve_lap_dataset(
     overrides: dict[str, bool | int | float | str] | None = None,
     conditions: dict[str, object] | None = None,
     tire_thermal: bool = False,
+    initial_soc: float | None = None,
+    speed_margin: float | None = None,
 ) -> xr.Dataset:
     """Solve a QSS lap and return it directly as a labelled dataset (see :func:`lap_dataset`).
 
@@ -331,9 +333,13 @@ def solve_lap_dataset(
     onto the session conditions (e.g. ``{"air": {"temp_c": 35.0}}``) — invalid paths or types
     fail loudly, never silently.
 
+    This wrapper accepts the **union** of the QSS and transient lap kwargs and forwards each to
+    whichever solver the resolved tier selects: ``tire_thermal`` and ``initial_soc`` (the starting
+    pack state of charge) apply to both, while ``speed_margin`` is transient-only. A kwarg the
+    resolved tier cannot honour raises :class:`ValueError` rather than being silently dropped.
+
     ``tier="t2"`` runs the transient tier instead, returning the **time-indexed** dataset of
-    :func:`transient_lap_dataset` (dims ``time``/``wheel``) rather than the arc-length one. It takes
-    the same arguments; ``speed_margin`` is available on :func:`solve_transient_lap` directly.
+    :func:`transient_lap_dataset` (dims ``time``/``wheel``) rather than the arc-length one.
     """
     if isinstance(line, Raceline):
         track, raceline_ds_m = line.line(), line.ds_m
@@ -342,6 +348,7 @@ def solve_lap_dataset(
         track, raceline_ds_m = line, None
         raceline_generator, raceline_iterations = None, None
     if tier == "t2":
+        margin_kw = {} if speed_margin is None else {"speed_margin": speed_margin}
         return transient_lap_dataset(
             solve_transient_lap(
                 vehicle_dir,
@@ -353,7 +360,15 @@ def solve_lap_dataset(
                 overrides=overrides,
                 conditions=conditions,
                 sim=sim,
+                initial_soc=initial_soc,
+                tire_thermal=tire_thermal,
+                **margin_kw,
             )
+        )
+    if speed_margin is not None:
+        raise ValueError(
+            "speed_margin applies only to the transient tier (tier='t2'); the QSS tiers "
+            "size their speed margin from the g-g-g-v envelope"
         )
     lap = solve_lap(
         vehicle_dir,
@@ -367,6 +382,7 @@ def solve_lap_dataset(
         tier=tier,
         sim=sim,
         tire_thermal=tire_thermal,
+        initial_soc=initial_soc,
     )
     return lap_dataset(lap)
 
@@ -562,6 +578,25 @@ def stint_dataset(stint: QssStint) -> xr.Dataset:
         data["tire_damage"] = (("lap", "s"), stint.tire_damage(), _attrs("tire_damage"))
         data["tire_grip"] = (("lap", "s"), stint.tire_grip(), _attrs("tire_grip"))
 
+    # The electrified slow stack, when present: the pack SoC trace carries continuously across the
+    # lap boundary (M6 PR3 — it falls with net consumption, rises with regeneration), and the
+    # end-of-lap pack (and machine) temperature ride a `lap` axis.
+    soc = stint.state_of_charge()
+    if soc is not None:
+        data["state_of_charge"] = (("lap", "s"), soc, _attrs("state_of_charge"))
+        data["pack_temp_c"] = (
+            "lap",
+            stint.pack_temp_c(),
+            _attrs("pack_temp_c", prefix="end-of-lap "),
+        )
+        machine = stint.machine_temp_c()
+        if machine is not None:
+            data["machine_temp_c"] = (
+                "lap",
+                machine,
+                _attrs("machine_temp_c", prefix="end-of-lap "),
+            )
+
     return xr.Dataset(
         data,
         coords=coords,
@@ -676,12 +711,21 @@ def solve_stint_dataset(
     conditions: dict[str, object] | None = None,
     tire_thermal: bool = True,
     initial_tire_temp_c: float | None = None,
+    initial_soc: float | None = None,
+    speed_margin: float | None = None,
 ) -> xr.Dataset:
     """Solve a multi-lap **stint** and return it as a labelled dataset.
 
-    The tyre-thermal slow state (and, for ``tier="t2"``, the battery SoC) carries across every lap
-    boundary, so the tyres warm, wear, and degrade over the run. ``initial_tire_temp_c`` seeds the
-    tyres cold-uniform (the out-lap warm-up); the default seeds warm at the grip optimum.
+    The tyre-thermal slow state AND the battery pack (SoC / RC voltage / temperature) carry across
+    every lap boundary in **both** tiers (M6 PR3), so the tyres warm/wear/degrade and the SoC falls
+    with net consumption and rises with regeneration over the run. ``initial_tire_temp_c`` seeds the
+    tyres cold-uniform (the out-lap warm-up); ``initial_soc`` seeds the pack (default: the middle of
+    its usable window).
+
+    This wrapper accepts the **union** of the QSS and transient stint kwargs and forwards each to the
+    resolved tier: ``tire_thermal`` / ``initial_tire_temp_c`` / ``initial_soc`` apply to both, while
+    ``speed_margin`` is transient-only; a kwarg the resolved tier cannot honour raises
+    :class:`ValueError` rather than being silently dropped.
 
     ``tier="t2"`` runs the transient tier and returns the per-lap summary of
     :func:`transient_stint_dataset` (dims ``lap``/``wheel``); the QSS tiers (``"t0"``/``"t1"``) return
@@ -695,6 +739,7 @@ def solve_stint_dataset(
         track, raceline_ds_m = line, None
         raceline_generator, raceline_iterations = None, None
     if tier == "t2":
+        margin_kw = {} if speed_margin is None else {"speed_margin": speed_margin}
         return transient_stint_dataset(
             solve_transient_stint(
                 vehicle_dir,
@@ -709,7 +754,14 @@ def solve_stint_dataset(
                 sim=sim,
                 tire_thermal=tire_thermal,
                 initial_tire_temp_c=initial_tire_temp_c,
+                initial_soc=initial_soc,
+                **margin_kw,
             )
+        )
+    if speed_margin is not None:
+        raise ValueError(
+            "speed_margin applies only to the transient tier (tier='t2'); the QSS tiers "
+            "size their speed margin from the g-g-g-v envelope"
         )
     return stint_dataset(
         solve_stint(
@@ -726,5 +778,6 @@ def solve_stint_dataset(
             sim=sim,
             tire_thermal=tire_thermal,
             initial_tire_temp_c=initial_tire_temp_c,
+            initial_soc=initial_soc,
         )
     )

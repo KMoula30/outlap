@@ -240,6 +240,7 @@ pub(crate) fn build_slow_stack(
     resolved: &ResolvedVehicle,
     vl: &FsLoader,
     conditions: &Conditions,
+    initial_soc: Option<f64>,
     notes: &mut Vec<String>,
 ) -> PyResult<Option<(Option<MachineThermal>, Pack, PackState)>> {
     let plan = outlap_qss::plan_slow_stack(&resolved.spec);
@@ -254,18 +255,36 @@ pub(crate) fn build_slow_stack(
     let Some((pack, mut pack_state)) = load_pack(resolved, vl, notes)? else {
         return Ok(None);
     };
-    // QSS default seed: MID-window for an ERS car (D-M6-10) — matching the T2 `prepare_transient`
-    // seed, so the tiers agree by default and the pack can actually accept harvest. A no-`ers:`
-    // mapped EV (discharge-only QSS march) keeps `Pack::assemble`'s top-of-window default so its
-    // lap stays BYTE-IDENTICAL to v0.3.0 — mid-window would buy that car nothing and would move an
-    // established golden/band (the critical no-ers bit-identity invariant).
-    if resolved.spec.ers.is_some() {
-        let [lo, hi] = pack.soc_window();
+    // Pack SoC seed. An explicit `initial_soc` (validated in [0, 1] at the entry point) wins in
+    // every case; otherwise: MID-window for an ERS car (D-M6-10) — matching the T2
+    // `prepare_transient` seed, so the tiers agree by default and the pack can actually accept
+    // harvest. A no-`ers:` mapped EV (discharge-only QSS march) with NO explicit seed keeps
+    // `Pack::assemble`'s top-of-window default so its lap stays BYTE-IDENTICAL to v0.3.0 —
+    // mid-window would buy that car nothing and would move an established golden/band (the critical
+    // no-ers bit-identity invariant).
+    let [lo, hi] = pack.soc_window();
+    if let Some(soc) = initial_soc {
+        pack_state.soc = soc;
+        let clamped = soc.clamp(lo, hi);
+        if (clamped - soc).abs() > 1e-12 {
+            notes.push(format!(
+                "QSS pack seeded at the requested {:.0}% state of charge — OUTSIDE its usable \
+                 window [{lo:.2}, {hi:.2}]; the window derate will clamp deploy/harvest at the \
+                 boundary",
+                soc * 100.0
+            ));
+        } else {
+            notes.push(format!(
+                "QSS pack seeded at the requested {:.0}% state of charge (initial_soc)",
+                soc * 100.0
+            ));
+        }
+    } else if resolved.spec.ers.is_some() {
         pack_state.soc = 0.5 * (lo + hi);
         notes.push(format!(
             "QSS pack seeded at {:.0}% state of charge, the middle of its usable window \
-             [{lo:.2}, {hi:.2}] (estimated — an `initial_soc` input arrives with the M6 PR3 stint \
-             surface); a pack at the top of its window accepts no charge and recovers nothing",
+             [{lo:.2}, {hi:.2}] (estimated — pass `initial_soc` to pick a stint state); a pack at \
+             the top of its window accepts no charge and recovers nothing",
             pack_state.soc * 100.0
         ));
     }

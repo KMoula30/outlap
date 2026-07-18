@@ -178,6 +178,11 @@ class QssStint:
     def tire_wear_mm(self) -> NDArray[np.float64] | None: ...
     def tire_damage(self) -> NDArray[np.float64] | None: ...
     def tire_grip(self) -> NDArray[np.float64] | None: ...
+    # Per-(lap x station) pack SoC, carried continuously across lap boundaries; None without a
+    # battery. `pack_temp_c`/`machine_temp_c` are per-lap end-of-lap (shape n_laps).
+    def state_of_charge(self) -> NDArray[np.float64] | None: ...
+    def pack_temp_c(self) -> NDArray[np.float64] | None: ...
+    def machine_temp_c(self) -> NDArray[np.float64] | None: ...
 
 class TransientStint:
     """A solved transient (T2) stint: per-lap summaries over a `lap` axis."""
@@ -240,6 +245,7 @@ def solve_lap(
     tier: str | None = None,
     sim: dict[str, object] | None = None,
     tire_thermal: bool = False,
+    initial_soc: float | None = None,
 ) -> Lap: ...
 def solve_transient_lap(
     vehicle_dir: str,
@@ -269,6 +275,7 @@ def solve_stint(
     sim: dict[str, object] | None = None,
     tire_thermal: bool = True,
     initial_tire_temp_c: float | None = None,
+    initial_soc: float | None = None,
 ) -> QssStint: ...
 def solve_transient_stint(
     vehicle_dir: str,
