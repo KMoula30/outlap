@@ -414,7 +414,7 @@ def test_a_us_schedule_drives_the_deploy_fraction(catalunya: Track) -> None:
     # A u(s) schedule that forbids deployment everywhere (deploy_regen = 0) banks strictly less
     # deploy energy than the greedy rule-based lap — the schedule policy actually reaches the tier.
     n = 60
-    off = {"deploy_regen": [0.0] * n}
+    off: dict[str, object] = {"deploy_regen": [0.0] * n}
     greedy = transient_lap_dataset(
         solve_transient_lap(F1_2026, catalunya, ds_m=12.0, sim=COARSE_SIM)
     )
@@ -429,11 +429,8 @@ def test_a_us_schedule_drives_the_deploy_fraction(catalunya: Track) -> None:
 
 
 def test_an_invalid_us_schedule_is_a_value_error(catalunya: Track) -> None:
+    bad: dict[str, object] = {"deploy_regen": [2.0, 0.0]}  # 2.0 is out of [-1, 1]
     with pytest.raises(ValueError, match="us_schedule"):
         solve_transient_lap(
-            F1_2026,
-            catalunya,
-            ds_m=20.0,
-            sim=COARSE_SIM,
-            us_schedule={"deploy_regen": [2.0, 0.0]},  # 2.0 is out of [-1, 1]
+            F1_2026, catalunya, ds_m=20.0, sim=COARSE_SIM, us_schedule=bad
         )
