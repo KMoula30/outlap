@@ -107,6 +107,12 @@ pub struct T1Vehicle {
     pub driven: [bool; 4],
     /// Brake-balance bar: front bias fraction, 0..1.
     pub brake_front_bias: f64,
+    /// Blend authority `brakes.regen_blend.max_regen_frac` — the largest fraction of the driven
+    /// axle's brake demand the electric machine may recover (0 without a `regen_blend` block).
+    pub regen_max_frac: f64,
+    /// The driven axle(s)' share of the total braking force (from the brake balance) — the fraction
+    /// of braking the machine can even reach for regen. 0 when no axle is both driven and braked.
+    pub regen_axle_share: f64,
     /// The topology powertrain: traction ceiling + differential torque split + energy accounting.
     pub(crate) powertrain: T1Powertrain,
     /// The primary driven axle's differential (cached from the powertrain for the trim's diff
@@ -205,6 +211,22 @@ impl T1Vehicle {
 
         let brake_front_bias = spec.brakes.balance_bar;
 
+        // --- Regen blend policy (mirrors the ERS coupling's harvest ceilings, but is a property of
+        // any battery + electric machine — not the ERS manager): the blend authority + the driven
+        // axle's share of the braking the machine can reach. ---
+        let (front_driven, rear_driven) = (driven[0] || driven[1], driven[2] || driven[3]);
+        let regen_axle_share = (if front_driven { brake_front_bias } else { 0.0 })
+            + (if rear_driven {
+                1.0 - brake_front_bias
+            } else {
+                0.0
+            });
+        let regen_max_frac = spec
+            .brakes
+            .regen_blend
+            .as_ref()
+            .map_or(0.0, |b| b.max_regen_frac.clamp(0.0, 1.0));
+
         // --- Topology powertrain (traction ceiling + differential torque split) ---
         let powertrain = T1Powertrain::assemble(vehicle, loader, r_front, r_rear)?;
         let primary_diff = powertrain.primary_diff();
@@ -258,6 +280,8 @@ impl T1Vehicle {
             aero_map: None,
             driven,
             brake_front_bias,
+            regen_max_frac,
+            regen_axle_share,
             powertrain,
             primary_diff,
             notes,
@@ -398,6 +422,28 @@ impl T1Vehicle {
     /// live) — the assembly-time activity fact for the QSS coupling.
     pub fn has_energy_maps(&self) -> bool {
         self.powertrain.has_energy_maps()
+    }
+
+    /// Blend authority `brakes.regen_blend.max_regen_frac` (0 without a `regen_blend` block).
+    #[must_use]
+    pub fn regen_max_frac(&self) -> f64 {
+        self.regen_max_frac
+    }
+
+    /// The driven axle(s)' share of total braking force (from the brake balance).
+    #[must_use]
+    pub fn regen_axle_share(&self) -> f64 {
+        self.regen_axle_share
+    }
+
+    /// The electric machine's peak **mechanical** regen power at vehicle speed `v` (m/s), W — the
+    /// sum of the per-axle regen wheel-force envelope times `v`. The QSS braking-harvest ceiling
+    /// (the machine cannot capture more mechanical power than this), before the low-speed fade and
+    /// the pack's charge acceptance. Zero when no drive unit publishes a regen curve.
+    #[must_use]
+    pub fn regen_mech_power_max_w(&self, v: f64) -> f64 {
+        let [front, rear] = self.powertrain.max_regen_force_by_axle(v);
+        (front + rear) * v.max(0.0)
     }
 
     /// The maximum wheel **drive** force the powertrain can put down at vehicle speed `v` (m/s), N —

@@ -194,6 +194,35 @@ form; (b) an SoC sweep of the committed pack — terminal voltage and the drive-
 coupled voltage; (c) drive-unit efficiency vs DC-link voltage, with the map grid shaded so the
 below/above-grid linear extrapolation is visible.*
 
+### Braking regen (battery + electric machine)
+
+Regeneration is a property of **any battery + electric machine**, not of the 2026 ERS manager: an EV
+powertrain, a hybrid's helper machine, and the F1 MGU-K all recover braking energy through the
+machine. So on a braking segment (`F_req < 0`) the QSS slow-state march harvests into the pack even
+when the car has **no `ers:` block** — the manager only *schedules* the F1-specific deploy/budget on
+top. The recovery uses the same ceiling chain as the transient tier's `blend_regen` (see
+[transient_control.md](transient_control.md)), collapsed to the point mass:
+
+```
+demand_W     = max_regen_frac · axle_share · (−F_req · v)     # blend authority × driven-axle brake
+envelope_W   = ( Σ_axle regen_force(v) ) · v · fade(v)        # the machine's regen power envelope
+mech_W       = min(demand_W, envelope_W)
+elec_W       = min(mech_W · η_regen, P_accept(SoC, T))        # η_regen = 0.90; pack charge acceptance
+ΔSoC         = −elec_W · dt / E_pack                          # charge (Coulomb count)
+```
+
+`max_regen_frac` is `brakes.regen_blend.max_regen_frac` (0 — hence no harvest — without a
+`regen_blend` block); `axle_share` is the driven axle's share of braking from the balance bar;
+`regen_force(v)` is the `.ptm` regen envelope (`max_regen_force_by_axle`); `fade(v)` is the low-speed
+roll-off; `η_regen = 0.90` is a documented constant matching the transient tier's `RegenParams`, so
+QSS and T2 recover the same energy from a given capture. `P_accept` is the pack's charge-acceptance
+ceiling (CV taper ∧ kinetic derate) — decisively, a **near-full pack accepts almost nothing**, so a
+hot-lap EV starting near 100 % SoC barely regens. The braking force at the wheels is unchanged (the
+calipers supply the deficit), so **the trajectory is untouched** — a car's drive-segment lap stays
+byte-identical, only the SoC channel gains the recovered charge. The ERS manager substitutes the FIA
+0.97 electrical↔mechanical factor for `η_regen` and adds the per-lap Recharge budget; the ceilings
+are otherwise identical, so the manager and the plain-EV path recover consistently.
+
 ### Battery property tests
 
 Pulse response vs the closed-form Thevenin (RMS ≪ 1 %); a regen pulse lifting the terminal above OCV;

@@ -5,8 +5,8 @@ Loads warning-clean (estimates NOTED in the loaded-model report, never warned), 
 laps on the 3D reference Catalunya (``catalunya_osm``) and on the flat TUMFTM Nürburgring GP
 inside plausible road-car bands, and exercises the full slow-state coupling end-to-end through
 the Python surface: the synthetic Vdc-stacked drive unit + 800 V-class pack + lumped `.emotor`
-produce ``state_of_charge`` / ``machine_temp_c`` channels, a monotone discharge, and the
-sizing-sensitivity ordering (small ≤ large never inverts).
+produce ``state_of_charge`` / ``machine_temp_c`` channels, a net discharge with braking regen (the
+machine recovers energy under braking, M6 PR3), and the sizing-sensitivity ordering (small ≤ large).
 
 Bands are wide sanity tripwires (the ``catalunya.rs`` idiom), anchored to the first-run numbers
 recorded in the PR: medium sizing ≈161 s Nürburgring GP / ≈154 s Catalunya (a ≈200 kW road
@@ -92,15 +92,19 @@ def test_slow_state_coupling_live(nuerburgring_lap: xr.Dataset) -> None:
     # The synthetic stack (Vdc-mapped DU + pack + .emotor) drives the slow-state channels.
     assert "state_of_charge" in ds and "machine_temp_c" in ds
     soc = ds.state_of_charge.to_numpy()
-    assert np.all(np.diff(soc) <= 1e-12), (
-        "SoC monotone non-increasing (discharge-only QSS)"
-    )
-    assert soc[-1] < soc[0], "a driven lap draws charge"
+    dsoc = np.diff(soc)
+    # SoC moves BOTH ways: it falls under traction and RISES under braking — the mapped EV recovers
+    # energy through its electric machine (M6 PR3), the same regen the transient tier already models.
+    # It is NOT the pre-PR3 discharge-only monotone trace.
+    assert dsoc.min() < 0.0, "SoC falls under traction draw"
+    assert dsoc.max() > 0.0, "SoC rises under braking — the machine regenerates"
+    assert soc[-1] < soc[0], "a full-throttle lap still draws net charge (consumption > regen)"
     assert 0.0 < soc[-1] < 0.98, f"end SoC {soc[-1]:.3f}"
     temp = ds.machine_temp_c.to_numpy()
     assert temp.max() > temp[0] + 5.0, "the winding must heat under traction loss"
     # model3 has no `ers:` block, so its pack keeps the v0.3.0 top-of-window seed (the M6 PR2
-    # mid-window seed is scoped to ERS cars) — this lap is byte-identical to v0.3.0.
+    # mid-window seed is scoped to ERS cars). The drive-segment trajectory is unchanged from v0.3.0;
+    # the SoC channel now carries the braking regen (a deliberate physics gain, not a regression).
     assert float(temp.max()) < 180.0, "winding stays below t_max"
     # The machine-thermal mass-heuristic fills (none expected — the emotor is fully authored)
     # and the missing-map fallbacks are recorded in the notes: nothing silent.
