@@ -862,7 +862,7 @@ pub(crate) fn prepare_transient(
 /// regen fraction) plus optional `override_flag` (bool), `lift_point` (m/s speed to lift toward; a
 /// large value ⇒ no lift), and `shift_map_id` (u32). Missing optional arrays default over the same
 /// length. A mis-sized array or an out-of-range fraction is a `ValueError` naming the station.
-fn us_schedule_from_py(
+pub(crate) fn us_schedule_from_py(
     schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<Option<UsSchedule<f64>>> {
     let Some(d) = schedule else {

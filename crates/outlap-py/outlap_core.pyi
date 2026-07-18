@@ -246,6 +246,8 @@ def solve_lap(
     sim: dict[str, object] | None = None,
     tire_thermal: bool = False,
     initial_soc: float | None = None,
+    override: bool = False,
+    us_schedule: dict[str, object] | None = None,
 ) -> Lap: ...
 def solve_transient_lap(
     vehicle_dir: str,
@@ -260,6 +262,8 @@ def solve_transient_lap(
     speed_margin: float = ...,
     initial_soc: float | None = None,
     tire_thermal: bool = False,
+    override: bool = False,
+    us_schedule: dict[str, object] | None = None,
 ) -> TransientLap: ...
 def solve_stint(
     vehicle_dir: str,
@@ -276,6 +280,8 @@ def solve_stint(
     tire_thermal: bool = True,
     initial_tire_temp_c: float | None = None,
     initial_soc: float | None = None,
+    override: bool = False,
+    us_schedule: dict[str, object] | None = None,
 ) -> QssStint: ...
 def solve_transient_stint(
     vehicle_dir: str,
@@ -292,6 +298,8 @@ def solve_transient_stint(
     initial_soc: float | None = None,
     tire_thermal: bool = True,
     initial_tire_temp_c: float | None = None,
+    override: bool = False,
+    us_schedule: dict[str, object] | None = None,
 ) -> TransientStint: ...
 def vehicle_report(
     vehicle_dir: str,

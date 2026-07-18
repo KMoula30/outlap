@@ -318,6 +318,8 @@ def solve_lap_dataset(
     tire_thermal: bool = False,
     initial_soc: float | None = None,
     speed_margin: float | None = None,
+    override: bool = False,
+    us_schedule: dict[str, object] | None = None,
 ) -> xr.Dataset:
     """Solve a QSS lap and return it directly as a labelled dataset (see :func:`lap_dataset`).
 
@@ -334,9 +336,11 @@ def solve_lap_dataset(
     fail loudly, never silently.
 
     This wrapper accepts the **union** of the QSS and transient lap kwargs and forwards each to
-    whichever solver the resolved tier selects: ``tire_thermal`` and ``initial_soc`` (the starting
-    pack state of charge) apply to both, while ``speed_margin`` is transient-only. A kwarg the
-    resolved tier cannot honour raises :class:`ValueError` rather than being silently dropped.
+    whichever solver the resolved tier selects: ``tire_thermal``, ``initial_soc`` (the starting
+    pack state of charge), and the 2026 ERS controls ``override`` (enable the Overtake envelope +
+    the extra harvest allowance) and ``us_schedule`` (a ``u(s)`` control schedule) apply to both,
+    while ``speed_margin`` is transient-only. A kwarg the resolved tier cannot honour raises
+    :class:`ValueError` rather than being silently dropped.
 
     ``tier="t2"`` runs the transient tier instead, returning the **time-indexed** dataset of
     :func:`transient_lap_dataset` (dims ``time``/``wheel``) rather than the arc-length one.
@@ -362,6 +366,8 @@ def solve_lap_dataset(
                 sim=sim,
                 initial_soc=initial_soc,
                 tire_thermal=tire_thermal,
+                override=override,
+                us_schedule=us_schedule,
                 **margin_kw,
             )
         )
@@ -383,6 +389,8 @@ def solve_lap_dataset(
         sim=sim,
         tire_thermal=tire_thermal,
         initial_soc=initial_soc,
+        override=override,
+        us_schedule=us_schedule,
     )
     return lap_dataset(lap)
 
@@ -713,6 +721,8 @@ def solve_stint_dataset(
     initial_tire_temp_c: float | None = None,
     initial_soc: float | None = None,
     speed_margin: float | None = None,
+    override: bool = False,
+    us_schedule: dict[str, object] | None = None,
 ) -> xr.Dataset:
     """Solve a multi-lap **stint** and return it as a labelled dataset.
 
@@ -723,9 +733,10 @@ def solve_stint_dataset(
     its usable window).
 
     This wrapper accepts the **union** of the QSS and transient stint kwargs and forwards each to the
-    resolved tier: ``tire_thermal`` / ``initial_tire_temp_c`` / ``initial_soc`` apply to both, while
-    ``speed_margin`` is transient-only; a kwarg the resolved tier cannot honour raises
-    :class:`ValueError` rather than being silently dropped.
+    resolved tier: ``tire_thermal`` / ``initial_tire_temp_c`` / ``initial_soc`` and the 2026 ERS
+    controls ``override`` / ``us_schedule`` apply to both, while ``speed_margin`` is transient-only;
+    a kwarg the resolved tier cannot honour raises :class:`ValueError` rather than being silently
+    dropped.
 
     ``tier="t2"`` runs the transient tier and returns the per-lap summary of
     :func:`transient_stint_dataset` (dims ``lap``/``wheel``); the QSS tiers (``"t0"``/``"t1"``) return
@@ -755,6 +766,8 @@ def solve_stint_dataset(
                 tire_thermal=tire_thermal,
                 initial_tire_temp_c=initial_tire_temp_c,
                 initial_soc=initial_soc,
+                override=override,
+                us_schedule=us_schedule,
                 **margin_kw,
             )
         )
@@ -776,6 +789,8 @@ def solve_stint_dataset(
             conditions=conditions,
             tier=tier,
             sim=sim,
+            override=override,
+            us_schedule=us_schedule,
             tire_thermal=tire_thermal,
             initial_tire_temp_c=initial_tire_temp_c,
             initial_soc=initial_soc,
