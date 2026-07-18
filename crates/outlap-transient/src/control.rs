@@ -192,7 +192,7 @@ pub trait SlowStack {
     fn regen_power_limit_w(&self) -> f64;
     /// The current battery **discharge** (draw) power ceiling, W — the mirror of
     /// [`Self::regen_power_limit_w`], refreshed on the same slow clock and consumed by the ERS
-    /// deploy realization (`0` below the SoC window floor, so a SoC-starved MGU-K stops deploying).
+    /// deploy realization (`0` below the `SoC`-window floor, so a `SoC`-starved MGU-K stops deploying).
     /// Defaults to "no cap" so the energy-double test mock and any pack-free stack keep compiling.
     fn discharge_power_limit_w(&self) -> f64 {
         f64::INFINITY
@@ -201,6 +201,63 @@ pub trait SlowStack {
     fn soc(&self) -> f64;
     /// The current pack temperature, °C.
     fn temp_c(&self) -> f64;
+}
+
+/// The per-step state a boundary [`ErsGovernor`] decides on. Assembled by the solver once per step
+/// at the boundary from the current fast state and the slow-clock-refreshed pack limits.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ErsStepInput {
+    /// Arc-length station of the car this step, m — the `u(s)` schedule (if any) is indexed by it.
+    pub s: f64,
+    /// Vehicle speed, m/s.
+    pub v: f64,
+    /// Driver throttle demand this step, `0..1`.
+    pub throttle: f64,
+    /// Driver brake demand this step, `0..1`.
+    pub brake: f64,
+    /// Step length, s (turns per-lap MJ budgets into per-step power ceilings).
+    pub dt: f64,
+    /// Pack state of charge, 0..1 (slow-clock refreshed) — the recharge-target gate reads it.
+    pub soc: f64,
+    /// Pack discharge (draw) ceiling, W (slow-clock refreshed) — caps the realized deploy; `0`
+    /// below the SoC-window floor, so a SoC-starved MGU-K stops deploying.
+    pub discharge_limit_w: f64,
+    /// Pack charge-acceptance ceiling, W (slow-clock refreshed) — caps the realized harvest.
+    pub regen_limit_w: f64,
+    /// Full-throttle mechanical drive power available at this speed, W — the ICE surplus the K may
+    /// back-drive against for the part-throttle / super-clip recharge phases.
+    pub mech_drive_power_w: f64,
+}
+
+/// What a boundary [`ErsGovernor`] publishes for the powertrain block and the per-lap ledger.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ErsStepOut {
+    /// The MGU-K deploy wheel force, N (`+` deploy under power / `−` super-clip back-drive).
+    pub deploy_force_n: f64,
+    /// The realized electrical deploy power drawn from the pack, W (≥ 0).
+    pub deploy_power_w: f64,
+    /// The realized electrical harvest banked into the pack, W (≥ 0).
+    pub harvest_power_w: f64,
+}
+
+/// The **2026 ERS energy manager** as the transient orchestrator's step-boundary controller
+/// (sense → control → actuate → integrate, §6.2b): it decides the MGU-K deploy/harvest ONCE per
+/// step from the boundary state and the slow-clock pack limits, publishing frozen bus channels the
+/// pure powertrain block consumes every RHS evaluation (the `torque_scale` two-layer pattern).
+///
+/// Like [`SlowStack`], the concrete implementation lives at the Python boundary — it wraps the
+/// `outlap-powertrain` [`EnergyManager`](https://docs.rs/outlap-powertrain) and the QSS mechanical
+/// facts, so the wasm-clean transient crate never depends on the manager/QSS machinery. Both tiers
+/// therefore drive the SAME rulebook (parity gate #4 compares physics, not two rule copies).
+pub trait ErsGovernor {
+    /// Decide this step's deploy/harvest from the boundary state (allocation-free per call).
+    fn decide(&mut self, inp: &ErsStepInput) -> ErsStepOut;
+    /// Reset the per-lap energy ledger at the start/finish line (the pack `SoC` is NOT reset).
+    fn reset_lap(&mut self);
+    /// The electrical deploy energy banked this lap so far, J (for the result channels).
+    fn deploy_j(&self) -> f64;
+    /// The electrical harvest energy banked this lap so far, J.
+    fn harvest_j(&self) -> f64;
 }
 
 #[cfg(test)]

@@ -131,8 +131,7 @@ pub const SCHEMA_MAJOR: u16 = 1;
 pub fn current_minor(name: &str) -> u16 {
     match name {
         schema_name::VEHICLE => 7,
-        schema_name::PTM => 2,
-        schema_name::BATTERY => 2,
+        schema_name::PTM | schema_name::BATTERY => 2,
         schema_name::TYR | schema_name::SIM => 1,
         // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.
         _ => 0,

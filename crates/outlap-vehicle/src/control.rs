@@ -332,6 +332,12 @@ pub struct Powertrain<T> {
     pub brake_front_bias: T,
     /// Per-axle regen-brake blend parameters (series braking).
     pub regen: RegenParams<T>,
+    /// Whether the rule-based 2026 ERS energy manager governs this car (a vehicle with an `ers:`
+    /// block; M6/PR4). When set, the MGU-K deploy force (published on `ers_deploy_force_n`) is added
+    /// to the drive, and the pack draw / charge come from the manager's realized electrical
+    /// deploy / harvest (`ers_deploy_power_w` / `ers_harvest_power_w`) rather than the standalone
+    /// `traction_draw` / `blend_regen` — so both tiers bank the same physics (parity gate #4).
+    pub ers_governed: bool,
     /// Interned actuation channels (reads shift `torque_scale` + `regen_limit_w`; publishes
     /// `regen_power_w` and the per-axle machine braking torques).
     pub actuation: ActuationChannels,
@@ -361,6 +367,9 @@ impl<T: Float> Block<T> for Powertrain<T> {
                 CoreSignal::Brake as usize,
                 self.actuation.torque_scale.index(),
                 self.actuation.regen_limit_w.index(),
+                self.actuation.ers_deploy_force_n.index(),
+                self.actuation.ers_deploy_power_w.index(),
+                self.actuation.ers_harvest_power_w.index(),
             ],
             writes,
         )
@@ -376,8 +385,19 @@ impl<T: Float> Block<T> for Powertrain<T> {
         let torque_scale = bus.get_channel(self.actuation.torque_scale, lane);
 
         // Total available wheel drive force at this speed (best gear), gated by throttle and the
-        // shift torque interruption.
+        // shift torque interruption. This is the MECHANICAL (drivetrain-unit) ceiling; the ERS
+        // deploy is a separate additive slice below (the sampled traction curve stays ERS-free).
         let f_avail = throttle * torque_scale * self.traction.eval(vx);
+
+        // The MGU-K deploy force the energy manager scheduled at the step boundary (M6/PR4): an
+        // additive drive slice on an ERS car (`+` deploy / `−` super-clip back-drive), also subject
+        // to the shift torque interruption since it is crank-referenced upstream of the gearbox.
+        let deploy_force = if self.ers_governed {
+            bus.get_channel(self.actuation.ers_deploy_force_n, lane) * torque_scale
+        } else {
+            zero
+        };
+        let f_drive = f_avail + deploy_force;
 
         let total_brake = brake * self.max_brake_torque;
         let two = one + one;
@@ -387,9 +407,10 @@ impl<T: Float> Block<T> for Powertrain<T> {
         // Commanded braking *force* per axle (what the calipers would deliver alone), N.
         let mut axle_brake_force = [zero; 2];
         for w in 0..WHEELS {
-            // Wheel drive torque = (share of available drive force) × rolling radius, so at steady
-            // spin the tyre delivers ≈ that force (grip permitting; wheelspin caps it via the tyre).
-            let drive = f_avail * self.drive_weight[w] * self.radius[w];
+            // Wheel drive torque = (share of the mechanical + ERS-deploy drive force) × rolling
+            // radius, so at steady spin the tyre delivers ≈ that force (grip permitting; wheelspin
+            // caps it via the tyre).
+            let drive = f_drive * self.drive_weight[w] * self.radius[w];
             bus.set_wheel(WheelSignal::WheelDriveTorque, w, lane, drive);
             let brake_w = if w < 2 { front_share } else { rear_share };
             // The axle *total* brake torque — friction plus regen. This is what the tyre responds to,
@@ -401,23 +422,39 @@ impl<T: Float> Block<T> for Powertrain<T> {
             }
         }
 
-        let (regen_power, axle_regen_torque) = self.blend_regen(vx, axle_brake_force, bus, lane);
-        bus.set_channel(self.actuation.regen_power_w, lane, regen_power);
-        bus.set_channel(
-            self.actuation.traction_power_w,
-            lane,
-            self.traction_draw(vx, f_avail),
-        );
-        bus.set_channel(
-            self.actuation.regen_torque_front_nm,
-            lane,
-            axle_regen_torque[0],
-        );
-        bus.set_channel(
-            self.actuation.regen_torque_rear_nm,
-            lane,
-            axle_regen_torque[1],
-        );
+        if self.ers_governed {
+            // The 2026 ERS energy manager owns the electrical accounting (D-M6-10): the pack draw is
+            // the manager's realized electrical deploy ONLY (the ICE covers the rest of traction),
+            // and the pack charge is the five-ceiling harvest it banked. The friction/brake force
+            // above is untouched, so the trajectory is unchanged whether the energy was recovered or
+            // dissipated (Decision #11) — only the banked energy differs. The per-axle machine
+            // braking torque telemetry is not resolved at this tier (the manager works in power).
+            let draw = bus.get_channel(self.actuation.ers_deploy_power_w, lane);
+            let harvest = bus.get_channel(self.actuation.ers_harvest_power_w, lane);
+            bus.set_channel(self.actuation.traction_power_w, lane, draw);
+            bus.set_channel(self.actuation.regen_power_w, lane, harvest);
+            bus.set_channel(self.actuation.regen_torque_front_nm, lane, zero);
+            bus.set_channel(self.actuation.regen_torque_rear_nm, lane, zero);
+        } else {
+            let (regen_power, axle_regen_torque) =
+                self.blend_regen(vx, axle_brake_force, bus, lane);
+            bus.set_channel(self.actuation.regen_power_w, lane, regen_power);
+            bus.set_channel(
+                self.actuation.traction_power_w,
+                lane,
+                self.traction_draw(vx, f_avail),
+            );
+            bus.set_channel(
+                self.actuation.regen_torque_front_nm,
+                lane,
+                axle_regen_torque[0],
+            );
+            bus.set_channel(
+                self.actuation.regen_torque_rear_nm,
+                lane,
+                axle_regen_torque[1],
+            );
+        }
     }
 }
 
@@ -904,6 +941,7 @@ mod tests {
                     authority: 1.0,
                 }),
             },
+            ers_governed: false,
             actuation,
         };
         let mut bus = Bus::<f64>::with_interner(&it, 1);
@@ -996,6 +1034,7 @@ mod regen_tests {
                 front,
                 rear,
             },
+            ers_governed: false,
             actuation,
         };
         (pt, bus)

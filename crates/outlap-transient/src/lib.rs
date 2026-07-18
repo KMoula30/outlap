@@ -27,7 +27,10 @@ pub mod tire_thermal;
 // depending on `outlap-core` directly (the Python extension module is itself named `outlap_core`).
 pub use outlap_core::bus::ChannelInterner;
 
-pub use control::{ShiftEvent, Shifter, SlowStack, DOWNSHIFT_HYSTERESIS, SHIFT_CUT_FRACTION};
+pub use control::{
+    ErsGovernor, ErsStepInput, ErsStepOut, ShiftEvent, Shifter, SlowStack, DOWNSHIFT_HYSTERESIS,
+    SHIFT_CUT_FRACTION,
+};
 pub use lap::{Provenance, SimConfig, T2Blocks, TransientSolver};
 pub use line_table::{LineSamples, LineTable, PreviewSample, RoadSample};
 pub use result::{TransientLap, Wheels};

@@ -75,8 +75,11 @@ pub fn regen_params(t1: &T1Vehicle, authority: f64, efficiency: f64) -> RegenPar
     let [front, rear] = outlap_vehicle::assembly::regen_curves(t1, &opts);
     // A flat efficiency curve at the requested constant (the pre-PR4 proxy) — the tests that use
     // this helper assert energy = mech·η at a single constant η.
-    let eff = MonotoneCubic::new(vec![0.0, opts.envelope_v_max_mps], vec![efficiency, efficiency])
-        .expect("flat efficiency curve");
+    let eff = MonotoneCubic::new(
+        vec![0.0, opts.envelope_v_max_mps],
+        vec![efficiency, efficiency],
+    )
+    .expect("flat efficiency curve");
     let axle = |c: Option<MonotoneCubic<f64>>| {
         c.map(|force_max| AxleRegen {
             force_max,

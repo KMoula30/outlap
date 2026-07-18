@@ -95,6 +95,20 @@ pub struct ActuationChannels {
     pub regen_torque_front_nm: ChannelId,
     /// Rear-axle **machine** braking torque, N·m (≥ 0) — the rear counterpart. Powertrain-published.
     pub regen_torque_rear_nm: ChannelId,
+    /// ERS MGU-K **deploy wheel force**, N (M6/PR4) — the additive drive force the rule-based energy
+    /// manager schedules on a hybrid (`+` deploy under power, `−` super-clip back-drive on a
+    /// full-throttle straight). Decided once per step at the boundary and frozen across the RK sweep
+    /// (the `torque_scale` pattern); `0` when the car has no `ers:` block. Governor-published.
+    pub ers_deploy_force_n: ChannelId,
+    /// ERS realized **electrical deploy draw**, W (≥ 0) — what the pack pays to deploy the MGU-K this
+    /// step (D-M6-10: the pack draw is the manager's electrical deploy ONLY, the ICE covers the rest
+    /// of traction). For an ERS car the powertrain publishes this as `traction_power_w`.
+    /// Governor-published.
+    pub ers_deploy_power_w: ChannelId,
+    /// ERS realized **electrical harvest**, W (≥ 0) — what the pack banks this step through the
+    /// five-ceiling harvest chain (braking regen, part-throttle, or super-clip). For an ERS car the
+    /// powertrain publishes this as `regen_power_w`. Governor-published.
+    pub ers_harvest_power_w: ChannelId,
 }
 
 impl ActuationChannels {
@@ -110,6 +124,9 @@ impl ActuationChannels {
             traction_power_w: interner.intern("ctrl.traction_power_w"),
             regen_torque_front_nm: interner.intern("ctrl.regen_torque_front_nm"),
             regen_torque_rear_nm: interner.intern("ctrl.regen_torque_rear_nm"),
+            ers_deploy_force_n: interner.intern("ctrl.ers_deploy_force_n"),
+            ers_deploy_power_w: interner.intern("ctrl.ers_deploy_power_w"),
+            ers_harvest_power_w: interner.intern("ctrl.ers_harvest_power_w"),
         }
     }
 }

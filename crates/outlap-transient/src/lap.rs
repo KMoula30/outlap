@@ -39,7 +39,7 @@ use outlap_vehicle::{
     Powertrain, RoadChannels, Tire, TorqueVectoring,
 };
 
-use crate::control::{Shifter, SlowStack};
+use crate::control::{ErsGovernor, ErsStepInput, Shifter, SlowStack};
 use crate::line_table::LineTable;
 use crate::result::TransientLap;
 use crate::tire_thermal::TireThermalStack;
@@ -174,6 +174,10 @@ pub struct TransientSolver<T> {
     // caller; absent ⇒ an ideal single-gear, no-regen lap (byte-identical to the PR5 skeleton).
     shifter: Option<Shifter<T>>,
     slow: Option<Box<dyn SlowStack>>,
+    /// The 2026 ERS energy manager as a step-boundary governor (M6/PR4). Optional artifact handed in
+    /// by the caller; absent ⇒ a non-ERS car (byte-identical to the pre-PR4 skeleton). Decides the
+    /// MGU-K deploy/harvest once per step, published frozen for the powertrain block.
+    ers: Option<Box<dyn ErsGovernor>>,
     // The per-wheel tire-thermal ring + wear stack (M5 PR3): the third slow subsystem. Absent ⇒ a
     // frozen-tire lap (byte-identical to the pre-M5 skeleton). Accumulates each step's heat and
     // advances on the same decimated slow clock as the battery; its held grip/pressure override lives
@@ -184,6 +188,13 @@ pub struct TransientSolver<T> {
     torque_scale: T,
     /// Battery regen power ceiling published this step, W (0 without a slow stack).
     regen_limit_w: T,
+    /// Battery **discharge** power ceiling refreshed on the slow clock, W (∞ without a slow stack) —
+    /// caps the ERS deploy the governor may draw (the mirror of `regen_limit_w`).
+    discharge_limit_w: T,
+    /// The ERS governor's frozen boundary command this step (deploy force / draw / harvest, W & N).
+    ers_deploy_force_n: T,
+    ers_deploy_power_w: T,
+    ers_harvest_power_w: T,
     /// Regen electrical energy accumulated since the last slow-clock fire, J.
     net_charge_energy_accum: T,
     /// Fast steps elapsed since the last slow-clock fire (to flush the final partial window at lap
@@ -263,10 +274,15 @@ impl<T: Float> TransientSolver<T> {
             slow_clock,
             shifter: None,
             slow: None,
+            ers: None,
             tire_thermal: None,
             actuation,
             torque_scale: T::one(),
             regen_limit_w: T::zero(),
+            discharge_limit_w: T::infinity(),
+            ers_deploy_force_n: T::zero(),
+            ers_deploy_power_w: T::zero(),
+            ers_harvest_power_w: T::zero(),
             net_charge_energy_accum: T::zero(),
             slow_pending_steps: 0,
             ax_prev: T::zero(),
@@ -291,7 +307,18 @@ impl<T: Float> TransientSolver<T> {
     #[must_use]
     pub fn with_slow_stack(mut self, slow: Box<dyn SlowStack>) -> Self {
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
+        self.discharge_limit_w =
+            T::from(slow.discharge_power_limit_w()).unwrap_or_else(T::infinity);
         self.slow = Some(slow);
+        self
+    }
+
+    /// Attach the 2026 ERS energy manager as the step-boundary governor (consuming, M6/PR4). Without
+    /// one, a car deploys no MGU-K and recovers through the standalone regen blend (the pre-PR4
+    /// behaviour). Requires a slow stack (the pack the manager schedules); the caller wires both.
+    #[must_use]
+    pub fn with_ers_governor(mut self, ers: Box<dyn ErsGovernor>) -> Self {
+        self.ers = Some(ers);
         self
     }
 
@@ -352,16 +379,27 @@ impl<T: Float> TransientSolver<T> {
         self.fast[s as usize]
     }
 
+    /// The step-boundary control values published (frozen) into the bus on every RHS eval this step.
+    fn boundary_inputs(&self) -> BoundaryInputs<T> {
+        BoundaryInputs {
+            torque_scale: self.torque_scale,
+            regen_limit_w: self.regen_limit_w,
+            ers_deploy_force_n: self.ers_deploy_force_n,
+            ers_deploy_power_w: self.ers_deploy_power_w,
+            ers_harvest_power_w: self.ers_harvest_power_w,
+        }
+    }
+
     /// Clear the bus, publish road + actuation, run the block chain; the chassis writes `dfast`.
     fn eval_rhs(&mut self) {
+        let boundary = self.boundary_inputs();
         eval_rhs_raw(
             &self.blocks,
             &self.line,
             &self.fast,
             &mut self.dfast,
             &mut self.bus,
-            self.torque_scale,
-            self.regen_limit_w,
+            &boundary,
         );
     }
 
@@ -438,6 +476,33 @@ impl<T: Float> TransientSolver<T> {
             self.torque_scale = shifter.update(self.t, dt, v);
         }
 
+        // (0b) 2026 ERS energy manager boundary decision (M6/PR4), also frozen across the RK sweep.
+        //      The driver throttle/brake come from the previous eval still on the bus (a one-step
+        //      lag, like the load-transfer coupling); the pack SoC + discharge/regen ceilings are the
+        //      slow-clock-refreshed values. The realized deploy/harvest are published for the block.
+        if let Some(mut ers) = self.ers.take() {
+            let vx = self.fast[ChassisState::Vx as usize].max(T::zero());
+            let throttle = self.bus.get(CoreSignal::Throttle, 0);
+            let brake = self.bus.get(CoreSignal::Brake, 0);
+            let mech_drive_power = self.blocks.powertrain.traction.eval(vx) * vx;
+            let inp = ErsStepInput {
+                s: self.fast[ChassisState::S as usize].to_f64().unwrap_or(0.0),
+                v: vx.to_f64().unwrap_or(0.0),
+                throttle: throttle.to_f64().unwrap_or(0.0),
+                brake: brake.to_f64().unwrap_or(0.0),
+                dt: dt.to_f64().unwrap_or(0.0),
+                soc: self.slow.as_ref().map_or(1.0, |s| s.soc()),
+                discharge_limit_w: self.discharge_limit_w.to_f64().unwrap_or(f64::INFINITY),
+                regen_limit_w: self.regen_limit_w.to_f64().unwrap_or(0.0),
+                mech_drive_power_w: mech_drive_power.to_f64().unwrap_or(0.0).max(0.0),
+            };
+            let out = ers.decide(&inp);
+            self.ers_deploy_force_n = T::from(out.deploy_force_n).unwrap_or_else(T::zero);
+            self.ers_deploy_power_w = T::from(out.deploy_power_w).unwrap_or_else(T::zero);
+            self.ers_harvest_power_w = T::from(out.harvest_power_w).unwrap_or_else(T::zero);
+            self.ers = Some(ers);
+        }
+
         // (1) coupling + relaxation (leaves the lagged slip frozen for the RK sweep).
         self.couple_and_relax();
 
@@ -448,6 +513,7 @@ impl<T: Float> TransientSolver<T> {
             self.x_int[k] = self.fast[slot];
         }
         // Disjoint field borrows for the closure (arena/state vs. the block+bus scratch).
+        let boundary = self.boundary_inputs();
         let Self {
             arena,
             x_int,
@@ -458,17 +524,14 @@ impl<T: Float> TransientSolver<T> {
             blocks,
             line,
             t,
-            torque_scale,
-            regen_limit_w,
             ..
         } = self;
         let t_now = *t;
-        let (ts, rl) = (*torque_scale, *regen_limit_w);
         arena.step(x_int, t_now, dt, |_ti, xs, dxs| {
             for (k, &slot) in integrated.iter().enumerate() {
                 fast[slot] = xs[k];
             }
-            eval_rhs_raw(blocks, line, fast, dfast, bus, ts, rl);
+            eval_rhs_raw(blocks, line, fast, dfast, bus, &boundary);
             for (k, d) in dxs.iter_mut().enumerate() {
                 *d = dfast[integrated[k]];
             }
@@ -544,6 +607,8 @@ impl<T: Float> TransientSolver<T> {
         self.net_charge_energy_accum = T::zero();
         self.slow_pending_steps = 0;
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
+        self.discharge_limit_w =
+            T::from(slow.discharge_power_limit_w()).unwrap_or_else(T::infinity);
     }
 
     /// Bank this step's per-wheel tire heat into the ring stack's window accumulators (M5 PR3). The
@@ -781,6 +846,12 @@ impl<T: Float> TransientSolver<T> {
             {
                 lap_end_idx.push(lap.len() - 1);
                 next_lap += 1;
+                // Reset the ERS per-lap energy ledger at the start/finish line so the FIA per-lap
+                // harvest budget (8.5 MJ + override bonus) is enforced lap-by-lap; the pack SoC is
+                // NOT reset — it carries across the line exactly as a real stint (D-M6-10).
+                if let Some(ers) = self.ers.as_mut() {
+                    ers.reset_lap();
+                }
             }
             if s >= s_end {
                 break;
@@ -857,6 +928,23 @@ fn publish_road<T: Float>(
     bus.set_channel(road.v_ref_preview, 0, p.v_ref);
 }
 
+/// The step-boundary control values published (frozen) into the bus on every RHS evaluation
+/// (`PR4a`) — bundled into one `Copy` struct so a new boundary channel is one field, not another
+/// positional argument threaded through both the sequential and the RK-closure call sites.
+#[derive(Clone, Copy, Debug)]
+struct BoundaryInputs<T> {
+    /// Shift-FSM drive-torque scale `∈ [0, 1]` (the §8.2 torque interruption).
+    torque_scale: T,
+    /// Battery charge-acceptance ceiling, W (slow-clock refreshed; caps the regen blend).
+    regen_limit_w: T,
+    /// ERS MGU-K deploy wheel force, N (`+` deploy / `−` super-clip); `0` without a governor.
+    ers_deploy_force_n: T,
+    /// ERS realized electrical deploy draw, W (the pack draw on a hybrid, D-M6-10).
+    ers_deploy_power_w: T,
+    /// ERS realized electrical harvest, W (the five-ceiling harvest banked into the pack).
+    ers_harvest_power_w: T,
+}
+
 /// One full RHS evaluation: clear bus, publish road + preview at `fast`'s `(s, v_x)`, run the block
 /// chain in schedule order, leaving the chassis + controller derivatives in `dfast`. Free-standing so
 /// callers can hand disjoint field borrows (the RK closure) or `self` fields (the sequential path).
@@ -866,17 +954,33 @@ fn eval_rhs_raw<T: Float>(
     fast: &[T],
     dfast: &mut [T],
     bus: &mut Bus<T>,
-    torque_scale: T,
-    regen_limit_w: T,
+    boundary: &BoundaryInputs<T>,
 ) {
     let s = fast[ChassisState::S as usize];
     let vx = fast[ChassisState::Vx as usize];
     bus.clear();
     publish_road(line, &blocks.road, bus, s, vx, blocks.driver.preview_time);
     // Publish the rule-based control-layer boundary values (frozen across the RK sweep): the shift
-    // FSM's drive-torque scale and the battery regen ceiling the powertrain reads.
-    bus.set_channel(blocks.actuation.torque_scale, 0, torque_scale);
-    bus.set_channel(blocks.actuation.regen_limit_w, 0, regen_limit_w);
+    // FSM's drive-torque scale, the battery regen ceiling, and the 2026 ERS energy manager's
+    // deploy/harvest command. `bus.clear` above zeroes the whole bus every eval, so these must be
+    // re-published here on EVERY RHS evaluation (see `Bus::clear`), not once per step.
+    bus.set_channel(blocks.actuation.torque_scale, 0, boundary.torque_scale);
+    bus.set_channel(blocks.actuation.regen_limit_w, 0, boundary.regen_limit_w);
+    bus.set_channel(
+        blocks.actuation.ers_deploy_force_n,
+        0,
+        boundary.ers_deploy_force_n,
+    );
+    bus.set_channel(
+        blocks.actuation.ers_deploy_power_w,
+        0,
+        boundary.ers_deploy_power_w,
+    );
+    bus.set_channel(
+        blocks.actuation.ers_harvest_power_w,
+        0,
+        boundary.ers_harvest_power_w,
+    );
     let sv = StateView::new(fast, 1, 0);
     let mut dv = DerivView::new(dfast, 1, 0);
     // sense → control → actuate → integrate. The torque-vectoring allocator runs at the tail of the

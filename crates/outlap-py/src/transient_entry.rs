@@ -2,6 +2,7 @@
 //! Transient (T2) Python entry points and result classes (`TransientLap`, `TransientStint`).
 
 use crate::prelude::*;
+use outlap_qss::ers::{DecideInput, ErsCommand, ErsMode, ErsPolicy, LapEnergyLedger, UsSchedule};
 
 /// The battery pack as the transient solver's slow-state stack (Decision #6): it Coulomb-counts the
 /// recovered regen energy on the decimated slow clock and publishes back the pack's
@@ -35,6 +36,188 @@ impl outlap_transient::SlowStack for PackSlowStack {
     }
     fn temp_c(&self) -> f64 {
         self.state.temp_k - 273.15
+    }
+}
+
+/// Speed floor for the `P = F·v` deploy-force conversion, m/s (matches the T0 seam's floor).
+const ERS_V_FLOOR_MPS: f64 = 1.0;
+/// Driver demand at/above which the march treats the throttle as WIDE OPEN (the C5.12 super-clip
+/// straight) — the same threshold the QSS march snaps to, so both tiers split part-throttle harvest
+/// from full-throttle super-clip identically (parity gate #4).
+const FULL_THROTTLE_DEMAND: f64 = 0.98;
+
+/// The **2026 ERS energy manager** as the transient step-boundary governor (M6/PR4): it drives the
+/// SAME `outlap-powertrain` [`EnergyManager`] the QSS march does (via [`ErsCoupling`]), so both
+/// tiers bank identical physics (parity gate #4). Held here at the native edge, like
+/// [`PackSlowStack`], so the wasm-clean transient crate never depends on the manager machinery.
+///
+/// Per step it mirrors the QSS `ers_decide` → `ers_realize` chain: build the manager inputs from the
+/// boundary throttle/brake/speed, decide the electrical command, then clip it by the slow-clock pack
+/// ceilings and convert to the additive deploy wheel force. The pack itself is advanced by the slow
+/// clock (the netted `regen − traction` power), so the realize step here only clips + accounts.
+pub(crate) struct ErsController {
+    coupling: ErsCoupling,
+    ledger: LapEnergyLedger<f64>,
+    /// Caller-owned C5.12 ramp-episode accumulators (the manager mutates nothing).
+    prev_k_power_w: f64,
+    ramp_reduced_w: f64,
+    /// Total caliper brake force at full pedal, N (`max_brake_torque / mean radius`) — turns the
+    /// driver's `brake ∈ [0,1]` into the braking power the harvest chain's blend authority scales.
+    max_brake_force_n: f64,
+    /// The ascending arc-length breakpoints of a `u(s)` schedule (empty ⇒ rule-based; station 0).
+    schedule_s: Vec<f64>,
+}
+
+impl ErsController {
+    /// Build the governor from the assembled coupling + the caliper capacity. `schedule_s` is the
+    /// arc-length grid a `Policy::Schedule` is sampled on (empty for the rule-based policy).
+    pub(crate) fn new(coupling: ErsCoupling, max_brake_force_n: f64, schedule_s: Vec<f64>) -> Self {
+        Self {
+            coupling,
+            ledger: LapEnergyLedger::new(),
+            prev_k_power_w: 0.0,
+            ramp_reduced_w: 0.0,
+            max_brake_force_n,
+            schedule_s,
+        }
+    }
+
+    /// The `u(s)` schedule station for arc-length `s` (nearest breakpoint; `0` when rule-based).
+    fn station(&self, s: f64) -> usize {
+        if self.schedule_s.is_empty() {
+            return 0;
+        }
+        match self
+            .schedule_s
+            .binary_search_by(|x| x.partial_cmp(&s).unwrap_or(std::cmp::Ordering::Less))
+        {
+            Ok(i) => i,
+            Err(i) => i.min(self.schedule_s.len() - 1),
+        }
+    }
+
+    /// The realized `(p_mech, p_elec_drawn)` for a pack-clipped electrical deploy demand — the
+    /// electrical draw is back-solved when the machine's mechanical ceiling binds, so the pack pays
+    /// only for power the machine can convert (mirrors `T0Vehicle::ers_realized_deploy_w`).
+    fn realized_deploy(&self, p_elec: f64) -> (f64, f64) {
+        let rb = self.coupling.manager.rulebook();
+        let p_mech_uncapped = rb.mech_deploy_w(p_elec);
+        let p_mech = p_mech_uncapped.min(self.coupling.p_mech_max_w).max(0.0);
+        let p_elec_real = if p_mech_uncapped > self.coupling.p_mech_max_w {
+            rb.mech_harvest_w(p_mech) // machine-bound: back-solve the electrical draw (p_mech / 0.97)
+        } else {
+            p_elec.max(0.0)
+        };
+        (p_mech, p_elec_real)
+    }
+
+    /// The additive deploy wheel force for a realized electrical draw (×0.97 → machine ceiling →
+    /// ×η / v), mirroring `T0Vehicle::ers_deploy_force_n`.
+    fn deploy_force(&self, v: f64, p_elec: f64) -> f64 {
+        let rb = self.coupling.manager.rulebook();
+        let p_mech = rb
+            .mech_deploy_w(p_elec)
+            .min(self.coupling.p_mech_max_w)
+            .max(0.0);
+        self.coupling.eta * p_mech / v.max(ERS_V_FLOOR_MPS)
+    }
+}
+
+impl outlap_transient::ErsGovernor for ErsController {
+    fn decide(&mut self, inp: &outlap_transient::ErsStepInput) -> outlap_transient::ErsStepOut {
+        let e = &self.coupling;
+        let station = self.station(inp.s);
+        // Manager inputs (T2 flavour of `ers_decide`): braking ⇒ the five-ceiling harvest demand;
+        // driving ⇒ the driver demand + the ICE surplus the K may back-drive (part-throttle harvest
+        // / full-throttle super-clip), snapped to 1.0 at the WOT threshold so the surplus value and
+        // the manager's branch agree (the same snap the QSS march does).
+        let braking = inp.brake > 1.0e-6 && inp.throttle <= 1.0e-6;
+        let (driver_demand, ice_surplus_w, brake_demand_w) = if braking {
+            let braking_power = (inp.brake * self.max_brake_force_n * inp.v).max(0.0);
+            (
+                0.0,
+                0.0,
+                e.max_regen_frac * e.regen_axle_share * braking_power,
+            )
+        } else if inp.throttle >= FULL_THROTTLE_DEMAND {
+            (1.0, inp.mech_drive_power_w, 0.0)
+        } else if inp.throttle > 0.0 {
+            (
+                inp.throttle,
+                inp.mech_drive_power_w * (1.0 - inp.throttle),
+                0.0,
+            )
+        } else {
+            (0.0, 0.0, 0.0) // coasting: the manager idles
+        };
+        let mech_regen_envelope_w = e.p_mech_max_w * ErsCoupling::fade(inp.v);
+        let di = DecideInput {
+            v: inp.v,
+            driver_demand,
+            brake_demand_w,
+            mech_regen_envelope_w,
+            ice_surplus_w,
+            soc: inp.soc,
+            override_active: e.override_active,
+            prev_k_power_w: self.prev_k_power_w,
+            ramp_reduced_w: self.ramp_reduced_w,
+            dt: inp.dt,
+            station,
+        };
+        let cmd = e.manager.decide(&di, &self.ledger);
+
+        // Realize (T2 flavour of `ers_realize`): the pack has the final word. Clip the electrical
+        // command by the slow-clock discharge/regen ceilings, publish the deploy force + electrical
+        // draw/harvest for the block + pack netting, and bank the REALIZED command in the ledger.
+        let mut out = outlap_transient::ErsStepOut::default();
+        let mut realized = ErsCommand {
+            deploy_w: 0.0,
+            harvest_w: 0.0,
+            mode: cmd.mode,
+        };
+        if cmd.deploy_w > 0.0 {
+            let p_elec = cmd.deploy_w.min(inp.discharge_limit_w.max(0.0));
+            let (_p_mech, p_elec_real) = self.realized_deploy(p_elec);
+            out.deploy_force_n = self.deploy_force(inp.v, p_elec_real);
+            out.deploy_power_w = p_elec_real;
+            realized.deploy_w = p_elec_real;
+        } else if cmd.harvest_w > 0.0 {
+            let p_elec = cmd.harvest_w.min(inp.regen_limit_w.max(0.0));
+            out.harvest_power_w = p_elec;
+            realized.harvest_w = p_elec;
+            if cmd.mode == ErsMode::HarvestStraight {
+                // Super-clip: the K back-drives against the ICE, cutting net wheel force by the
+                // absorbed mechanical share (driveline η skipped on the harvest side).
+                let p_mech_abs = e.manager.rulebook().mech_harvest_w(p_elec);
+                out.deploy_force_n = -p_mech_abs / inp.v.max(ERS_V_FLOOR_MPS);
+            }
+        }
+        self.ledger.record(&realized, inp.dt);
+
+        // C5.12 ramp-episode accounting: signed K power (+deploy −harvest); reductions accumulate
+        // while the demand falls, reset on a rise (mirrors the QSS march's caller-owned accumulators).
+        let k_now = realized.deploy_w - realized.harvest_w;
+        if k_now < self.prev_k_power_w {
+            self.ramp_reduced_w += self.prev_k_power_w - k_now;
+        } else {
+            self.ramp_reduced_w = 0.0;
+        }
+        self.prev_k_power_w = k_now;
+        out
+    }
+
+    fn reset_lap(&mut self) {
+        self.ledger.reset();
+        self.prev_k_power_w = 0.0;
+        self.ramp_reduced_w = 0.0;
+    }
+
+    fn deploy_j(&self) -> f64 {
+        self.ledger.deploy_j()
+    }
+
+    fn harvest_j(&self) -> f64 {
+        self.ledger.harvest_j()
     }
 }
 
@@ -394,6 +577,9 @@ pub(crate) struct PreparedTransient {
     tire_stack: Option<outlap_transient::TireThermalStack<f64>>,
     /// The gear-shift FSM (`None` for a single-speed car or one declaring no shift time).
     shifter: Option<outlap_transient::Shifter<f64>>,
+    /// The 2026 ERS energy manager governor (`None` for a car without an `ers:` block or a degraded
+    /// no-pack run). Drives the MGU-K deploy/harvest through the shared rulebook (M6/PR4).
+    ers: Option<ErsController>,
 }
 
 /// Assemble the transient block set + target line + slow subsystems for a T2 run (one lap or a
@@ -414,6 +600,12 @@ pub(crate) fn prepare_transient(
     initial_soc: Option<f64>,
     tire_thermal: bool,
     initial_tire_temp_c: Option<f64>,
+    // Enable the ERS override ("Overtake") envelope + the +0.5 MJ extra harvest for this run
+    // (D-M6-5: the per-run flag wins unconditionally over the schema `activation` hint).
+    override_active: bool,
+    // A `u(s)` control schedule (deploy/regen + override per station) driving the manager instead
+    // of the rule-based policy; `None` ⇒ the greedy rule-based policy.
+    us_schedule: Option<UsSchedule<f64>>,
 ) -> PyResult<PreparedTransient> {
     check_ds(ds_m)?;
     if !(speed_margin > 0.0 && speed_margin <= 1.0) {
@@ -611,6 +803,43 @@ pub(crate) fn prepare_transient(
         None
     };
 
+    // The 2026 ERS energy manager governor (M6/PR4): the MGU-K deploys, harvests, and respects the
+    // per-lap budgets at T2 through the SAME rulebook the QSS march uses (parity gate #4). Built from
+    // the T0 reduction (the machine ceiling + driveline efficiency) and the spec's `ers:` block; a
+    // missing pack on an ers car is the same hard error the QSS path raises unless `allow_degraded`.
+    let ers = {
+        let n_stations = us_schedule.as_ref().map_or(0, UsSchedule::len);
+        let policy = us_schedule.map_or(ErsPolicy::RuleBased, ErsPolicy::Schedule);
+        match crate::qss_entry::build_ers_coupling(
+            &resolved,
+            &t0v,
+            pack.is_some(),
+            sim_cfg.allow_degraded,
+            policy,
+            override_active,
+            &mut notes,
+        )? {
+            Some(coupling) => {
+                let r = blocks.powertrain.radius;
+                let mean_radius = ((r[0] + r[1] + r[2] + r[3]) / 4.0).max(0.1);
+                let max_brake_force_n = t2_opts.max_brake_torque_nm / mean_radius;
+                let schedule_s = schedule_stations(length, n_stations);
+                notes.push(format!(
+                    "T2 2026 ERS energy manager active: the MGU-K deploys on the C5.2.8 taper, \
+                     harvests under braking/lift/super-clip, and enforces the per-lap Recharge \
+                     budget{}",
+                    if override_active {
+                        " (override/Overtake enabled)"
+                    } else {
+                        ""
+                    }
+                ));
+                Some(ErsController::new(coupling, max_brake_force_n, schedule_s))
+            }
+            None => None,
+        }
+    };
+
     Ok(PreparedTransient {
         blocks,
         line,
@@ -624,7 +853,59 @@ pub(crate) fn prepare_transient(
         pack,
         tire_stack,
         shifter,
+        ers,
     })
+}
+
+/// Convert a Python `u(s)` schedule dict into a validated [`UsSchedule`] (M6/PR4, D-M6-9). The dict
+/// carries arrays over the station grid: `deploy_regen` (required, `[-1, 1]`; `+` deploy, `−`
+/// regen fraction) plus optional `override_flag` (bool), `lift_point` (m/s speed to lift toward; a
+/// large value ⇒ no lift), and `shift_map_id` (u32). Missing optional arrays default over the same
+/// length. A mis-sized array or an out-of-range fraction is a `ValueError` naming the station.
+fn us_schedule_from_py(
+    schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<Option<UsSchedule<f64>>> {
+    let Some(d) = schedule else {
+        return Ok(None);
+    };
+    let deploy_regen: Vec<f64> = d
+        .get_item("deploy_regen")?
+        .ok_or_else(|| {
+            PyValueError::new_err(
+                "us_schedule requires a `deploy_regen` array (deploy/regen fraction in [-1, 1] per \
+                 station over s)",
+            )
+        })?
+        .extract()?;
+    let n = deploy_regen.len();
+    let override_flag: Vec<bool> = match d.get_item("override_flag")? {
+        Some(v) => v.extract()?,
+        None => vec![false; n],
+    };
+    let lift_point: Vec<f64> = match d.get_item("lift_point")? {
+        Some(v) => v.extract()?,
+        None => vec![f64::INFINITY; n],
+    };
+    let shift_map_id: Vec<u32> = match d.get_item("shift_map_id")? {
+        Some(v) => v.extract()?,
+        None => vec![0_u32; n],
+    };
+    UsSchedule::new(deploy_regen, override_flag, lift_point, shift_map_id)
+        .map(Some)
+        .map_err(|e| PyValueError::new_err(format!("invalid us_schedule: {e:?}")))
+}
+
+/// The ascending arc-length grid `n` schedule stations map to over a lap of `length` metres — the
+/// station `i` sits at `s = i · length / (n − 1)`, so the transient governor can look up the station
+/// for the car's current `s`. Empty for `n < 2`.
+#[allow(clippy::cast_precision_loss)] // station counts are small
+fn schedule_stations(length: f64, n: usize) -> Vec<f64> {
+    if n < 2 || length <= 0.0 {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| i as f64 * length / (n as f64 - 1.0))
+        .collect()
 }
 
 /// Solve a **transient (T2)** lap: the 7-DOF chassis + tyre relaxation closed loop, driven by the
@@ -636,7 +917,7 @@ pub(crate) fn prepare_transient(
 ///
 /// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false, r#override = false, us_schedule = None))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn solve_transient_lap(
     vehicle_dir: &str,
@@ -656,7 +937,14 @@ pub(crate) fn solve_transient_lap(
     // flips on by default once FastF1 inverse calibration (M5 PR7/PR8) sets the params so the
     // steady-state lands in the window. Opt in to exercise the wired physics today.
     tire_thermal: bool,
+    // Enable the ERS override ("Overtake") envelope + the +0.5 MJ extra harvest for this lap (D-M6-5:
+    // the per-run flag wins unconditionally over the schema `activation` hint).
+    r#override: bool,
+    // A `u(s)` control schedule `{deploy_regen, override_flag?, lift_point?, shift_map_id?}` (arrays
+    // over s) driving the manager instead of the greedy rule-based policy.
+    us_schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<TransientLap> {
+    let us_schedule = us_schedule_from_py(us_schedule)?;
     let PreparedTransient {
         blocks,
         line,
@@ -670,6 +958,7 @@ pub(crate) fn solve_transient_lap(
         pack,
         tire_stack,
         shifter,
+        ers,
     } = prepare_transient(
         vehicle_dir,
         track,
@@ -684,11 +973,16 @@ pub(crate) fn solve_transient_lap(
         initial_soc,
         tire_thermal,
         None,
+        r#override,
+        us_schedule,
     )?;
     let start_s = cfg.start_s;
     let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
     if let Some((pack, state)) = pack {
         solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    if let Some(ers) = ers {
+        solver = solver.with_ers_governor(Box::new(ers));
     }
     if let Some(shifter) = shifter {
         solver = solver.with_shifter(shifter);
@@ -899,7 +1193,7 @@ impl TransientStint {
 /// line table wraps `s`, so the geometry + reference profile repeat every lap). Returns per-lap
 /// summaries: lap time, per-wheel end-of-lap + peak tyre state, and end-of-lap pack state.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = true, initial_tire_temp_c = None))]
+#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = true, initial_tire_temp_c = None, r#override = false, us_schedule = None))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn solve_transient_stint(
     vehicle_dir: &str,
@@ -916,12 +1210,15 @@ pub(crate) fn solve_transient_stint(
     initial_soc: Option<f64>,
     tire_thermal: bool,
     initial_tire_temp_c: Option<f64>,
+    r#override: bool,
+    us_schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<TransientStint> {
     if !(1..=MAX_STINT_LAPS).contains(&n_laps) {
         return Err(PyValueError::new_err(format!(
             "n_laps must lie in 1..={MAX_STINT_LAPS}, got {n_laps}"
         )));
     }
+    let us_schedule = us_schedule_from_py(us_schedule)?;
     let PreparedTransient {
         blocks,
         line,
@@ -935,6 +1232,7 @@ pub(crate) fn solve_transient_stint(
         pack,
         tire_stack,
         shifter,
+        ers,
     } = prepare_transient(
         vehicle_dir,
         track,
@@ -949,6 +1247,8 @@ pub(crate) fn solve_transient_stint(
         initial_soc,
         tire_thermal,
         initial_tire_temp_c,
+        r#override,
+        us_schedule,
     )?;
     notes.push(format!(
         "T2 stint: {n_laps} laps integrated continuously (one run, no re-seed) — the per-wheel \
@@ -958,6 +1258,9 @@ pub(crate) fn solve_transient_stint(
     let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
     if let Some((pack, state)) = pack {
         solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    if let Some(ers) = ers {
+        solver = solver.with_ers_governor(Box::new(ers));
     }
     if let Some(shifter) = shifter {
         solver = solver.with_shifter(shifter);
