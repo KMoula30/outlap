@@ -27,6 +27,9 @@ impl outlap_transient::SlowStack for PackSlowStack {
     fn regen_power_limit_w(&self) -> f64 {
         self.pack.regen_power_limit_w(&self.state)
     }
+    fn discharge_power_limit_w(&self) -> f64 {
+        self.pack.discharge_power_limit_w(&self.state)
+    }
     fn soc(&self) -> f64 {
         self.state.soc
     }

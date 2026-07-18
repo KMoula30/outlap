@@ -467,6 +467,15 @@ impl T1Vehicle {
         self.powertrain.max_regen_force_by_axle(v)
     }
 
+    /// The representative machine efficiency `[front, rear]` at vehicle speed `v`, sampled from each
+    /// axle machine's `.ptm` efficiency map (§8.4); `None` where no efficiency-mapped machine drives
+    /// the axle. The transient tier samples this into a speed-indexed curve at assembly so the series
+    /// regen blend and the electric traction draw run a real speed-varying efficiency. Alloc-free.
+    #[must_use]
+    pub fn machine_efficiency_by_axle(&self, v: f64) -> [Option<f64>; 2] {
+        self.powertrain.machine_efficiency_by_axle(v)
+    }
+
     /// Ascending up-shift speeds (m/s) for the primary geared drive unit — the crossover speeds where
     /// the best gear changes. The transient shift FSM consumes these as its up-shift thresholds;
     /// empty for a single-speed (direct-drive) car, which never shifts.

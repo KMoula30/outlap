@@ -139,6 +139,21 @@ pub fn regen_curves(t1: &T1Vehicle, opts: &T2Options) -> [Option<MonotoneCubic<f
     out
 }
 
+/// Sample an axle machine's recovery/motoring efficiency into a speed-indexed monotone cubic
+/// (M6/PR4): the machine's `.ptm` efficiency map at the peak-torque operating point per speed, or
+/// the documented constant `opts.regen_efficiency` where the machine carries no efficiency map (so a
+/// car without a mapped drive unit stays byte-identical to the pre-PR4 flat-efficiency block). The
+/// hot loop evaluates this pre-sampled curve and never touches a `.ptm` table.
+#[must_use]
+fn efficiency_curve(t1: &T1Vehicle, opts: &T2Options, axle: usize) -> MonotoneCubic<f64> {
+    let vs = speed_grid(opts);
+    let fs: Vec<f64> = vs
+        .iter()
+        .map(|&v| t1.machine_efficiency_by_axle(v)[axle].unwrap_or(opts.regen_efficiency))
+        .collect();
+    MonotoneCubic::new(vs, fs).expect("monotone efficiency speed grid")
+}
+
 /// Build the per-axle series regen blend from the vehicle's own machines and its
 /// `brakes.regen_blend` policy. Disabled when the car has no battery to recover into, or no machine.
 #[must_use]
@@ -150,14 +165,14 @@ pub fn regen_params(t1: &T1Vehicle, spec: &Vehicle, opts: &T2Options) -> RegenPa
         return RegenParams::disabled();
     }
     let [front, rear] = regen_curves(t1, opts);
-    let axle = |c: Option<MonotoneCubic<f64>>| {
+    let axle = |axle_idx: usize, c: Option<MonotoneCubic<f64>>| {
         c.map(|force_max| AxleRegen {
             force_max,
-            efficiency: opts.regen_efficiency,
+            efficiency: efficiency_curve(t1, opts, axle_idx),
             authority: blend.max_regen_frac,
         })
     };
-    let (front, rear) = (axle(front), axle(rear));
+    let (front, rear) = (axle(0, front), axle(1, rear));
     RegenParams {
         enabled: front.is_some() || rear.is_some(),
         front,

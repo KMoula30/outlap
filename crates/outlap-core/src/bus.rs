@@ -191,7 +191,12 @@ impl<T: Float> Bus<T> {
         self.channels
     }
 
-    /// Zero every channel on every lane (called once per step before the `sense` phase).
+    /// Zero every channel on every lane. Called at the top of **every RHS evaluation** — once per
+    /// RK stage and once per fixed-point coupling iteration, not once per step — so any value that
+    /// must persist across an eval (the road channels, and every boundary-controller channel such
+    /// as `torque_scale` / `regen_limit_w` / the ERS command) is re-published immediately after the
+    /// clear, on every eval. A boundary controller that publishes only once per step would see its
+    /// value zeroed on the 2nd..nth stage and reach the blocks at a fraction of its intended value.
     pub fn clear(&mut self) {
         for v in &mut self.data {
             *v = T::zero();
