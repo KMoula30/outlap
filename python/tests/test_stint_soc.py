@@ -96,8 +96,9 @@ def test_qss_stint_hybrid_recovers_within_a_lap(f1_stint: xr.Dataset) -> None:
 
 
 def test_qss_ev_stint_soc_declines_monotonically(catalunya: Track) -> None:
-    """A pure-EV stint (no manager → discharge-only QSS march) loses SoC every lap: monotone decline
-    scaled by lap energy, with no harvest to confound it — the consumption half of the carry."""
+    """A pure-EV stint (no ERS manager, but a battery + machine → braking regen) loses SoC NET every
+    lap: consumption exceeds recovery on a hot lap, so the lap-start SoC steps down monotonically and
+    carries lap-to-lap — the consumption side of the carry, with the machine's regen folded in."""
     # The model3 3-D chassis is numerically happier off the flat-track path (flat + coarse diverges
     # on the closed-lap velocity passes); a plain 3-D coarse envelope converges.
     ev_sim: dict[str, object] = {

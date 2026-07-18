@@ -94,7 +94,7 @@ for b in range(1, 4):
     ax.axvline(b + 1, color=GRID, lw=1.0)
 ax.set_xlabel("lap (arc-length within each)")
 ax.set_ylabel("pack state of charge")
-ax.set_title("tesla_model3_rwd — pure-EV QSS stint: monotone SoC decline (no manager → discharge-only)")
+ax.set_title("tesla_model3_rwd — EV QSS stint: net SoC decline with braking regen (no ERS manager)")
 fig2.tight_layout()
 fig2.savefig(OUT / "fig2_ev_decline.png", bbox_inches="tight")
 print("wrote fig2")

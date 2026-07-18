@@ -82,6 +82,12 @@ const DEPLOY_RELAX: f64 = 0.5;
 /// `== 1` would be numerically fragile.
 const FULL_THROTTLE_DEMAND: f64 = 0.98;
 
+/// Mechanical→electrical regen recovery efficiency (machine + inverter) for the non-manager
+/// mapped-EV braking harvest — a documented constant proxy matching the transient tier's
+/// `RegenParams` default (`outlap-vehicle`), so QSS and T2 recover the same electrical energy from a
+/// given braking capture. The ERS manager uses the FIA 0.97 electrical↔mechanical factor instead.
+const REGEN_EFFICIENCY: f64 = 0.9;
+
 /// The wheel-channel order (`[FL, FR, RL, RR]`) the per-wheel logs and the Python `wheel` dim use.
 pub const WHEEL_ORDER: [&str; 4] = ["FL", "FR", "RL", "RR"];
 
@@ -385,7 +391,7 @@ struct MarchOutcome {
 ///   per-lap ledger enforces the Recharge budget. Machine-thermal is not marched under a manager
 ///   (no shipped vehicle pairs an `.emotor` with `ers:`; the MGU-K has no thermal-network schema
 ///   home — recorded in the loaded-model notes).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn march_slow_states(
     t0: &T0Vehicle,
     c: &SlowCoupling<'_>,
@@ -462,8 +468,33 @@ fn march_slow_states(
             prev_k_power_w = k_now;
             debug_assert!(st.soc <= 1.0 && st.soc >= 0.0);
         } else {
+            // Mapped-EV march. The drive/idle DISCHARGE path is the pre-M6 algorithm verbatim (a
+            // braking segment requests `f_drive = 0`, so it draws only the map's no-load power) — so
+            // a car that cannot regen stays byte-identical. Braking REGEN (M6 PR3) is then added as a
+            // NET pack term: any battery + electric machine recovers braking energy through the
+            // machine, independent of the ERS manager, so the pack exchanges `draw − recovered` this
+            // segment. The recovery uses the SAME ceiling chain as the transient tier's `blend_regen`
+            // collapsed to the point mass — blend authority × the driven axle's brake demand, capped
+            // by the machine's regen envelope × low-speed fade, converted at [`REGEN_EFFICIENCY`],
+            // clipped by the pack charge acceptance (CV taper ∧ kinetic derate). The braking force at
+            // the wheels is untouched (the calipers supply the rest), so the trajectory is unchanged.
             let f_drive = f_req.max(0.0);
             let vdc = c.pack.terminal_voltage_v(&st);
+            // Braking regen (zero on drive segments and for a car with no `regen_blend` / no regen
+            // curve — hence byte-identical to the pre-M6 discharge-only march there). Evaluated from
+            // the ENTRY state, before the pack step.
+            let regen_w = if f_req < 0.0 {
+                let braking_power = -f_req * vi;
+                let demand_w =
+                    c.vehicle.regen_max_frac() * c.vehicle.regen_axle_share() * braking_power;
+                let envelope_w = c.vehicle.regen_mech_power_max_w(vi) * ErsCoupling::fade(vi);
+                let mech_w = demand_w.min(envelope_w).max(0.0);
+                let e = (mech_w * REGEN_EFFICIENCY).min(c.pack.regen_power_limit_w(&st));
+                bufs.harvest_w[i] = e;
+                e
+            } else {
+                0.0
+            };
             if let Some(te) = pt.traction_energy(vi, f_drive, Some(vdc)) {
                 // Machine thermal → derate. A thermal-integrator error leaves the derate at 1.
                 let derate = thermal.as_mut().map_or(1.0, |th| {
@@ -477,8 +508,13 @@ fn march_slow_states(
                 } else {
                     1.0
                 };
-                let out = c.pack.step_power(&mut st, te.source_w, dt);
+                // The pack exchanges the drive/idle draw NET of any recovered regen this segment.
+                let out = c.pack.step_power(&mut st, te.source_w - regen_w, dt);
                 bufs.scale[i] = (derate.min(batt_scale)).clamp(0.0, 1.0);
+                debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
+            } else if regen_w > 0.0 {
+                // No mapped drive result (e.g. above the map) but the machine still regenerates.
+                let out = c.pack.step_power(&mut st, -regen_w, dt);
                 debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
             }
         }

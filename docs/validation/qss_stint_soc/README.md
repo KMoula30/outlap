@@ -20,10 +20,12 @@ starts at lap N's terminal SoC and the run evolves toward its real charge-sustai
 
 ## Pure-EV consumption (`tesla_model3_rwd`)
 
-![EV monotone decline](fig2_ev_decline.png)
+![EV net decline with regen](fig2_ev_decline.png)
 
-A mapped EV has no energy manager, so the QSS march is discharge-only: SoC falls monotonically,
-scaled by lap energy, with no harvest to confound it — the consumption half of the acceptance check.
+A mapped EV has no ERS manager, but a battery + electric machine still **regenerates** under braking
+(M6 PR3). Over a hot lap consumption exceeds recovery, so SoC steps down NET each lap and carries
+lap-to-lap — the consumption side of the acceptance check, with the machine's braking regen folded
+in. (Near 100 % SoC the pack's charge acceptance throttles regen almost to nothing.)
 
 ## Hybrid within-lap recovery (`f1_2026`)
 
