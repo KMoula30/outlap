@@ -234,6 +234,62 @@ has its swing clipped at `capacity_mj`, below the physical edge. The lap reports
 in MJ either way. The load pipeline also cross-checks the declared `ers.es` window against the
 referenced battery document (windows must agree exactly).
 
+## T2 (transient) tier wiring (M6 PR4)
+
+The transient tier drives the **same** `EnergyManager` through a step-boundary controller, so parity
+gate #4 compares one implementation of the rules — never two hand-written copies. The controller is
+a two-layer contract (HANDOFF §6.2b): it **decides once per step at the boundary** (sense → control),
+publishing frozen bus channels the pure powertrain block consumes on **every** RHS evaluation (the
+same pattern as the shift FSM's `torque_scale`). Because the bus is cleared and rebuilt each RHS
+eval, the deploy command is re-published every eval, not once per step.
+
+![ERS at T2 — an f1_2026 lap: deploy, harvest, SoC](img/ers_t2_lap.png)
+
+Each step the controller mirrors the QSS `ers_decide → ers_realize` chain from the boundary
+throttle/brake/speed and the slow-clock-refreshed pack ceilings:
+
+- **Deploy** is an ADDITIVE MGU-K wheel force on top of the mechanical (drivetrain-unit) traction
+  curve — the sampled traction ceiling stays ERS-free, exactly as at T0/T1. The realize chain is the
+  same as QSS: `min(cap·taper(v), pack discharge ceiling)` → × 0.97 → machine mechanical ceiling →
+  × η / v. The pack **draw** is the manager's electrical deploy power ONLY (D-M6-10); the ICE covers
+  the rest of traction. A SoC-starved pack (`discharge_power_limit_w → 0` at the window floor) simply
+  stops deploying — the car runs on the engine, no panic.
+- **Harvest** composes the identical five ceilings; the braking force is untouched, so the trajectory
+  is regen-invariant (Decision #11) and only the banked energy differs. Full-throttle **super-clip**
+  back-drive again subtracts a mechanical slice from the drive force on a "power limited" straight.
+- The **per-lap ledger** banks the realized command and **resets at the start/finish line** in a
+  multi-lap stint (the FIA per-lap Recharge budget is enforced lap-by-lap; the pack SoC carries).
+
+Because the transient pack advances on the **decimated slow clock**, the pack's own regen/discharge
+ceilings (which go to zero at the window edges) are refreshed every `slow_decimation` steps; a step
+that begins just inside an edge can overshoot it by one slow window, so the slow stack clamps the SoC
+to the usable window each slow step — the same belt-and-suspenders clamp the QSS march applies, so
+both tiers bound the on-track swing identically. For the shipped f1 pack (window == reg == 4 MJ) the
+physical window alone bounds the swing.
+
+**One legitimate divergence.** The T1 g-g-g-v envelope excludes the ERS deploy by design (it is a
+separate rule-based mechanism), so a hybrid that deploys ~350 kW at T2 operates *outside* the
+ERS-free hull on corner exits — hull containment is therefore recorded, not asserted, for an ERS car
+(the Decision #48 pattern); the honest hybrid parity is gate #4 (fuel + ERS energy per lap, PR8). The
+C5.2.11 crank torque cap is likewise reused from the T0 ratio-invariant machine ceiling so the T2
+realization is byte-for-byte the T0 one (best for gate #4); a true through-the-gearbox torque cap
+(which only bites at low speed, where the power cap already dominates) is a recorded follow-up.
+
+**Machine efficiency seam.** Both tiers' electric-drive efficiency (regen recovery and motoring
+draw) is sampled from the machine's `.ptm` efficiency map into a speed-indexed curve at assembly
+(the block stays wasm-clean — it evaluates a pre-sampled monotone cubic, never a `.ptm` table); a
+machine with no efficiency map keeps the documented constant, so a car without a mapped drive unit is
+byte-identical to the pre-PR4 flat-efficiency block.
+
+### Battery ECM completion — the optional 2nd RC pair
+
+The Thevenin pack (§8.4) gains an optional second RC branch (`ecm.rc_pairs: 2`, `battery/1.2`): a
+slower relaxation arc alongside the fast one, its `r2`/`tau2` sampled from two additive sidecar
+columns. The two overpotentials add in series (`V_RC = V_RC1 + V_RC2`); both are advanced by the
+same exact-exponential integrator, so a two-RC pack reproduces the double-exponential Thevenin step
+response to machine precision, and `r2 → 0` reduces exactly to the single-RC closed form. A one-pair
+pack leaves the branch inert and is byte-identical to before.
+
 ## Not modelled (v1)
 
 Recorded per §15; all are event config or stage-2 territory:
@@ -245,8 +301,12 @@ Recorded per §15; all are event config or stage-2 territory:
 - C5.12 fine structure: the ≥ 1 s initial-step hold, the two-regime (50–100 kW/s) rate rule, and
   the below-210 km/h / gearshift / negative-demand carve-outs — the three simplified bounds above
   are the conservative envelope;
-- driver lift-and-coast *behavior* (the `lift_point` schedule component is carried; the driver
-  hook lands in M6 PR4).
+- driver lift-and-coast *behavior* and selectable named shift maps: the `u(s)` schedule carries all
+  four components (`deploy/regen`, `override_flag`, `lift_point`, `shift_map_id`) as a validated data
+  input on both tiers' entry points, and the manager **executes** the deploy/regen fraction and the
+  override flag; the `lift_point` → driver-speed-loop hook and the `shift_map_id` → gearbox-FSM
+  selection are accepted-but-inert (they touch the closed-loop driver and a new vehicle-schema
+  surface — deferred to keep this PR's green state, resumable without touching the plumbing).
 
 ## Provenance
 
