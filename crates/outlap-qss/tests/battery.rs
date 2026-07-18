@@ -492,15 +492,16 @@ fn two_rc_pulse_matches_double_exponential_closed_form() {
     for k in 1..=400 {
         let out = pack.step_current(&mut st, i, dt);
         let t = f64::from(k) * dt;
-        let closed = ocv
-            - i * r0
-            - i * r1 * (1.0 - (-t / tau1).exp())
-            - i * r2 * (1.0 - (-t / tau2).exp());
+        let closed =
+            ocv - i * r0 - i * r1 * (1.0 - (-t / tau1).exp()) - i * r2 * (1.0 - (-t / tau2).exp());
         sum_sq += (out.terminal_v - closed).powi(2);
         n += 1.0;
     }
     let rms = (sum_sq / n).sqrt();
-    assert!(rms < 1.0e-9 * ocv, "2-RC pulse RMS {rms} exceeds the closed form");
+    assert!(
+        rms < 1.0e-9 * ocv,
+        "2-RC pulse RMS {rms} exceeds the closed form"
+    );
     // The second branch is slower, so at t = 200·dt its arc is still climbing while the first has
     // essentially settled — both overpotentials are strictly positive and ordered by their R·(1−e).
     assert!(st.v_rc_v > 0.0 && st.v_rc2_v > 0.0);
@@ -520,10 +521,16 @@ fn two_rc_reduces_to_one_when_r2_is_zero() {
         let closed = ocv - i * r0 - i * r1 * (1.0 - (-t / tau1).exp());
         sum_sq += (out.terminal_v - closed).powi(2);
         n += 1.0;
-        assert_eq!(st.v_rc2_v, 0.0, "the inert 2nd branch must stay pinned at zero");
+        assert_eq!(
+            st.v_rc2_v, 0.0,
+            "the inert 2nd branch must stay pinned at zero"
+        );
     }
     let rms = (sum_sq / n).sqrt();
-    assert!(rms < 1.0e-9 * ocv, "r2=0 must reduce exactly to the 1-RC response (RMS {rms})");
+    assert!(
+        rms < 1.0e-9 * ocv,
+        "r2=0 must reduce exactly to the 1-RC response (RMS {rms})"
+    );
 }
 
 #[test]

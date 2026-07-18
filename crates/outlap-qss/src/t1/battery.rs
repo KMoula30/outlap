@@ -444,7 +444,7 @@ impl Pack {
         }
         let r0 = self.r0_pack(st);
         let emf = self.open_circuit_voltage_v(st) - st.v_rc_v - st.v_rc2_v; // the driving EMF behind R0
-                                                               // R0·I² − emf·I + P = 0 ⇒ I = [emf − sqrt(emf² − 4·R0·P)] / (2·R0).
+                                                                            // R0·I² − emf·I + P = 0 ⇒ I = [emf − sqrt(emf² − 4·R0·P)] / (2·R0).
         let disc = emf * emf - 4.0 * r0 * power_w;
         if disc <= 0.0 {
             // Power exceeds the max deliverable (P_max = emf²/4R0); return the max-power current.

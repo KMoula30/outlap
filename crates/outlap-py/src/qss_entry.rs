@@ -326,6 +326,8 @@ pub(crate) fn prepare_qss(
         &t0v,
         stack.is_some(),
         sim_cfg.allow_degraded,
+        outlap_qss::ers::ErsPolicy::RuleBased,
+        false,
         &mut notes,
     )?;
     // Tyre-thermal march (M5 PR5): opt-in, so the default run stays bit-identical to pre-M5.
@@ -460,6 +462,8 @@ pub(crate) fn build_ers_coupling(
     t0v: &T0Vehicle,
     pack_present: bool,
     allow_degraded: bool,
+    policy: outlap_qss::ers::ErsPolicy<f64>,
+    override_active: bool,
     notes: &mut Vec<String>,
 ) -> PyResult<Option<ErsCoupling>> {
     if resolved.spec.ers.is_none() {
@@ -481,13 +485,8 @@ pub(crate) fn build_ers_coupling(
         );
         return Ok(None);
     }
-    let coupling = ErsCoupling::assemble(
-        &resolved.spec,
-        t0v,
-        outlap_qss::ers::ErsPolicy::RuleBased,
-        false,
-    )
-    .map_err(err)?;
+    let coupling =
+        ErsCoupling::assemble(&resolved.spec, t0v, policy, override_active).map_err(err)?;
     Ok(coupling)
 }
 

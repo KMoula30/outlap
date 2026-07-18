@@ -332,6 +332,10 @@ pub fn assemble_t2(
             max_brake_torque: opts.max_brake_torque_nm,
             brake_front_bias: t1.brake_front_bias,
             regen,
+            // A car with an `ers:` block is governed by the rule-based energy manager (a
+            // schema-derived FACT, not an estimate — PR4i): the boundary controller schedules the
+            // MGU-K deploy and owns the pack electrical accounting.
+            ers_governed: spec.ers.is_some(),
             actuation,
         },
         tv: TorqueVectoring {

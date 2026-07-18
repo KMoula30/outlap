@@ -34,9 +34,13 @@ use outlap_schema::Vehicle;
 use crate::error::T0Error;
 use crate::vehicle::T0Vehicle;
 
-// Re-export the manager surface so tier consumers (the Python binding) need not depend on
-// `outlap-powertrain` directly to pick a policy or hand in a u(s) schedule.
-pub use outlap_powertrain::{Policy as ErsPolicy, ScheduleError, UsSchedule};
+// Re-export the manager surface so tier consumers (the Python binding, the T2 governor) need not
+// depend on `outlap-powertrain` directly to pick a policy, hand in a u(s) schedule, or drive the
+// manager per step.
+pub use outlap_powertrain::{
+    DecideInput, ErsCommand, ErsMode, LapEnergyLedger, Policy as ErsPolicy, ScheduleError,
+    UsSchedule,
+};
 
 /// Speed below which regen fades linearly to zero, m/s — the same constant as the transient
 /// blend's `outlap_vehicle::control::REGEN_FADE_SPEED_MPS` (kept numerically identical by the
