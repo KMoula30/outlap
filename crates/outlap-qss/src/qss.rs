@@ -909,50 +909,21 @@ fn solve_profile(
     }
     // Final marches against the converged profile so the reported channels match it.
     derive_ax(path, &ws.v, &mut ax);
-    // The terminal pack + machine state the final march ends on (captured out of the closure so it
-    // can seed the next stint lap). `None` here means no electro stack marched.
+    // The terminal pack + machine state the final march ends on (captured so it can seed the next
+    // stint lap). `None` here means no electro stack marched. The final `march_slow_states` runs
+    // FIRST (filling `bufs.deploy_w`), THEN the fuel march reads that deploy slice, THEN the `SlowLog`
+    // takes the buffers — the deploy slice must be intact for the fuel ICE-share when the log build
+    // moves it out.
     let mut pack_terminal: Option<PackState> = None;
     let mut machine_terminal: Option<MachineThermal> = None;
-    let slow = coupling.map(|c| {
+    let slow_outcome = coupling.map(|c| {
         let outcome = march_slow_states(t0, c, ers, env, path, &ws.v, &ax, &mut bufs);
         pack_terminal = Some(outcome.pack_terminal);
         machine_terminal = outcome.machine_terminal;
-        let stats = outcome.stats;
-        SlowLog {
-            state_of_charge: std::mem::take(&mut bufs.soc),
-            // The machine-thermal network is NOT marched under an energy manager (D-M6-10: the
-            // caps apply to the electric share, and no shipped `ers:` car pairs an `.emotor`), so
-            // a manager-governed lap must not surface a frozen winding channel — it stays `None`
-            // and `finish_notes` records the skip.
-            machine_temp_c: (ers.is_none() && c.thermal.is_some())
-                .then(|| std::mem::take(&mut bufs.temp_c)),
-            ers: ers.map(|_| ErsSlowLog {
-                deploy_power_w: std::mem::take(&mut bufs.deploy_w),
-                harvest_power_w: std::mem::take(&mut bufs.harvest_w),
-                ledger_deploy_j: stats.ledger_deploy_j,
-                ledger_harvest_j: stats.ledger_harvest_j,
-                soc_min: stats.soc_min,
-                soc_max: stats.soc_max,
-            }),
-            convergence,
-        }
+        (c, outcome.stats)
     });
-    let mut tire_terminal = None;
-    let tire_slow = tire.map(|tm| {
-        tire_terminal = Some(tm.march(
-            t0,
-            env,
-            path,
-            &ws.v,
-            &ax,
-            &mut t_tire_k,
-            &mut wear_mm,
-            &mut tire_log,
-        ));
-        tire_log
-    });
-    // Final fuel march on the converged profile so the terminal (carried) fuel matches it. The
-    // per-station fuel-mass channel `fuel_kg[i] = mass[i] − dry_mass` is filled for the reported log.
+    // Final fuel march on the converged profile so the terminal (carried) fuel matches it, using the
+    // just-filled deploy slice for the ICE share. Fills `fuel_kg[i] = mass[i] − dry_mass` for the log.
     let fuel_terminal = match (fuel, fuel_start) {
         (Some(fc), Some(f0)) => {
             let term = march_fuel(
@@ -974,6 +945,39 @@ fn solve_profile(
         }
         _ => None,
     };
+    // Now build the electro `SlowLog` (moves the buffers out, after the fuel march read them).
+    let slow = slow_outcome.map(|(c, stats)| SlowLog {
+        state_of_charge: std::mem::take(&mut bufs.soc),
+        // The machine-thermal network is NOT marched under an energy manager (D-M6-10: the caps
+        // apply to the electric share, and no shipped `ers:` car pairs an `.emotor`), so a
+        // manager-governed lap must not surface a frozen winding channel — it stays `None` and
+        // `finish_notes` records the skip.
+        machine_temp_c: (ers.is_none() && c.thermal.is_some())
+            .then(|| std::mem::take(&mut bufs.temp_c)),
+        ers: ers.map(|_| ErsSlowLog {
+            deploy_power_w: std::mem::take(&mut bufs.deploy_w),
+            harvest_power_w: std::mem::take(&mut bufs.harvest_w),
+            ledger_deploy_j: stats.ledger_deploy_j,
+            ledger_harvest_j: stats.ledger_harvest_j,
+            soc_min: stats.soc_min,
+            soc_max: stats.soc_max,
+        }),
+        convergence,
+    });
+    let mut tire_terminal = None;
+    let tire_slow = tire.map(|tm| {
+        tire_terminal = Some(tm.march(
+            t0,
+            env,
+            path,
+            &ws.v,
+            &ax,
+            &mut t_tire_k,
+            &mut wear_mm,
+            &mut tire_log,
+        ));
+        tire_log
+    });
     let terminal = SlowSnapshot {
         tire: tire_terminal,
         pack: pack_terminal,
