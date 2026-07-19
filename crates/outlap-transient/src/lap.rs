@@ -39,7 +39,7 @@ use outlap_vehicle::{
     Powertrain, RoadChannels, Tire, TorqueVectoring,
 };
 
-use crate::control::{ErsGovernor, ErsStepInput, Shifter, SlowStack};
+use crate::control::{ErsGovernor, ErsStepInput, LiftSchedule, Shifter, SlowStack};
 use crate::line_table::LineTable;
 use crate::result::TransientLap;
 use crate::tire_thermal::TireThermalStack;
@@ -260,6 +260,11 @@ pub struct TransientSolver<T> {
     // slow-state stack (battery SoC on the decimated clock) are optional artifacts handed in by the
     // caller; absent ⇒ an ideal single-gear, no-regen lap (byte-identical to the PR5 skeleton).
     shifter: Option<Shifter<T>>,
+    /// The per-station lift-and-coast schedule (§8.3, D-M6-9). Empty ⇒ no lift (byte-identical to the
+    /// pre-lift skeleton). Caps the driver's tracked speed reference at each station's lift point.
+    lift: LiftSchedule,
+    /// The lift-and-coast speed cap resolved at the current step boundary, m/s (`+∞` ⇒ no lift).
+    lift_cap: T,
     slow: Option<Box<dyn SlowStack>>,
     /// The 2026 ERS energy manager as a step-boundary governor (M6/PR4). Optional artifact handed in
     /// by the caller; absent ⇒ a non-ERS car (byte-identical to the pre-PR4 skeleton). Decides the
@@ -364,6 +369,8 @@ impl<T: Float> TransientSolver<T> {
             schedule,
             slow_clock,
             shifter: None,
+            lift: LiftSchedule::default(),
+            lift_cap: T::infinity(),
             slow: None,
             ers: None,
             tire_thermal: None,
@@ -391,6 +398,17 @@ impl<T: Float> TransientSolver<T> {
     #[must_use]
     pub fn with_shifter(mut self, shifter: Shifter<T>) -> Self {
         self.shifter = Some(shifter);
+        self
+    }
+
+    /// Attach a lift-and-coast schedule (consuming, §8.3, D-M6-9): at each scheduled station the
+    /// driver's tracked speed reference is capped to the station's lift point, so the closed loop
+    /// lifts off early and coasts into the braking zone while the ERS banks the freed energy. Without
+    /// one (or with an all-`+∞` schedule) the reference is un-capped — byte-identical to the pre-lift
+    /// skeleton.
+    #[must_use]
+    pub fn with_lift(mut self, lift: LiftSchedule) -> Self {
+        self.lift = lift;
         self
     }
 
@@ -496,6 +514,7 @@ impl<T: Float> TransientSolver<T> {
     fn boundary_inputs(&self) -> BoundaryInputs<T> {
         BoundaryInputs {
             torque_scale: self.torque_scale,
+            lift_cap: self.lift_cap,
             regen_limit_w: self.regen_limit_w,
             ers_deploy_force_n: self.ers_deploy_force_n,
             ers_deploy_power_w: self.ers_deploy_power_w,
@@ -591,6 +610,12 @@ impl<T: Float> TransientSolver<T> {
             shifter.select_map(self.fast[ChassisState::S as usize]);
             self.torque_scale = shifter.update(self.t, dt, v);
         }
+
+        // (0a) lift-and-coast (§8.3, D-M6-9): resolve this station's speed cap, frozen across the RK
+        //      sweep like the shift scale. `+∞` (no schedule / no lift here) leaves the reference
+        //      un-capped. Publishing happens in `publish_road` via the frozen boundary inputs.
+        let s_now = self.fast[ChassisState::S as usize].to_f64().unwrap_or(0.0);
+        self.lift_cap = T::from(self.lift.cap_at(s_now)).unwrap_or_else(T::infinity);
 
         // (0b) 2026 ERS energy manager boundary decision (M6/PR4), also frozen across the RK sweep.
         //      The driver throttle/brake come from the previous eval still on the bus (a one-step
@@ -1085,6 +1110,7 @@ fn publish_road<T: Float>(
     s: T,
     vx: T,
     preview_time: T,
+    lift_cap: T,
 ) {
     // One interval lookup for the seven road/reference channels at `s` (and one for the three
     // preview channels), instead of ten separate binary searches — the hot path.
@@ -1095,13 +1121,16 @@ fn publish_road<T: Float>(
     bus.set_channel(road.kappa_v, 0, r.kappa_v);
     bus.set_channel(road.n_ref, 0, r.n_ref);
     bus.set_channel(road.kappa_ref, 0, r.kappa_ref);
-    bus.set_channel(road.v_ref, 0, r.v_ref);
+    // Lift-and-coast (§8.3, D-M6-9): cap the tracked speed reference (and its preview) at the
+    // station's lift point so the driver lifts off early and coasts into the braking zone, banking
+    // the freed energy through the ERS harvest. `+∞` ⇒ `min` is a no-op ⇒ byte-identical.
+    bus.set_channel(road.v_ref, 0, r.v_ref.min(lift_cap));
     // Preview station (line queries wrap/clamp `s + L_p` for closed/open loops).
     let sp = s + preview_distance(vx, preview_time);
     let p = line.preview_sample(sp);
     bus.set_channel(road.n_ref_preview, 0, p.n_ref);
     bus.set_channel(road.kappa_ref_preview, 0, p.kappa_ref);
-    bus.set_channel(road.v_ref_preview, 0, p.v_ref);
+    bus.set_channel(road.v_ref_preview, 0, p.v_ref.min(lift_cap));
 }
 
 /// The step-boundary control values published (frozen) into the bus on every RHS evaluation
@@ -1111,6 +1140,8 @@ fn publish_road<T: Float>(
 struct BoundaryInputs<T> {
     /// Shift-FSM drive-torque scale `∈ [0, 1]` (the §8.2 torque interruption).
     torque_scale: T,
+    /// Lift-and-coast speed cap on the driver's tracked reference this step, m/s (`+∞` ⇒ no lift).
+    lift_cap: T,
     /// Battery charge-acceptance ceiling, W (slow-clock refreshed; caps the regen blend).
     regen_limit_w: T,
     /// ERS MGU-K deploy wheel force, N (`+` deploy / `−` super-clip); `0` without a governor.
@@ -1135,7 +1166,15 @@ fn eval_rhs_raw<T: Float>(
     let s = fast[ChassisState::S as usize];
     let vx = fast[ChassisState::Vx as usize];
     bus.clear();
-    publish_road(line, &blocks.road, bus, s, vx, blocks.driver.preview_time);
+    publish_road(
+        line,
+        &blocks.road,
+        bus,
+        s,
+        vx,
+        blocks.driver.preview_time,
+        boundary.lift_cap,
+    );
     // Publish the rule-based control-layer boundary values (frozen across the RK sweep): the shift
     // FSM's drive-torque scale, the battery regen ceiling, and the 2026 ERS energy manager's
     // deploy/harvest command. `bus.clear` above zeroes the whole bus every eval, so these must be

@@ -77,6 +77,68 @@ impl ShiftSchedule {
     }
 }
 
+/// A per-station **lift-and-coast selector** (§8.3, D-M6-9): the `u(s)` `lift_point` schedule
+/// resampled onto the solver as the speed the driver's tracked reference is capped to at each
+/// arc-length station. A non-finite / very large lift point ⇒ no cap (the un-lifted reference), so an
+/// absent schedule is byte-identical to the pre-lift path.
+///
+/// The lift lowers the reference the *closed-loop* driver already tracks smoothly — no new
+/// discontinuity beyond the braking zones the profile already imposes — so the car lifts off the
+/// throttle early and coasts into the braking zone while the ERS banks the freed energy. Self-
+/// contained plain data fed PRE-SAMPLED by the assembly layer (mirrors [`ShiftSchedule`]); the raw
+/// cumulative `s` is wrapped into one lap so the schedule repeats every lap.
+#[derive(Clone, Debug, Default)]
+pub struct LiftSchedule {
+    /// Ascending arc-length breakpoints, m (the last entry is one lap length). Empty ⇒ no lift.
+    stations_s: Vec<f64>,
+    /// The lift-and-coast speed cap at each breakpoint, m/s (`+∞` ⇒ no cap). Parallel to `stations_s`.
+    lift_mps: Vec<f64>,
+}
+
+impl LiftSchedule {
+    /// Build a selector from the arc-length grid + its per-station lift speeds. A mismatched length or
+    /// an empty grid degrades to "no lift" (every cap `+∞`).
+    #[must_use]
+    pub fn new(stations_s: Vec<f64>, lift_mps: Vec<f64>) -> Self {
+        if stations_s.is_empty() || stations_s.len() != lift_mps.len() {
+            return Self::default();
+        }
+        Self {
+            stations_s,
+            lift_mps,
+        }
+    }
+
+    /// Whether the schedule ever caps (some finite lift point) — lets the assembly skip attaching an
+    /// all-`+∞` schedule, keeping the no-lift path provably byte-identical.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.lift_mps.iter().any(|v| v.is_finite())
+    }
+
+    /// The lift speed cap active at arc-length `s`, m/s (`+∞` ⇒ no cap). The raw cumulative `s` is
+    /// wrapped into one lap (nearest breakpoint at/above it), mirroring [`ShiftSchedule::map_index`].
+    #[must_use]
+    pub(crate) fn cap_at(&self, s: f64) -> f64 {
+        let Some(&length) = self.stations_s.last() else {
+            return f64::INFINITY;
+        };
+        let s = if length > 0.0 {
+            s.rem_euclid(length)
+        } else {
+            0.0
+        };
+        let station = match self
+            .stations_s
+            .binary_search_by(|x| x.partial_cmp(&s).unwrap_or(std::cmp::Ordering::Less))
+        {
+            Ok(i) => i,
+            Err(i) => i.min(self.stations_s.len() - 1),
+        };
+        self.lift_mps[station]
+    }
+}
+
 /// A discrete gear-shift transition, fired at a step boundary off the [`EventQueue`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShiftEvent {

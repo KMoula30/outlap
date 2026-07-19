@@ -139,6 +139,11 @@ impl<T: Float> UsSchedule<T> {
         &self.shift_map_id
     }
 
+    /// The full per-station lift-and-coast point array (for the assembly-time lift-schedule build).
+    pub fn lift_points(&self) -> &[T] {
+        &self.lift_point
+    }
+
     /// Validate every `shift_map_id` against the `n_maps` the vehicle actually defines (§8.3,
     /// D-M6-9): id 0 is the derived default, ids `1..n_maps` the named `drivetrain.shift_maps`.
     ///
