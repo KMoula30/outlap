@@ -30,7 +30,7 @@
 use crate::error::T0Error;
 use crate::path::T0Path;
 use crate::result::{LapResult, LineDescriptor, T0Workspace};
-use crate::t1::GgvEnvelope;
+use crate::t1::{CorrectionSet, GgvEnvelope};
 use crate::vehicle::T0Vehicle;
 use crate::G;
 
@@ -171,6 +171,12 @@ struct GgvGrip<'a> {
     /// indexed on the envelope's tyre-state axes (`ay_boundary_at` / `accel_limit_at` / `brake_limit_at`)
     /// so a hot / worn tyre solves a physically degraded lap. See [`crate::qss`].
     tire_state: Option<(&'a [f64], &'a [f64])>,
+    /// Optional per-station **mass / CG** `(mass_kg[i], a_f[i], h_cg[i])` from the fuel-burn slow-state
+    /// march (`None` ⇒ the assembly-constant `veh.mass_kg` and the envelope's reference CG — the pre-M6
+    /// behaviour, bit-identical). When present, the point-mass longitudinal equations use `mass_kg[i]`
+    /// and the lateral boundary + shoulders compose the Decision-#31 mass/CG correction (D-M6-4). The
+    /// envelope is built at the full-tank reference m₀, so lap 1 station 0 is the identity slice.
+    mass_cg: Option<(&'a [f64], &'a [f64], &'a [f64])>,
 }
 
 impl<'a> GgvGrip<'a> {
@@ -181,6 +187,7 @@ impl<'a> GgvGrip<'a> {
             traction_scale: None,
             deploy_force: None,
             tire_state: None,
+            mass_cg: None,
         }
     }
 
@@ -193,6 +200,7 @@ impl<'a> GgvGrip<'a> {
         scale: Option<&'a [f64]>,
         deploy: Option<&'a [f64]>,
         tire: Option<(&'a [f64], &'a [f64])>,
+        mass_cg: Option<(&'a [f64], &'a [f64], &'a [f64])>,
     ) -> Self {
         Self {
             veh,
@@ -200,6 +208,7 @@ impl<'a> GgvGrip<'a> {
             traction_scale: scale,
             deploy_force: deploy,
             tire_state: tire,
+            mass_cg,
         }
     }
 
@@ -208,33 +217,63 @@ impl<'a> GgvGrip<'a> {
         self.traction_scale.map_or(1.0, |s| s[i])
     }
 
+    /// The vehicle mass at station `i`, kg — the fuel-burn slow-state mass when coupled, else the
+    /// assembly-constant `veh.mass_kg` (pre-M6, bit-identical).
+    fn mass_at(&self, i: usize) -> f64 {
+        self.mass_cg.map_or(self.veh.mass_kg, |(m, _, _)| m[i])
+    }
+
+    /// The Decision-#31 mass/CG correction factor at station `i` (`1.0` when uncoupled OR at the
+    /// full-tank reference — so a fuelless / lap-1-start query is bit-identical). Composes onto the
+    /// tyre-state-resolved base boundary and the straight-line shoulders (D-M6-4).
+    fn mass_cg_factor(&self, i: usize, v: f64, ax: f64, gn: f64) -> f64 {
+        match self.mass_cg {
+            Some((m, af, hcg)) => {
+                let c = CorrectionSet {
+                    mu_scale: 1.0,
+                    mass_kg: m[i],
+                    cla_scale: 1.0,
+                    a_f: af[i],
+                    h_cg: hcg[i],
+                };
+                self.env.correction_factor(v, ax, gn, &c)
+            }
+            None => 1.0,
+        }
+    }
+
     /// The envelope's lateral-acceleration boundary at station `i`'s `(v, a_x, g_normal)`, scaled by the
     /// local track **grip scale** `grip` (`T0Path::grip`, the surface `grip_scale`). Friction scales the
     /// boundary linearly, exactly as the constant-μ ellipse scales its `μ` by `γ(s)` — so g-g-g-v laps
     /// honour grip maps like the ellipse path does. When a tyre state is coupled the boundary is indexed
-    /// on the envelope's `(T_tire, wear)` axes at that station; otherwise the frozen reference slice.
+    /// on the envelope's `(T_tire, wear)` axes at that station; otherwise the frozen reference slice. The
+    /// fuel mass/CG correction (Decision #31) multiplies on top when coupled.
     fn ay(&self, i: usize, v: f64, ax: f64, gn: f64, grip: f64) -> f64 {
         let boundary = match self.tire_state {
             Some((t, w)) => self.env.ay_boundary_at(v, ax, gn, t[i], w[i]),
             None => self.env.ay_boundary(v, ax, gn),
         };
-        boundary * grip
+        boundary * grip * self.mass_cg_factor(i, v, ax, gn)
     }
 
-    /// The envelope's positive-`a_x` shoulder at station `i` (tyre-state-indexed when coupled).
+    /// The envelope's positive-`a_x` shoulder at station `i` (tyre-state-indexed when coupled, with
+    /// the fuel mass/CG correction at the shoulder operating point).
     fn accel_shoulder(&self, i: usize, v: f64, gn: f64) -> f64 {
-        match self.tire_state {
+        let base = match self.tire_state {
             Some((t, w)) => self.env.accel_limit_at(v, gn, t[i], w[i]),
             None => self.env.accel_limit(v, gn),
-        }
+        };
+        base * self.mass_cg_factor(i, v, base, gn)
     }
 
-    /// The envelope's braking shoulder magnitude at station `i` (tyre-state-indexed when coupled).
+    /// The envelope's braking shoulder magnitude at station `i` (tyre-state-indexed when coupled,
+    /// with the fuel mass/CG correction at the shoulder operating point).
     fn brake_shoulder(&self, i: usize, v: f64, gn: f64) -> f64 {
-        match self.tire_state {
+        let base = match self.tire_state {
             Some((t, w)) => self.env.brake_limit_at(v, gn, t[i], w[i]),
             None => self.env.brake_limit(v, gn),
-        }
+        };
+        base * self.mass_cg_factor(i, v, -base, gn)
     }
 
     /// The maximum feasible **positive** longitudinal acceleration (net of the envelope's embedded
@@ -293,14 +332,25 @@ impl<'a> GgvGrip<'a> {
     /// a strong crest just short of flight — and 0 the boundary query clamps `g_normal`, so the
     /// gravity contribution to grip is slightly over-predicted there; the error is bounded (`≈ μ·0.5g`)
     /// and dominated by aero at the high speeds where vertical-curvature crests matter.)
-    fn planted(&self, v: f64, gn: f64) -> bool {
-        gn + self.veh.qz * v * v / self.veh.mass_kg > EPS
+    fn planted(&self, i: usize, v: f64, gn: f64) -> bool {
+        gn + self.veh.qz * v * v / self.mass_at(i) > EPS
+    }
+
+    /// The reference straight-line drag as an acceleration at station `i`, m/s². The envelope embeds
+    /// `q_x·v²/mass_ref`; a lighter fuel-burn mass decelerates MORE per unit drag force, so the
+    /// coupled path scales by `mass_ref / mass[i]`. Uncoupled ⇒ the frozen `drag_accel` (bit-identical).
+    fn drag_at(&self, i: usize, v: f64) -> f64 {
+        let d = self.env.drag_accel(v);
+        match self.mass_cg {
+            Some(_) => d * self.env.mass_ref() / self.mass_at(i),
+            None => d,
+        }
     }
 
     /// Whether speed `v` at station `i` is within the cornering grip limit (and the tyres are loaded).
     fn corner_feasible(&self, p: &T0Path, i: usize, v: f64) -> bool {
         let (ay_dem, gn) = demand_and_gn(p, i, v);
-        self.planted(v, gn) && ay_dem.abs() <= self.ay(i, v, 0.0, gn, p.grip[i])
+        self.planted(i, v, gn) && ay_dem.abs() <= self.ay(i, v, 0.0, gn, p.grip[i])
     }
 }
 
@@ -328,7 +378,7 @@ impl GripModel for GgvGrip<'_> {
     fn forward_v2(&self, p: &T0Path, i: usize, v_i: f64) -> f64 {
         let u = v_i * v_i;
         let (ay_dem, gn) = demand_and_gn(p, i, v_i);
-        let accel = if self.planted(v_i, gn) {
+        let accel = if self.planted(i, v_i, gn) {
             let ax_grip = self.ax_forward(i, v_i, gn, ay_dem.abs(), p.grip[i]);
             // Slow-state coupling: the machine-thermal derate ∧ battery peak-power cap scale the
             // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1. With an
@@ -338,11 +388,11 @@ impl GripModel for GgvGrip<'_> {
                 Some(d) => self.veh.mech_tractive_force(v_i) * self.scale(i) + d[i],
                 None => self.veh.tractive_force(v_i) * self.scale(i),
             };
-            let pt_net = pt_force / self.veh.mass_kg - self.env.drag_accel(v_i);
+            let pt_net = pt_force / self.mass_at(i) - self.drag_at(i, v_i);
             ax_grip.min(pt_net) - G * p.sin_g[i]
         } else {
             // Airborne (crest unloading beyond aero downforce): no traction, just drag + grade coast.
-            -self.env.drag_accel(v_i) - G * p.sin_g[i]
+            -self.drag_at(i, v_i) - G * p.sin_g[i]
         };
         (u + 2.0 * p.ds * accel).max(0.0)
     }
@@ -350,11 +400,11 @@ impl GripModel for GgvGrip<'_> {
     fn backward_v2(&self, p: &T0Path, ip1: usize, v_ip1: f64) -> f64 {
         let u = v_ip1 * v_ip1;
         let (ay_dem, gn) = demand_and_gn(p, ip1, v_ip1);
-        let a_dec = if self.planted(v_ip1, gn) {
+        let a_dec = if self.planted(ip1, v_ip1, gn) {
             let ax_brake = self.ax_backward(ip1, v_ip1, gn, ay_dem.abs(), p.grip[ip1]); // ≤ 0, net of drag
             -ax_brake + G * p.sin_g[ip1]
         } else {
-            self.env.drag_accel(v_ip1) + G * p.sin_g[ip1]
+            self.drag_at(ip1, v_ip1) + G * p.sin_g[ip1]
         };
         (u + 2.0 * p.ds * a_dec).max(0.0)
     }
@@ -494,7 +544,7 @@ pub fn solve_into_ggv_scaled(
     path: &T0Path,
     ws: &mut T0Workspace,
 ) -> Result<f64, T0Error> {
-    solve_into_ggv_coupled(veh, env, Some(scale), None, None, path, ws)
+    solve_into_ggv_coupled(veh, env, Some(scale), None, None, None, path, ws)
 }
 
 /// As [`solve_into_ggv`] but with the optional QSS slow-state couplings composed into one solve:
@@ -514,12 +564,14 @@ pub fn solve_into_ggv_scaled(
 ///
 /// # Errors
 /// As [`solve_into`]; also [`T0Error::WorkspaceMismatch`] if any supplied slice is not `path.len()`.
+#[allow(clippy::too_many_arguments)] // one optional slice per independent slow-state coupling.
 pub fn solve_into_ggv_coupled(
     veh: &T0Vehicle,
     env: &GgvEnvelope,
     scale: Option<&[f64]>,
     deploy: Option<&[f64]>,
     tire: Option<(&[f64], &[f64])>,
+    mass_cg: Option<(&[f64], &[f64], &[f64])>,
     path: &T0Path,
     ws: &mut T0Workspace,
 ) -> Result<f64, T0Error> {
@@ -544,7 +596,16 @@ pub fn solve_into_ggv_coupled(
         check(t.len())?;
         check(w.len())?;
     }
-    solve_generic(&GgvGrip::coupled(veh, env, scale, deploy, tire), path, ws)
+    if let Some((m, af, hcg)) = mass_cg {
+        check(m.len())?;
+        check(af.len())?;
+        check(hcg.len())?;
+    }
+    solve_generic(
+        &GgvGrip::coupled(veh, env, scale, deploy, tire, mass_cg),
+        path,
+        ws,
+    )
 }
 
 /// Central segment longitudinal acceleration `(v_{i+1}² − v_i²)/2ds` at each station into `ax_out`
