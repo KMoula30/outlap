@@ -190,6 +190,14 @@ pub struct SlowLog {
     pub convergence: MarchConvergence,
 }
 
+/// Per-station fuel-mass channel (present iff a [`FuelCoupling`] marched). The fuel mass at each
+/// station entry, kg — it drains monotonically over the lap as the ICE burns (§8.1, D-M6-4).
+#[derive(Clone, Debug)]
+pub struct FuelLog {
+    /// Fuel mass at station entry, kg.
+    pub fuel_mass_kg: Vec<f64>,
+}
+
 /// A solved QSS lap: the point-mass core plus the resolved tier, the recorded numerics, and — for
 /// `t1` — the per-wheel / setup / slow-state channels and the returnable envelope.
 #[derive(Clone, Debug)]
@@ -211,6 +219,9 @@ pub struct QssLap {
     /// Tyre-thermal slow-state channels (present iff a [`TireThermalMarch`] was supplied — the
     /// representative front tyre's `T_s/T_c/T_g`, wear, damage, and grip multiplier).
     pub tire: Option<TireSlowLog>,
+    /// Fuel-mass slow-state channels (present iff a [`FuelCoupling`] marched) — the per-station fuel
+    /// mass draining over the lap (§8.1, D-M6-4).
+    pub fuel: Option<FuelLog>,
     /// The **terminal** slow state at the end of the lap — the representative-tyre state, the battery
     /// pack state, and the machine-thermal network — bundled so a stint carries ONE object into the
     /// next lap's seed and the slow states continue across the lap boundary with no reset.
@@ -776,7 +787,16 @@ fn solve_profile(
     couplings: &Couplings<'_>,
     path: &T0Path,
     ws: &mut T0Workspace,
-) -> Result<(f64, Option<SlowLog>, Option<TireSlowLog>, SlowSnapshot), T0Error> {
+) -> Result<
+    (
+        f64,
+        Option<SlowLog>,
+        Option<TireSlowLog>,
+        Option<FuelLog>,
+        SlowSnapshot,
+    ),
+    T0Error,
+> {
     let n = path.len();
     // Mass-owner invariant (PR5b): the point-mass reference mass and the envelope-build mass must be
     // the SAME m₀ — otherwise the #31 mass correction (normalised by `env.mass_ref()`) would drift
@@ -803,7 +823,7 @@ fn solve_profile(
     let fuel = couplings.fuel;
     if coupling.is_none() && tire.is_none() && fuel.is_none() {
         let lap_time = solve_into_ggv(t0, env, path, ws)?;
-        return Ok((lap_time, None, None, SlowSnapshot::default()));
+        return Ok((lap_time, None, None, None, SlowSnapshot::default()));
     }
     // Fuel-mass slow-state buffers (station-entry mass/CG marched along the previous profile). Seeded
     // at the lap-start fuel (the model's initial, overridden per stint lap by the carry).
@@ -984,7 +1004,12 @@ fn solve_profile(
         machine: machine_terminal,
         fuel_kg: fuel_terminal,
     };
-    Ok((lap_time, slow, tire_slow, terminal))
+    // The per-station fuel-mass channel (present iff the fuel march ran). `fuel_kg` was filled to
+    // `mass[i] − dry_mass` by the final fuel march above.
+    let fuel_log = fuel_terminal.map(|_| FuelLog {
+        fuel_mass_kg: std::mem::take(&mut fuel_kg),
+    });
+    Ok((lap_time, slow, tire_slow, fuel_log, terminal))
 }
 
 /// Max elementwise |a − b| (equal lengths).
@@ -1018,7 +1043,7 @@ pub fn solve_t0(
 ) -> Result<QssLap, QssError> {
     check_couplings(couplings)?;
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow, tire_slow, slow_terminal) =
+    let (lap_time_s, slow, tire_slow, fuel_log, slow_terminal) =
         solve_profile(t0, &env, couplings, path, &mut ws)?;
     let notes = finish_notes(req.notes, couplings, slow.as_ref());
     let lap = lap_result_from_ws(path, &ws, lap_time_s, req.line, req.resolved_hash, notes);
@@ -1031,6 +1056,7 @@ pub fn solve_t0(
         setup: None,
         slow,
         tire: tire_slow,
+        fuel: fuel_log,
         slow_terminal,
         envelope: Some(env),
     })
@@ -1051,7 +1077,7 @@ pub fn solve_t1(
 ) -> Result<QssLap, QssError> {
     check_couplings(couplings)?;
     let mut ws = T0Workspace::for_path(path);
-    let (lap_time_s, slow, tire_slow, slow_terminal) =
+    let (lap_time_s, slow, tire_slow, fuel_log, slow_terminal) =
         solve_profile(t0, &env, couplings, path, &mut ws)?;
 
     // Re-trim at each solved station for the per-wheel channels + setup metrics.
@@ -1093,6 +1119,7 @@ pub fn solve_t1(
         }),
         slow,
         tire: tire_slow,
+        fuel: fuel_log,
         slow_terminal,
         envelope: Some(env),
     })
@@ -1163,6 +1190,8 @@ pub struct StintLap {
     pub slow: Option<SlowLog>,
     /// Tyre-thermal channels — `None` when the tyre march was off.
     pub tire: Option<TireSlowLog>,
+    /// Per-station fuel-mass channel — `None` when the car carries no fuel (§8.1, D-M6-4).
+    pub fuel: Option<FuelLog>,
     /// The terminal slow state at the end of this lap (the next lap's seed).
     pub terminal: SlowSnapshot,
     /// The lap's energy-manager + convergence notes (`finish_notes` output).
@@ -1291,6 +1320,7 @@ pub fn solve_stint(
             v: qss.lap.v,
             slow: qss.slow,
             tire: qss.tire,
+            fuel: qss.fuel,
             terminal: qss.slow_terminal,
             notes: qss.lap.notes,
         });
