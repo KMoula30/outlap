@@ -1523,6 +1523,7 @@ dependencies = [
 name = "outlap-vehicle"
 version = "0.3.0"
 dependencies = [
+ "dhat",
  "num-traits",
  "outlap-core",
  "outlap-qss",

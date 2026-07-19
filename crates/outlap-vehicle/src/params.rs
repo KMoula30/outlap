@@ -196,3 +196,66 @@ impl<T: Float> ChassisParams<T> {
         }
     }
 }
+
+/// Immutable **T3 suspension + sprung-body** parameters the 14-DOF chassis reads (the
+/// SymPy-verified `ChassisT3` block; `docs/derivations/t3_chassis_kane.py`).
+///
+/// The sprung body carries heave/pitch/roll about its CG at height `h_s`; per-corner suspension
+/// (linear ride-rate spring + bump/rebound damper + C¹ progressive bumpstop + absolute ARB) sits
+/// between each sprung corner and its unsprung mass, which rests on the tyre vertical spring. Mass /
+/// inertia convention (D-M6, user-locked Option A): `ixx`/`iyy` are the **sprung-mass** roll/pitch
+/// inertia about the sprung CG; the whole-car yaw inertia stays on [`ChassisParams::izz`]. Static
+/// compressions `static_defl`/`tyre_static_defl` carry the corner loads so the RHS admits a static
+/// equilibrium (the heave/pitch/roll + unsprung states are displacements from that reference).
+/// Plain data — no IO, no clock — so the crate stays wasm-clean.
+#[derive(Clone, Copy, Debug)]
+pub struct SuspensionParams<T> {
+    /// Sprung mass `m_s = chassis.mass_kg − Σ m_unsprung`, kg.
+    pub sprung_mass: T,
+    /// Sprung-mass roll inertia about the sprung CG `I_xx`, kg·m².
+    pub ixx: T,
+    /// Sprung-mass pitch inertia about the sprung CG `I_yy`, kg·m².
+    pub iyy: T,
+    /// Sprung CG height above ground `h_s`, m (elastic roll/pitch moment arm).
+    pub h_s: T,
+    /// Whole-car CG height `h_cg`, m (the longitudinal load-transfer arm, matches T2).
+    pub h_cg: T,
+    /// Roll-axis height under the CG `h_ra`, m (the geometric lateral-transfer arm).
+    pub h_ra: T,
+    /// Wheelbase `L`, m.
+    pub wheelbase: T,
+    /// Front / rear track widths, m.
+    pub track_f: T,
+    /// Rear track width, m.
+    pub track_r: T,
+    /// Front anti-dive fraction (geometric share of the front longitudinal transfer).
+    pub anti_dive: T,
+    /// Rear anti-squat fraction (geometric share of the rear longitudinal transfer).
+    pub anti_squat: T,
+    /// Absolute front anti-roll-bar roll stiffness, N·m/rad.
+    pub arb_f: T,
+    /// Absolute rear anti-roll-bar roll stiffness, N·m/rad.
+    pub arb_r: T,
+    /// C¹ bumpstop smoothing scale `s`, m (the quadratic-to-linear knee width).
+    pub bumpstop_smooth: T,
+    /// Per-corner ride (wheel) rate, N/m.
+    pub k_ride: [T; WHEELS],
+    /// Per-corner static compression carrying the sprung corner load, m.
+    pub static_defl: [T; WHEELS],
+    /// Per-corner bump (compression) damping, N·s/m.
+    pub damp_bump: [T; WHEELS],
+    /// Per-corner rebound (extension) damping, N·s/m.
+    pub damp_rebound: [T; WHEELS],
+    /// Per-corner bumpstop rate, N/m.
+    pub bumpstop_rate: [T; WHEELS],
+    /// Per-corner bumpstop gap (compression before engagement), m.
+    pub bumpstop_gap: [T; WHEELS],
+    /// Per-corner tyre vertical stiffness `k_tz`, N/m.
+    pub k_tyre: [T; WHEELS],
+    /// Per-corner tyre vertical damping `c_tz`, N·s/m.
+    pub c_tyre: [T; WHEELS],
+    /// Per-corner static tyre compression carrying the corner load, m.
+    pub tyre_static_defl: [T; WHEELS],
+    /// Per-corner unsprung mass, kg.
+    pub unsprung_mass: [T; WHEELS],
+}
