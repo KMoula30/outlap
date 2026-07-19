@@ -867,6 +867,21 @@ impl T1Powertrain {
         kg_per_s
     }
 
+    /// A representative ICE brake-thermal efficiency (0..1) for the T2 tier's scalar fuel burn
+    /// (§8.1, D-M6-4): sampled from the first ICE unit's efficiency map at a mid-high-load operating
+    /// point (clamped into the grid). `None` when the car has no mapped ICE unit — the caller falls
+    /// back to a literature default. The QSS tier uses the full per-operating-point map; this scalar
+    /// is the documented tier simplification (parity gate recorded, Decision #48).
+    #[must_use]
+    pub fn representative_ice_efficiency(&self) -> Option<f64> {
+        for (idx, u) in self.units.iter().enumerate() {
+            if u.kind == PtmKind::Ice && u.eff_map.is_some() {
+                return self.efficiency(idx, 10_000.0, 200.0);
+            }
+        }
+        None
+    }
+
     /// The best-gear crank speed (rpm) of the fastest ICE unit at speed `v` (m/s), for the FIA
     /// C5.2.5 low-rpm fuel-flow line. `None` when the car has no mapped ICE unit. Zero-allocation.
     #[must_use]
