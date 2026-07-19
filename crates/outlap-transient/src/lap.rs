@@ -133,6 +133,37 @@ impl From<outlap_vehicle::T2Parts<f64>> for T2Blocks<f64> {
 }
 
 impl<T: Float> T2Blocks<T> {
+    /// The ONE mass/CG fan-out (M6/PR5a, D-M6-4c): refresh EVERY block-resident copy of the vehicle
+    /// mass and CG geometry from the fuel slow state, so no copy can be silently missed. `mass_kg` is
+    /// the current total mass; `a_f`/`h_cg` the migrated CG (front-axle→CG distance and CG height).
+    /// The wheelbase and roll-centre heights are invariants read from the load geometry; `b_r` and the
+    /// roll-axis height `h_ra = rc_f + (rc_r − rc_f)·a_f/L` are recomputed (mirroring
+    /// [`outlap_qss::t1::T1Vehicle::with_cg`]). The mass owners refreshed are: the load-transfer
+    /// geometry (mass + CG + roll axis → `F_z`), the chassis inertia block (mass → `F/m`; wheel
+    /// longitudinal positions rel the moved CG → the yaw-moment arms), and the tyre block's own
+    /// wheel-geometry copy (slip-velocity arms). The Driver's understeer gradient stays at its
+    /// assembly probe (recorded — a fuel-load `K_us` re-probe is a T2 refinement). Zero-allocation.
+    pub fn apply_mass_state(&mut self, mass_kg: f64, a_f: f64, h_cg: f64) {
+        let wheelbase = self.load.geom.wheelbase_m;
+        let b_r = wheelbase - a_f;
+        let g = &mut self.load.geom;
+        g.mass_kg = mass_kg;
+        g.a_f = a_f;
+        g.b_r = b_r;
+        g.h_cg = h_cg;
+        g.h_ra = g.rc_f + (g.rc_r - g.rc_f) * (a_f / wheelbase);
+        self.chassis.params.mass = T::from(mass_kg).unwrap_or_else(T::zero);
+        // Wheel longitudinal positions rel the (moved) CG: front axle at +a_f, rear at −b_r. BOTH the
+        // chassis inertia block and the tyre slip-velocity block hold their own `WheelGeometry` copy.
+        let a_ft = T::from(a_f).unwrap_or_else(T::zero);
+        let nb_rt = T::from(-b_r).unwrap_or_else(T::zero);
+        for wheels in [&mut self.chassis.params.wheels, &mut self.tire.wheels] {
+            for i in 0..WHEELS {
+                wheels.x[i] = if wheels.front[i] { a_ft } else { nb_rt };
+            }
+        }
+    }
+
     /// The assembler-facing port specs, in fixed registration order (used for the [`Schedule`] and
     /// the ordering-determinism test). The torque-vectoring allocator registers after the tyre/load
     /// blocks whose forces/loads it reads and the powertrain whose torques it augments, so the
