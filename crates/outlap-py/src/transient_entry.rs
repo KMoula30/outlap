@@ -815,6 +815,16 @@ pub(crate) fn prepare_transient(
     let upshift_speeds = t1v.upshift_speeds();
     let gear_count = t1v.gear_count();
     let shift_time_s = t1v.shift_time_s();
+    // Named up-shift maps (§8.3, D-M6-9): the resolved absolute-speed set the `u(s)` `shift_map_id`
+    // selects among. Id 0 is the derived default (or a `shift_maps` entry named "default"); the rest
+    // run 1.. over `drivetrain.shift_maps` in declaration order. Validate the schedule's ids against
+    // the resolved count (an out-of-range id is a station-named `ValueError`) regardless of whether a
+    // shifter is built, so a bad id on a single-speed car still surfaces.
+    let shift_maps = resolve_shift_maps(&resolved.spec, &upshift_speeds);
+    if let Some(us) = us_schedule.as_ref() {
+        us.validate_shift_maps(shift_maps.len())
+            .map_err(|e| PyValueError::new_err(format!("invalid us_schedule: {e}")))?;
+    }
     let shifter = if upshift_speeds.is_empty() || shift_time_s <= 0.0 {
         notes.push(
             "T2 gear-shift FSM inert: the car is single-speed (direct drive) or declares no shift \
@@ -823,21 +833,35 @@ pub(crate) fn prepare_transient(
         );
         None
     } else {
+        let n_named = shift_maps.len().saturating_sub(1);
         notes.push(format!(
-            "T2 gear-shift FSM: {gear_count} gears, {shift_time_s:.3} s shift, up-shift speeds \
-             {}; each shift costs the §8.2 torque interruption (the best-gear traction ceiling is \
-             unchanged — the gear indexes no force in v1)",
+            "T2 gear-shift FSM: {gear_count} gears, {shift_time_s:.3} s shift, default up-shift \
+             speeds {}{}; each shift costs the §8.2 torque interruption (the best-gear traction \
+             ceiling is unchanged — the gear indexes no force in v1)",
             upshift_speeds
                 .iter()
                 .map(|v| format!("{v:.1}"))
                 .collect::<Vec<_>>()
-                .join("/")
+                .join("/"),
+            if n_named > 0 {
+                format!(", {n_named} named shift map(s) selectable by u(s) shift_map_id")
+            } else {
+                String::new()
+            }
         ));
-        Some(outlap_transient::Shifter::new(
-            gear_count,
-            upshift_speeds,
-            shift_time_s,
-        ))
+        // The per-station map selector: the schedule's `shift_map_id` array resampled onto the
+        // schedule arc-length grid (empty ⇒ always the default map, byte-identical to pre-1.8).
+        let schedule = match us_schedule.as_ref() {
+            Some(us) if !shift_maps.is_empty() => outlap_transient::ShiftSchedule::new(
+                schedule_stations(length, us.len()),
+                us.shift_map_ids().to_vec(),
+            ),
+            _ => outlap_transient::ShiftSchedule::default(),
+        };
+        Some(
+            outlap_transient::Shifter::new(gear_count, upshift_speeds, shift_time_s)
+                .with_maps(shift_maps, schedule),
+        )
     };
 
     // The M5 per-wheel tyre-thermal ring + wear stack (opt-in). Seeded warm (parity-safe) by default;
@@ -947,6 +971,28 @@ pub(crate) fn us_schedule_from_py(
     UsSchedule::new(deploy_regen, override_flag, lift_point, shift_map_id)
         .map(Some)
         .map_err(|e| PyValueError::new_err(format!("invalid us_schedule: {e:?}")))
+}
+
+/// Resolve the named `drivetrain.shift_maps` (§8.3, D-M6-9) into the absolute up-shift-speed set the
+/// `u(s)` `shift_map_id` indexes. Index 0 is the derived `default` schedule unless a `shift_maps`
+/// entry named `"default"` overrides it; the remaining entries take ids `1..` in declaration order.
+/// A `Factor` map is the derived default scaled elementwise; an `UpshiftSpeedsMps` map is used as-is
+/// (its length was validated equal to the up-shift count at the semantic stage).
+fn resolve_shift_maps(spec: &outlap_schema::Vehicle, derived: &[f64]) -> Vec<Vec<f64>> {
+    use outlap_schema::vehicle::ShiftMapKind;
+    let mut maps: Vec<Vec<f64>> = vec![derived.to_vec()];
+    for m in &spec.drivetrain.shift_maps {
+        let resolved = match &m.kind {
+            ShiftMapKind::UpshiftSpeedsMps(v) => v.clone(),
+            ShiftMapKind::Factor(f) => derived.iter().map(|x| x * f).collect(),
+        };
+        if m.name == "default" {
+            maps[0] = resolved;
+        } else {
+            maps.push(resolved);
+        }
+    }
+    maps
 }
 
 /// The ascending arc-length grid `n` schedule stations map to over a lap of `length` metres — the

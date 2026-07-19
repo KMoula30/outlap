@@ -23,6 +23,60 @@ pub const SHIFT_CUT_FRACTION: f64 = 0.35;
 /// up-shift threshold, so a car hovering at a shift point does not chatter between gears.
 pub const DOWNSHIFT_HYSTERESIS: f64 = 0.93;
 
+/// A per-station **named-shift-map selector** (§8.3, D-M6-9): the `u(s)` `shift_map_id` schedule
+/// resampled onto the shifter as the resolved-map index active at each arc-length station. Empty ⇒
+/// every station uses map 0 (the derived default), so the FSM is byte-identical to the pre-1.8 path.
+///
+/// Self-contained plain data fed PRE-SAMPLED by the assembly layer (the solver crate never reaches
+/// for `outlap-powertrain`'s `UsSchedule`, exactly as [`crate::FuelSlow`] receives its inertial model
+/// rather than the QSS `FuelModel`). The raw cumulative arc-length the solver hands in is wrapped
+/// into one lap so the schedule repeats every lap — the line table and the ERS schedule wrap the same
+/// way — and the resulting id is clamped to the resolved-map count (a construction-time
+/// [`crate::ScheduleError::UnknownShiftMap`] already rejects an out-of-range id, so the clamp is a
+/// panic-safety belt, not a policy).
+#[derive(Clone, Debug, Default)]
+pub struct ShiftSchedule {
+    /// Ascending arc-length breakpoints, m (the last entry is one lap length). Empty ⇒ always map 0.
+    stations_s: Vec<f64>,
+    /// The resolved-map index selected at each breakpoint (parallel to `stations_s`).
+    map_id: Vec<u32>,
+}
+
+impl ShiftSchedule {
+    /// Build a selector from the arc-length grid and its per-station map ids (parallel arrays). A
+    /// mismatched length or an empty grid degrades to "always map 0" (the caller validates the ids).
+    #[must_use]
+    pub fn new(stations_s: Vec<f64>, map_id: Vec<u32>) -> Self {
+        if stations_s.is_empty() || stations_s.len() != map_id.len() {
+            return Self::default();
+        }
+        Self { stations_s, map_id }
+    }
+
+    /// The resolved-map index active at arc-length `s`, clamped to `[0, n_maps)`. The raw cumulative
+    /// `s` is wrapped into one lap first (nearest breakpoint at/above it), mirroring the ERS
+    /// schedule's `station` wrap so a stint's laps 2..n select the same maps as lap 1.
+    #[must_use]
+    fn map_index(&self, s: f64, n_maps: usize) -> usize {
+        let Some(&length) = self.stations_s.last() else {
+            return 0;
+        };
+        let s = if length > 0.0 {
+            s.rem_euclid(length)
+        } else {
+            0.0
+        };
+        let station = match self
+            .stations_s
+            .binary_search_by(|x| x.partial_cmp(&s).unwrap_or(std::cmp::Ordering::Less))
+        {
+            Ok(i) => i,
+            Err(i) => i.min(self.stations_s.len() - 1),
+        };
+        (self.map_id[station] as usize).min(n_maps.saturating_sub(1))
+    }
+}
+
 /// A discrete gear-shift transition, fired at a step boundary off the [`EventQueue`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShiftEvent {
@@ -44,8 +98,15 @@ pub struct Shifter<T> {
     gear: usize,
     /// Number of selectable gears (`≥ 1`).
     n_gears: usize,
-    /// Up-shift speed threshold out of gear `g` (length `n_gears − 1`), m/s.
-    upshift_speeds: Vec<T>,
+    /// Resolved absolute up-shift-speed maps (§8.3, D-M6-9); `maps[0]` is the default (the derived
+    /// schedule, or a `shift_maps` entry named `"default"`). Each is ascending with length
+    /// `max(0, n_gears − 1)`; a `Factor` map is pre-multiplied at assembly. A single-entry `maps`
+    /// with an empty [`ShiftSchedule`] is the pre-1.8 single-map FSM.
+    maps: Vec<Vec<T>>,
+    /// The per-station map selector (empty ⇒ always `maps[0]`).
+    schedule: ShiftSchedule,
+    /// The map index selected at the current step boundary (updated by [`Self::select_map`]).
+    active_map: usize,
     /// Total shift duration, s (`Gearbox.shift_time_s`; `0` ⇒ instantaneous ideal shift).
     shift_time: T,
     /// Pending discrete shift transitions.
@@ -59,8 +120,9 @@ pub struct Shifter<T> {
 }
 
 impl<T: Float> Shifter<T> {
-    /// Build a shift FSM starting in gear 0. `upshift_speeds` must be ascending with length
-    /// `max(0, n_gears − 1)`; an empty list (single-speed transmission) never shifts.
+    /// Build a shift FSM starting in gear 0 with a single up-shift map. `upshift_speeds` must be
+    /// ascending with length `max(0, n_gears − 1)`; an empty list (single-speed transmission) never
+    /// shifts. This is the pre-1.8 constructor — [`Self::with_maps`] adds the named-map set.
     #[must_use]
     pub fn new(n_gears: usize, upshift_speeds: Vec<T>, shift_time: T) -> Self {
         let n_gears = n_gears.max(1);
@@ -69,13 +131,48 @@ impl<T: Float> Shifter<T> {
         Self {
             gear: 0,
             n_gears,
-            upshift_speeds,
+            maps: vec![upshift_speeds],
+            schedule: ShiftSchedule::default(),
+            active_map: 0,
             shift_time,
             events,
             active: None,
             v_prev: T::zero(),
             seeded: false,
         }
+    }
+
+    /// Install the resolved named-map set + the per-station selector (§8.3, D-M6-9, consuming). `maps`
+    /// is index-addressed by the `u(s)` `shift_map_id` (id 0 = the derived/`"default"` map); an empty
+    /// `maps` degrades to the single map already held. Absent (or an empty `schedule`) ⇒ every station
+    /// selects `maps[0]`, byte-identical to [`Self::new`].
+    #[must_use]
+    pub fn with_maps(mut self, maps: Vec<Vec<T>>, schedule: ShiftSchedule) -> Self {
+        if !maps.is_empty() {
+            self.maps = maps;
+        }
+        self.schedule = schedule;
+        self.active_map = self.active_map.min(self.maps.len() - 1);
+        self
+    }
+
+    /// Select the up-shift map active for arc-length `s` from the schedule (called at the step
+    /// boundary before [`Self::update`]). A no-op when the schedule is empty (map 0 stays selected).
+    /// The selection only changes *when the next shift triggers* — an in-progress shift is unaffected
+    /// (the threshold test runs only while idle), so switching maps mid-corner is well-posed.
+    pub fn select_map(&mut self, s: T) {
+        if self.schedule.stations_s.is_empty() {
+            return;
+        }
+        self.active_map = self
+            .schedule
+            .map_index(s.to_f64().unwrap_or(0.0), self.maps.len());
+    }
+
+    /// The up-shift speeds of the currently selected map.
+    #[inline]
+    fn active_speeds(&self) -> &[T] {
+        &self.maps[self.active_map]
     }
 
     /// The engaged gear index (telemetry).
@@ -120,7 +217,7 @@ impl<T: Float> Shifter<T> {
         }
         // Up-shift: v crossed above the threshold out of the current gear.
         if self.gear + 1 < self.n_gears {
-            let thr = self.upshift_speeds[self.gear];
+            let thr = self.active_speeds()[self.gear];
             if self.v_prev < thr && v >= thr {
                 let theta = back_interpolate(self.v_prev - thr, v - thr);
                 self.start_shift(t - dt + theta * dt, self.gear + 1);
@@ -130,7 +227,7 @@ impl<T: Float> Shifter<T> {
         // Down-shift: v fell below the hysteresis-scaled up-shift threshold into the gear below.
         if self.gear > 0 {
             let hyst = T::from(DOWNSHIFT_HYSTERESIS).unwrap_or_else(T::one);
-            let thr = self.upshift_speeds[self.gear - 1] * hyst;
+            let thr = self.active_speeds()[self.gear - 1] * hyst;
             if self.v_prev >= thr && v < thr {
                 let theta = back_interpolate(thr - self.v_prev, thr - v);
                 self.start_shift(t - dt + theta * dt, self.gear - 1);
@@ -300,6 +397,85 @@ mod tests {
         assert!(
             swapped_at > 0.10,
             "swap after the torque-cut window: {swapped_at}"
+        );
+    }
+
+    /// The first speed at which the FSM begins a shift, running `sched`/`maps` over a rising ramp.
+    fn first_shift_speed(maps: Vec<Vec<f64>>, sched: ShiftSchedule) -> Option<f64> {
+        let mut sh = Shifter::<f64>::new(2, vec![30.0], 0.1).with_maps(maps, sched);
+        let dt = 0.01;
+        for k in 0..60 {
+            let t = f64::from(k) * dt;
+            let v = 15.0 + 0.5 * f64::from(k); // crosses 20 at k=10, 30 at k=30
+            let s = 10.0 * v; // arbitrary monotone arc-length for the selector
+            let was_shifting = sh.is_shifting();
+            sh.select_map(s);
+            sh.update(t, dt, v);
+            if !was_shifting && sh.is_shifting() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn shift_map_id_selects_a_different_map() {
+        // Two maps: default (id 0) up-shifts at 30 m/s, id 1 up-shifts earlier at 20 m/s.
+        let maps = || vec![vec![30.0], vec![20.0]];
+        // A schedule pinning map 1 everywhere begins the shift ~10 m/s earlier than the default.
+        let v_default = first_shift_speed(maps(), ShiftSchedule::new(vec![0.0, 500.0], vec![0, 0]))
+            .expect("default map shifts");
+        let v_map1 = first_shift_speed(maps(), ShiftSchedule::new(vec![0.0, 500.0], vec![1, 1]))
+            .expect("map 1 shifts");
+        assert!(
+            v_map1 < v_default - 5.0,
+            "the earlier map begins the shift sooner: map1 {v_map1} vs default {v_default}"
+        );
+    }
+
+    #[test]
+    fn empty_schedule_is_byte_identical_to_the_single_map_fsm() {
+        // A `with_maps` install carrying the same single map + an empty schedule must reproduce the
+        // pre-1.8 `new`-only FSM exactly (the named-map path is inert without a schedule).
+        let run = |sh: &mut Shifter<f64>| {
+            let mut trace = Vec::new();
+            for k in 0..120 {
+                let t = f64::from(k) * 0.01;
+                let v = 10.0 + 0.35 * f64::from(k);
+                sh.select_map(1000.0); // no schedule ⇒ ignored
+                trace.push((sh.update(t, 0.01, v).to_bits(), sh.gear()));
+            }
+            trace
+        };
+        let mut plain = Shifter::<f64>::new(3, vec![20.0, 40.0], 0.08);
+        let mut mapped = Shifter::<f64>::new(3, vec![20.0, 40.0], 0.08)
+            .with_maps(vec![vec![20.0, 40.0]], ShiftSchedule::default());
+        assert_eq!(
+            run(&mut plain),
+            run(&mut mapped),
+            "named-map path inert without a schedule"
+        );
+    }
+
+    #[test]
+    fn shift_schedule_wraps_and_clamps() {
+        let sched = ShiftSchedule::new(vec![0.0, 100.0, 200.0], vec![0, 1, 2]);
+        assert_eq!(sched.map_index(50.0, 3), 1, "nearest breakpoint at/above s");
+        assert_eq!(sched.map_index(150.0, 3), 2);
+        assert_eq!(
+            sched.map_index(250.0, 3),
+            1,
+            "wraps a second lap: 250 → 50 → id 1"
+        );
+        assert_eq!(
+            sched.map_index(150.0, 2),
+            1,
+            "clamps an id past the resolved-map count"
+        );
+        assert_eq!(
+            ShiftSchedule::default().map_index(123.0, 4),
+            0,
+            "empty ⇒ map 0"
         );
     }
 

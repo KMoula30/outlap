@@ -405,6 +405,31 @@ fn schedule_policy_reproduces_a_hand_computed_trace() {
     assert_eq!(c.mode, ErsMode::OverrideDeploy);
 }
 
+/// `validate_shift_maps` accepts every in-range `shift_map_id` and names the first out-of-range one
+/// (§8.3, D-M6-9): id 0 is always valid (the derived default); ids `≥ n_maps` are undefined.
+#[test]
+fn shift_map_ids_are_validated_against_the_resolved_map_count() {
+    use outlap_powertrain::ScheduleError;
+    // A vehicle with 1 derived default + 2 named maps ⇒ ids 0, 1, 2 all valid.
+    let ok = UsSchedule::new(
+        vec![0.0; 4],
+        vec![false; 4],
+        vec![f64::INFINITY; 4],
+        vec![0, 2, 1, 0],
+    )
+    .unwrap();
+    assert!(ok.validate_shift_maps(3).is_ok());
+    // The default-only vehicle (n_maps = 1) rejects any id > 0, naming the offending station.
+    assert_eq!(
+        ok.validate_shift_maps(1),
+        Err(ScheduleError::UnknownShiftMap {
+            index: 1,
+            id: 2,
+            n_maps: 1,
+        }),
+    );
+}
+
 /// Determinism: the same trace twice produces bit-identical commands and ledgers.
 #[test]
 fn same_trace_twice_is_bit_identical() {

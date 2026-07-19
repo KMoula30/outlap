@@ -586,6 +586,9 @@ impl<T: Float> TransientSolver<T> {
         //     get this step's drive-torque scale; the regen ceiling is refreshed on the slow clock.
         if let Some(shifter) = self.shifter.as_mut() {
             let v = self.fast[ChassisState::Vx as usize];
+            // Select the named up-shift map for this station (§8.3, D-M6-9) before the threshold test;
+            // a no-op without a `shift_map_id` schedule (the default map stays selected).
+            shifter.select_map(self.fast[ChassisState::S as usize]);
             self.torque_scale = shifter.update(self.t, dt, v);
         }
 
