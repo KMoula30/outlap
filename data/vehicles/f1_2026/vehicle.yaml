@@ -2,9 +2,12 @@
 # Reference topology: F1 2026 hybrid (ICE + MGU-K on the same shaft -> gearbox -> rear diff -> RL+RR).
 # NOTE: ERS/energy figures are approximate 2026-regulation values for testing — verify against the
 # published FIA 2026 Technical Regulations before shipping this as reference data.
-schema: vehicle/1.6
+schema: vehicle/1.8
 name: "Reference F1 2026 hybrid"
 chassis:
+  # DRY mass = car + driver, no fuel (the 2026 ≤768 kg minimum-mass convention); the race fuel
+  # ADDS on top via the `fuel:` block below, so the full-tank start mass is 768 + 80 = 848 kg
+  # (M6/PR5, D-M6-4a). cg is the DRY centre of gravity; the tank centroid offset migrates it.
   mass_kg: 768.0
   cg: [1.70, 0.0, 0.30]
   inertia: [180.0, 950.0, 1000.0]
@@ -92,3 +95,19 @@ brakes:
       cooling_area_m2: 0.11
   regen_blend:
     max_regen_frac: 0.5
+# On-board fuel (§8.1, M6/PR5, D-M6-4). initial_kg ADDS on top of the dry chassis.mass_kg, so the
+# car starts the race at m₀ = 848 kg and gets lighter (and faster) as the ICE burns fuel. The tank
+# centroid sits 0.10 m behind + 0.05 m above the dry CG (the fuel cell behind the driver), so the CG
+# migrates forward and down over a stint. The energy-flow limit is the 2026-style form (C5.2.3–5) —
+# APPROXIMATE testing values; verify the flat MJ/h cap against the published FIA 2026 regulations.
+fuel:
+  initial_kg: 80.0
+  tank_kg: 110.0
+  cg_offset_m: [-0.10, 0.05]
+  lhv_j_per_kg: 43.0e6
+  flow_limit:
+    mj_per_h: 3000.0
+    rpm_line:
+      below_rpm: 10500.0
+      slope_mj_per_h_per_rpm: 0.27
+      intercept_mj_per_h: 165.0
