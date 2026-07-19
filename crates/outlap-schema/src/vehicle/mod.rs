@@ -22,8 +22,8 @@ pub use drivetrain::{
     Coupler, Diff, DiffKind, DriveControl, DriveUnit, Drivetrain, Efficiency, Gearbox, ShiftMap,
     ShiftMapKind, Split, TorqueVectoring, Wheel,
 };
-pub use fuel::{default_lhv_j_per_kg, Fuel, FuelFlowLimit, RpmFlowLine};
 pub use ers::{Activation, Deployment, EnergyStore, Ers, OverrideMode, Recovery, SpeedTaper};
+pub use fuel::{default_lhv_j_per_kg, Fuel, FuelFlowLimit, RpmFlowLine};
 pub use suspension::{AxleKc, Suspension, SuspensionModel};
 pub use tires::Tires;
 

@@ -618,8 +618,16 @@ impl GgvEnvelope {
         let x = [v, self.normalize_ax(v, ax, g_normal), g_normal];
         let base = self.base.eval(&x);
         // CG at the reference (no migration input) ⇒ the CG factors are exactly 1.0.
-        (base * self.corrections_factor(&x, mu_scale, mass_kg, cla_scale, self.a_f_ref, self.h_cg_ref))
-            .max(0.0)
+        (base
+            * self.corrections_factor(
+                &x,
+                mu_scale,
+                mass_kg,
+                cla_scale,
+                self.a_f_ref,
+                self.h_cg_ref,
+            ))
+        .max(0.0)
     }
 
     /// The Decision-#31 multiplicative correction factor at grid coords `x = [v, â_x, g_normal]` for
@@ -644,7 +652,11 @@ impl GgvEnvelope {
             (1.0 + s * delta).clamp(F_MIN, F_MAX)
         };
         let f_mu = f(&self.s_mu_up, &self.s_mu_dn, mu_scale - 1.0);
-        let f_mass = f(&self.s_mass_up, &self.s_mass_dn, mass_kg / self.mass_ref - 1.0);
+        let f_mass = f(
+            &self.s_mass_up,
+            &self.s_mass_dn,
+            mass_kg / self.mass_ref - 1.0,
+        );
         let f_cla = f(&self.s_cla_up, &self.s_cla_dn, cla_scale - 1.0);
         // CG deltas are ABSOLUTE metre offsets from the full-tank reference (D-M6-4c).
         let f_cgx = f(&self.s_cgx_up, &self.s_cgx_dn, a_f - self.a_f_ref);
@@ -663,6 +675,16 @@ impl GgvEnvelope {
         let c = &q.corrections;
         (base * self.corrections_factor(&x, c.mu_scale, c.mass_kg, c.cla_scale, c.a_f, c.h_cg))
             .max(0.0)
+    }
+
+    /// The Decision-#31 multiplicative correction factor ALONE (no base boundary) at `(v, ax,
+    /// g_normal)` for the off-reference [`CorrectionSet`]. The solver composes it onto its already
+    /// tyre-state-resolved base so the fuel mass/CG correction stacks on the live tyre march without
+    /// re-deriving the base. Exactly `1.0` at the reference state (bit-identical). Zero-allocation.
+    #[must_use]
+    pub fn correction_factor(&self, v: f64, ax: f64, g_normal: f64, c: &CorrectionSet) -> f64 {
+        let x = [v, self.normalize_ax(v, ax, g_normal), g_normal];
+        self.corrections_factor(&x, c.mu_scale, c.mass_kg, c.cla_scale, c.a_f, c.h_cg)
     }
 
     /// The full-tank reference CG longitudinal split `a_f`, m (the identity value for the CG
