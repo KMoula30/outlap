@@ -1338,6 +1338,24 @@ Designed-for now (hooks in v1), built after 1.0:
   RNG already in the core (§11.2).
 - Optimizer: strategy tree search / policy optimization over pit laps, compounds, ERS deployment
   plans (`u(s)` from §8.3), override-mode usage.
+- **Fuel-to-finish + fuel-saving (strategy, not physics).** The M6/PR5 fuel model already burns
+  fuel from real ICE work and feeds mass/CG back into the lap (§8.1) — a *consumption* model, not a
+  prescribed mass(t). The race-level rule sits on top: F1 requires ≥ 1.0 L of fuel to remain at the
+  flag for the FIA sample, so teams start with just enough to finish as close to that reserve as
+  possible. Two pieces belong here, NOT in the fuel slow state or the vehicle schema:
+  (1) **Load-to-finish optimization** — pick the initial fuel load so terminal fuel ≈ reserve at the
+  flag. It is an outer fixed point (load → lap times → total consumption → the load you needed),
+  solved by bisecting `initial_kg` against a simulated race; the reserve is `1.0 L × fuel_density`
+  (F1 fuel ≈ 0.72–0.78 kg/L → ~0.75 kg). The initial load for a *race* is a strategy input, not car
+  identity — keep it off the vehicle document (an override / strategy-computed value), preserving the
+  input-quartet firewall.
+  (2) **Fuel-saving = lift-and-coast** — when projected to run short, the driver lifts early; this is
+  exactly the `lift_point` component of the `u(s)` control vector (§8.3, wired at M6/PR5A), so the
+  strategy layer *acts* on a fuel target by shaping the lift schedule (coupled to the ERS harvest it
+  also drives). An honest, cheap precursor that could land earlier as physics-side reporting: an
+  optional fuel `reserve_kg` (or `1.0 L × density`) floor so a full-race result reports the
+  end-of-race margin and *flags running dry* rather than silently clamping fuel at 0 (the
+  estimated/degraded-surfaces discipline, §6.1) — but the load optimizer itself stays here in stage 2.
 - **Rain/wet weather lives here** (Locked Decision #4): wet tire parameter sets, track grip
   scaling (`grip_scale` already in the track format), crossover-lap estimation, drying-line
   evolution — a first-class strategy axis, not a v1 physics feature.
