@@ -256,7 +256,13 @@ pub fn check_vehicle(
 /// Range-check the fuel block: masses non-negative, `initial_kg ≤ tank_kg`, LHV positive, and the
 /// flow-limit caps positive (§8.1, D-M6-4/5).
 fn check_fuel(fuel: &crate::vehicle::Fuel, s: &Spans, sources: &Sources) -> Result<()> {
-    non_negative(fuel.initial_kg, "fuel.initial_kg", "/fuel/initial_kg", s, sources)?;
+    non_negative(
+        fuel.initial_kg,
+        "fuel.initial_kg",
+        "/fuel/initial_kg",
+        s,
+        sources,
+    )?;
     positive(fuel.tank_kg, "fuel.tank_kg", "/fuel/tank_kg", s, sources)?;
     if fuel.initial_kg > fuel.tank_kg {
         return Err(SchemaError::semantic(
@@ -269,9 +275,21 @@ fn check_fuel(fuel: &crate::vehicle::Fuel, s: &Spans, sources: &Sources) -> Resu
             None,
         ));
     }
-    positive(fuel.lhv_j_per_kg, "fuel.lhv_j_per_kg", "/fuel/lhv_j_per_kg", s, sources)?;
+    positive(
+        fuel.lhv_j_per_kg,
+        "fuel.lhv_j_per_kg",
+        "/fuel/lhv_j_per_kg",
+        s,
+        sources,
+    )?;
     if let Some(fl) = &fuel.flow_limit {
-        positive(fl.mj_per_h, "fuel.flow_limit.mj_per_h", "/fuel/flow_limit/mj_per_h", s, sources)?;
+        positive(
+            fl.mj_per_h,
+            "fuel.flow_limit.mj_per_h",
+            "/fuel/flow_limit/mj_per_h",
+            s,
+            sources,
+        )?;
         if let Some(line) = &fl.rpm_line {
             positive(
                 line.below_rpm,
@@ -457,7 +475,10 @@ fn check_shift_maps(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
                     return Err(SchemaError::semantic(
                         sources,
                         s.at(&format!("{base}/factor")),
-                        format!("shift-map `{}` `factor` must be a finite, positive multiplier", map.name),
+                        format!(
+                            "shift-map `{}` `factor` must be a finite, positive multiplier",
+                            map.name
+                        ),
                         None,
                     ));
                 }
@@ -482,7 +503,10 @@ fn check_shift_maps(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
                         return Err(SchemaError::semantic(
                             sources,
                             s.at(&format!("{base}/upshift_speeds_mps/{j}")),
-                            format!("shift-map `{}` up-shift speed {j} must be finite and positive", map.name),
+                            format!(
+                                "shift-map `{}` up-shift speed {j} must be finite and positive",
+                                map.name
+                            ),
                             None,
                         ));
                     }
