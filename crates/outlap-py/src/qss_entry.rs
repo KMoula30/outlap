@@ -335,6 +335,22 @@ pub(crate) fn prepare_qss(
     let stack = build_slow_stack(&resolved, &vl, &conditions, initial_soc, &mut notes)?;
     // The 2026 ERS energy manager (M6 PR2): governs the march whenever the car has an `ers:` block
     // AND a pack to schedule.
+    // A finite `lift_point` on a QSS run is NOT silently honoured: the quasi-steady speed profile is
+    // envelope-derived (the point-mass optimum), so lift-and-coast — an early throttle-lift that
+    // trades lap time for harvest — is a closed-loop *driver* action, realised at the T2 tier (the
+    // Driver caps its tracked reference, §8.3, D-M6-9). A physically-consistent QSS lift is a profile
+    // re-solve with a per-station speed cap, deferred so it cannot perturb the QSS↔T2 parity gates.
+    if let Some(u) = us_schedule.as_ref() {
+        if u.lift_points().iter().any(|v| v.is_finite()) {
+            notes.push(
+                "QSS run: the u(s) lift_point is recorded but not applied at this tier — the \
+                 quasi-steady speed profile is the envelope-derived point-mass optimum, so \
+                 lift-and-coast (an early throttle-lift, banking harvest for lap time) is a T2 \
+                 closed-loop driver action. Run the T2 tier to exercise the lift (§8.3)"
+                    .to_owned(),
+            );
+        }
+    }
     let ers_policy = us_schedule.map_or(outlap_qss::ers::ErsPolicy::RuleBased, |u| {
         outlap_qss::ers::ErsPolicy::Schedule(u)
     });

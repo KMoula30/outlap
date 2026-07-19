@@ -609,6 +609,9 @@ pub(crate) struct PreparedTransient {
     /// `apply_mass_state` on the slow clock (M6/PR5, §8.1, D-M6-4). A stint's `run_laps` keeps the
     /// solver's fuel state across lap boundaries automatically (lap N+1 starts lighter).
     fuel: Option<(outlap_transient::FuelSlow, f64)>,
+    /// The `u(s)` lift-and-coast schedule (§8.3, D-M6-9). Default (empty) ⇒ no lift; caps the driver's
+    /// tracked speed reference at each scheduled station's lift point so the car coasts and harvests.
+    lift: outlap_transient::LiftSchedule,
 }
 
 /// Assemble the transient block set + target line + slow subsystems for a T2 run (one lap or a
@@ -864,6 +867,30 @@ pub(crate) fn prepare_transient(
         )
     };
 
+    // The `u(s)` lift-and-coast schedule (§8.3, D-M6-9): the schedule's `lift_point` array resampled
+    // onto the schedule arc-length grid. Attached only when some station actually lifts (a finite
+    // point), so the default all-`+∞` schedule leaves the no-lift path provably byte-identical.
+    let lift = match us_schedule.as_ref() {
+        Some(us) => {
+            let sched = outlap_transient::LiftSchedule::new(
+                schedule_stations(length, us.len()),
+                us.lift_points().to_vec(),
+            );
+            if sched.is_active() {
+                notes.push(
+                    "T2 lift-and-coast active: the driver's tracked speed reference is capped to the \
+                     u(s) lift point at the scheduled stations, so the car lifts off early and coasts \
+                     into the braking zone while the ERS banks the freed energy (§8.3)"
+                        .to_owned(),
+                );
+                sched
+            } else {
+                outlap_transient::LiftSchedule::default()
+            }
+        }
+        None => outlap_transient::LiftSchedule::default(),
+    };
+
     // The M5 per-wheel tyre-thermal ring + wear stack (opt-in). Seeded warm (parity-safe) by default;
     // an explicit `initial_tire_temp_c` gives a uniform cold start (the warm-up transient).
     let tire_stack = if tire_thermal {
@@ -932,6 +959,7 @@ pub(crate) fn prepare_transient(
         shifter,
         ers,
         fuel,
+        lift,
     })
 }
 
@@ -1060,6 +1088,7 @@ pub(crate) fn solve_transient_lap(
         shifter,
         ers,
         fuel,
+        lift,
     } = prepare_transient(
         vehicle_dir,
         track,
@@ -1088,6 +1117,7 @@ pub(crate) fn solve_transient_lap(
     if let Some(shifter) = shifter {
         solver = solver.with_shifter(shifter);
     }
+    solver = solver.with_lift(lift);
     if let Some(stack) = tire_stack {
         solver = solver.with_tire_thermal(stack);
     }
@@ -1338,6 +1368,7 @@ pub(crate) fn solve_transient_stint(
         shifter,
         ers,
         fuel,
+        lift,
     } = prepare_transient(
         vehicle_dir,
         track,
@@ -1370,6 +1401,7 @@ pub(crate) fn solve_transient_stint(
     if let Some(shifter) = shifter {
         solver = solver.with_shifter(shifter);
     }
+    solver = solver.with_lift(lift);
     if let Some(stack) = tire_stack {
         solver = solver.with_tire_thermal(stack);
     }
