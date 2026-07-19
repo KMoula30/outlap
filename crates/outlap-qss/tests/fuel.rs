@@ -9,17 +9,49 @@
 //!    faster as the tank drains" physics, driven through the real solver + envelope corrections).
 #![allow(clippy::float_cmp)]
 
+use outlap_core::GriddedTable;
+use outlap_qss::fuel::{FuelCoupling, FuelModel};
 use outlap_qss::path::T0Path;
 use outlap_qss::solver::{solve_into_ggv, solve_into_ggv_coupled};
-use outlap_qss::{GgvEnvelope, T0Options, T0Vehicle, T1Vehicle};
+use outlap_qss::{
+    solve_stint, GgvEnvelope, LapRequest, LineDescriptor, StintPlan, StintSeeds, T0Options,
+    T0Vehicle, T1Vehicle,
+};
 use outlap_schema::centerline::{Centerline, CenterlineRow};
 use outlap_schema::io::FsLoader;
-use outlap_schema::sim::{Envelope as EnvelopeRes, FzCoupling};
+use outlap_schema::sim::{Envelope as EnvelopeRes, FzCoupling, Tier};
 use outlap_schema::track::{TrackDoc, TrackMeta};
 use outlap_schema::vehicle::Fuel;
 use outlap_schema::version::SchemaVersion;
 use outlap_schema::{load_vehicle, Conditions, LoadOptions, ResolvedVehicle};
 use outlap_track::Track;
+
+/// A synthetic ICE brake-thermal efficiency map over the `ice_v6` grid (constant 0.33 — the ~33 %
+/// pump-fuel figure) so the fuel burn is live in a cargo test (the shipped `.parquet` sidecar is not
+/// committed). Axes `speed_rpm × torque_nm`, one `efficiency` value column.
+fn ice_eff_table() -> GriddedTable<f64> {
+    let speeds = [1000.0, 4000.0, 8000.0, 12000.0, 15000.0];
+    let torques = [0.0, 100.0, 200.0, 300.0, 400.0];
+    let mut speed_col = Vec::new();
+    let mut torque_col = Vec::new();
+    let mut eff_col = Vec::new();
+    for &s in &speeds {
+        for &t in &torques {
+            speed_col.push(s);
+            torque_col.push(t);
+            eff_col.push(0.33);
+        }
+    }
+    GriddedTable::from_long(
+        &[
+            ("speed_rpm".to_owned(), speed_col),
+            ("torque_nm".to_owned(), torque_col),
+            ("efficiency".to_owned(), eff_col),
+        ],
+        &["speed_rpm", "torque_nm"],
+    )
+    .unwrap()
+}
 
 fn fixtures() -> FsLoader {
     FsLoader::new(concat!(
@@ -210,5 +242,83 @@ fn lighter_mass_slice_laps_faster_and_full_tank_is_identity() {
     assert!(
         lt_light < lt_full,
         "a 30 kg-lighter car laps faster ({lt_light} vs full-tank {lt_full})"
+    );
+}
+
+/// The live burn end-to-end (§8.1, D-M6-4): with a synthetic ICE efficiency map installed, a
+/// multi-lap f1 stint burns fuel — the tank mass falls monotonically lap-over-lap — and the lap
+/// time drops as the car gets lighter (the "stint starts heavy, gets faster" acceptance). No ERS /
+/// electro stack here: the ICE covers all traction, so the whole drive force burns fuel.
+#[test]
+fn f1_stint_burns_fuel_and_gets_faster() {
+    let loader = fixtures();
+    let mut fueled = resolved_f1();
+    fueled.spec.fuel = Some(a_fuel_block());
+    let mut t1 = T1Vehicle::assemble(&fueled, &Conditions::default(), &loader, true).unwrap();
+    // Install the synthetic ICE efficiency map on the ICE drive unit (index 0) so the burn is live.
+    t1.install_powertrain_maps(0, &ice_eff_table()).unwrap();
+    let res = EnvelopeRes {
+        v_points: 6,
+        ax_points: 5,
+        g_normal_points: 2,
+    };
+    let env = GgvEnvelope::generate(&t1, &res, FzCoupling::OneStepLag).unwrap();
+    let opts = T0Options {
+        allow_degraded: true,
+        ..T0Options::default()
+    };
+    let t0 = T0Vehicle::assemble(&fueled, &Conditions::default(), &loader, &opts).unwrap();
+    let path = T0Path::from_track(&oval(), 5.0);
+    let fm = FuelModel::from_spec(&fueled.spec).unwrap();
+    let fuel = FuelCoupling {
+        model: fm,
+        vehicle: &t1,
+    };
+    let plan = StintPlan {
+        tier: Tier::T0,
+        t0: &t0,
+        t1: &t1,
+        env: &env,
+        path: &path,
+        electro: None,
+        ers: None,
+        base_march: None,
+        fuel: Some(&fuel),
+        request: LapRequest {
+            line: LineDescriptor::Centerline,
+            resolved_hash: String::new(),
+            notes: vec![],
+            fz_coupling: FzCoupling::OneStepLag,
+            flat_track: false,
+        },
+    };
+    let n_laps = 5;
+    let result = solve_stint(&plan, n_laps, StintSeeds::default()).unwrap();
+    assert_eq!(result.laps.len(), n_laps);
+
+    // Terminal fuel falls every lap (monotone burn), starting below the 80 kg full tank.
+    let mut prev_fuel = fm.initial_kg;
+    for (i, lap) in result.laps.iter().enumerate() {
+        let term = lap
+            .terminal
+            .fuel_kg
+            .expect("a fuel coupling surfaces terminal fuel");
+        assert!(
+            term < prev_fuel,
+            "lap {i}: terminal fuel {term} must fall below the entry {prev_fuel}"
+        );
+        assert!(
+            term > 0.0,
+            "lap {i}: the tank does not run dry in this stint"
+        );
+        prev_fuel = term;
+    }
+
+    // The car gets lighter, so the last lap is faster than the first (strictly).
+    let first = result.laps.first().unwrap().lap_time_s;
+    let last = result.laps.last().unwrap().lap_time_s;
+    assert!(
+        last < first,
+        "the stint gets faster as the tank drains (lap {n_laps} {last} < lap 1 {first})"
     );
 }
