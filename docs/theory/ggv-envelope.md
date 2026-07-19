@@ -164,6 +164,28 @@ Archard/Grosch wear cliff the axes carry; (3, 4) peak lateral grip falling off-o
 across the wear cliff, with the frozen envelope overlaid; (5) the g-g section breathing between cold,
 optimum and worn tyres; (6) the 2-D grip surface `a_y(T_tire, wear)`.
 
+## Fuel mass and CG — corrections, NOT axes (M6; D-M6-4)
+
+Fuel burn shrinks the vehicle mass and migrates the centre of gravity over a lap
+(`docs/theory/fuel-mass.md`). Unlike the tyre state, these **stay separable multiplicative
+corrections** — the *opposite* conclusion to the Decision #49 tyre-axis amendment above, for a
+concrete reason. Tyre thermal/wear reshape grip **non-linearly and non-monotonically** (the grip
+window peaks at `T_opt`; the wear cliff is a sigmoid), so a first-order factor genuinely misses the
+physics a re-solved axis captures. Mass and CG, by contrast, are **smooth and monotone** perturbations
+of the load-transfer algebra: the boundary responds near-linearly to `∂/∂mass` and `∂/∂cg` across the
+whole grip-relevant range, so a secant (validated against full T1 re-solves in CI, exactly as the
+μ_tire/mass/ClA corrections are) is accurate and a re-solved axis would only multiply the 5–22 s
+envelope build for no fidelity gain.
+
+So the #31 correction set gains **mass** (already present as `∂gg/∂mass`, now wired to the fuel slow
+state) and **CG** (`with_cg` → four new secants, `∂gg/∂a_f` and `∂gg/∂h_cg`, up and down). The
+envelope is built at the **full-tank reference m₀** at the full-tank CG (D-M6-4b), so — mirroring the
+`T_opt`/zero-wear invariant — the mass/CG correction is **exactly 1.0 at lap start** and drifts as the
+tank drains. A car with no `fuel:` block builds at its own constant mass and every query is
+byte-identical. The composed query `BoundaryQuery` (tyre-state axes × the mass/CG/grip/downforce
+`CorrectionSet`) is the live stint path: the tyre march and the fuel burn both move, and their effects
+compose through `ay_boundary_query`.
+
 ## Consumption by T0
 
 `solve_into_ggv` runs the same forward/backward velocity-profile passes as the constant-μ ellipse
