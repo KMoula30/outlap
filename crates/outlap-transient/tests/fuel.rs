@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{build_blocks, limebeer};
+use common::{build_blocks, limebeer, line};
 use outlap_core::bus::ChannelInterner;
 use outlap_qss::t1::load_transfer;
 
@@ -74,4 +74,62 @@ fn apply_mass_state_conserves_load_and_balances_pitch() {
         (front - want_front).abs() < 1e-6,
         "front-axle load {front} must balance the pitch moment about the new CG ({want_front})"
     );
+}
+
+use outlap_schema::sim::FzCoupling;
+use outlap_transient::{FuelSlow, SimConfig, TransientSolver};
+
+/// A T2 lap with a fuel slow state burns fuel and updates the block mass: on a straight the ICE
+/// covers the drive, the tank drains, and on the slow clock `apply_mass_state` fans the lighter mass
+/// out to the blocks — the live D-M6-4 slow-state path in the transient tier.
+#[test]
+fn t2_lap_burns_fuel_and_lightens_the_blocks() {
+    let (t1, spec) = limebeer();
+    let mut it = ChannelInterner::new();
+    let blocks = build_blocks(&t1, &spec, &mut it);
+    let full_mass = blocks.load.geom.mass_kg;
+    let a_f0 = blocks.load.geom.a_f;
+    let h_cg0 = blocks.load.geom.h_cg;
+    let initial_fuel = 30.0_f64;
+    // Dry mass so the full-tank state matches the assembled blocks (no jump at the first fire).
+    let fuel = FuelSlow {
+        dry_mass_kg: full_mass - initial_fuel,
+        tank_kg: 60.0,
+        a_f_dry: a_f0,
+        h_cg_dry: h_cg0,
+        a_f_tank: a_f0 - 0.20, // tank 0.20 m rearward of the dry CG
+        h_cg_tank: h_cg0 - 0.05,
+        lhv_j_per_kg: 43.0e6,
+        ice_thermal_eff: 0.33,
+        fuel_kg: 0.0,
+        burn_accum_kg: 0.0,
+    };
+    let cfg = SimConfig {
+        fz_coupling: FzCoupling::OneStepLag,
+        ..SimConfig::default()
+    };
+    let mut solver = TransientSolver::new(
+        blocks,
+        line(6000.0, 300, false, 0.0, 0.0, 70.0, None),
+        &it,
+        cfg,
+    )
+    .with_fuel(fuel, initial_fuel);
+    // Accelerate from the seeded speed toward v_ref = 70 m/s on a long straight: throttle > 0 ⇒ burn.
+    for _ in 0..4000 {
+        solver.step();
+    }
+    let remaining = solver.fuel_remaining_kg().expect("fuel state present");
+    assert!(
+        remaining < initial_fuel && remaining > 0.0,
+        "fuel burned over the lap ({remaining} kg < {initial_fuel} kg, tank not dry)"
+    );
+    // The slow clock fanned the lighter mass out to the blocks (apply_mass_state fired).
+    let mass_now = solver.blocks().load.geom.mass_kg;
+    assert!(
+        mass_now < full_mass,
+        "the blocks got lighter as fuel burned ({mass_now} < {full_mass})"
+    );
+    // Mass consistency after the live burn: chassis inertia block agrees with the load geometry.
+    assert!((solver.blocks().chassis.params.mass - mass_now).abs() < 1e-9);
 }
