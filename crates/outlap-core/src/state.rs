@@ -407,7 +407,10 @@ mod tests {
         // All 24 chassis slots, in order, then the controller integral (the heave/pitch/roll +
         // unsprung DOF are now live, not reserved-zero).
         assert_eq!(ChassisState::T3_DOF, ChassisState::COUNT as usize);
-        assert_eq!(&buf[..ChassisState::T3_DOF], &(0..24).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            &buf[..ChassisState::T3_DOF],
+            &(0..24).collect::<Vec<_>>()[..]
+        );
         assert_eq!(
             buf[ChassisState::T3_DOF],
             StateLayout::controller_slot(ControllerState::SpeedIntegral)
