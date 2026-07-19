@@ -228,6 +228,7 @@ pub fn tir_to_tyr(doc: &TirDoc, opts: &TirToTyrOptions) -> Result<(Tyr, Vec<Repo
         schema: SchemaVersion::new(schema_name::TYR, SCHEMA_MAJOR, 0),
         mf61,
         brush: None,
+        vertical: None,
         thermal,
         wear,
         provenance: TyrProvenance {

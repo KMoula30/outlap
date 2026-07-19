@@ -29,6 +29,13 @@ pub struct Tyr {
     /// error — see [`crate::load::semantic::check_tyr`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brush: Option<TyrBrush>,
+    /// Optional structured tyre **vertical** dynamics (`tyr/1.2`, T3): the carcass vertical
+    /// spring/damper the 14-DOF chassis uses to produce per-wheel `F_z` from the unsprung
+    /// deflection. This is the preferred home for the vertical stiffness over the raw
+    /// `VERTICAL_STIFFNESS` MF6.1 map key (which stays supported as a fallback for back-compat);
+    /// both tiers' carcass-heat model already read the stiffness with a 250 kN/m fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<TyrVertical>,
     /// Thermal-ring parameters (§7.2).
     pub thermal: TyrThermal,
     /// Wear/cliff parameters (§7.3).
@@ -63,6 +70,20 @@ pub enum BrushPressureProfile {
     /// Parabolic pressure `p(x) ∝ 1 − (x/a)²` — the classic brush assumption (the only option).
     #[default]
     Parabolic,
+}
+
+/// Structured tyre **vertical** dynamics (`tyr/1.2`, T3; Pacejka 2012 ch. 1). The tyre carcass acts
+/// as a vertical spring — and optionally a light damper — between the unsprung mass and the road,
+/// producing the per-wheel normal load `F_z` at T3. Preferred over the raw `VERTICAL_STIFFNESS`
+/// MF6.1 coefficient (which stays supported as a fallback so existing `.tyr` files keep working).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct TyrVertical {
+    /// Tyre vertical stiffness `k_z`, N/m (> 0). Racing-slick-representative ≈ 250 kN/m.
+    pub stiffness_n_per_m: f64,
+    /// Tyre vertical damping `c_z`, N·s/m (≥ 0). Optional; small — tyres are lightly damped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping_n_s_per_m: Option<f64>,
 }
 
 /// MF6.1 (Pacejka 2012) coefficients keyed by their standard `.tir` names, e.g. `PCX1`, `PKY1`.

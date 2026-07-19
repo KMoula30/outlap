@@ -105,6 +105,55 @@ pub fn check_vehicle(
             &s,
             sources,
         )?;
+        // T3 suspension fields (optional; the consumer lands the checks — M6/PR6).
+        if let Some(m_u) = axle.unsprung_mass_kg {
+            positive(
+                m_u,
+                &format!("suspension.{label}.unsprung_mass_kg"),
+                &format!("{base}/unsprung_mass_kg"),
+                &s,
+                sources,
+            )?;
+        }
+        for (val, name) in [
+            (axle.damper_bump_n_s_per_m, "damper_bump_n_s_per_m"),
+            (axle.damper_rebound_n_s_per_m, "damper_rebound_n_s_per_m"),
+        ] {
+            if let Some(c) = val {
+                positive(
+                    c,
+                    &format!("suspension.{label}.{name}"),
+                    &format!("{base}/{name}"),
+                    &s,
+                    sources,
+                )?;
+            }
+        }
+        if let Some(k_arb) = axle.arb_stiffness_n_m_per_rad {
+            non_negative(
+                k_arb,
+                &format!("suspension.{label}.arb_stiffness_n_m_per_rad"),
+                &format!("{base}/arb_stiffness_n_m_per_rad"),
+                &s,
+                sources,
+            )?;
+        }
+        if let Some(bs) = &axle.bumpstop {
+            non_negative(
+                bs.gap_m,
+                &format!("suspension.{label}.bumpstop.gap_m"),
+                &format!("{base}/bumpstop/gap_m"),
+                &s,
+                sources,
+            )?;
+            positive(
+                bs.rate_n_per_m,
+                &format!("suspension.{label}.bumpstop.rate_n_per_m"),
+                &format!("{base}/bumpstop/rate_n_per_m"),
+                &s,
+                sources,
+            )?;
+        }
     }
 
     // Aero axes must be recognized.
@@ -1024,6 +1073,25 @@ pub fn check_tyr(
             &s,
             sources,
         )?;
+    }
+    // Tyre vertical block ranges (T3; a present block must be physical — M6/PR6).
+    if let Some(v) = &t.vertical {
+        positive(
+            v.stiffness_n_per_m,
+            "vertical.stiffness_n_per_m",
+            "/vertical/stiffness_n_per_m",
+            &s,
+            sources,
+        )?;
+        if let Some(c) = v.damping_n_s_per_m {
+            non_negative(
+                c,
+                "vertical.damping_n_s_per_m",
+                "/vertical/damping_n_s_per_m",
+                &s,
+                sources,
+            )?;
+        }
     }
     // Unknown coefficients → warning with did-you-mean.
     for name in t.mf61.0.keys() {

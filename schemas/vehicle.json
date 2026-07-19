@@ -186,7 +186,7 @@
       ]
     },
     "AxleKc": {
-      "description": "Per-axle kinematics & compliance.\n\n`static_ride_height_m`, `anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**:\nwhen omitted, the estimation stage fills them from documented heuristics (ride height →\naxle-nominal, kinematic angles → 0, maps → identity) and records a line in the loaded-model\nreport.",
+      "description": "Per-axle kinematics & compliance.\n\n`static_ride_height_m`, `anti_dive`, `anti_squat`, `camber_map`, and `toe_map` are **estimable**:\nwhen omitted, the estimation stage fills them from documented heuristics (ride height →\naxle-nominal, kinematic angles → 0, maps → identity) and records a line in the loaded-model\nreport.\n\nThe **T3 fields** (`unsprung_mass_kg`, `damper_bump_n_s_per_m`, `damper_rebound_n_s_per_m`,\n`arb_stiffness_n_m_per_rad`, `bumpstop`) are optional (a T2 vehicle omits them) and are applied\n**L/R-symmetrically** across the axle by the 14-DOF chassis. Unlike the estimable fields above,\nthey are **not** estimated: a `tier: t3` vehicle that omits them fails at assembly with a\nplain-language missing-fields list (they are load-bearing equilibrium/dynamic inputs, so an\ninvented value would be a phantom just like the `per_lap_deploy_mj` trap — the estimation stage\nmust never back-fill them).",
       "type": "object",
       "properties": {
         "anti_dive": {
@@ -205,6 +205,25 @@
           ],
           "format": "double"
         },
+        "arb_stiffness_n_m_per_rad": {
+          "description": "**T3**: absolute anti-roll-bar roll stiffness for this axle, N·m/rad (distinct from the\nrelative `roll_stiffness_share`, which the T1/T2 algebraic load transfer uses).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "bumpstop": {
+          "description": "**T3**: progressive bumpstop (C¹-engaged) at this axle's wheels.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Bumpstop"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "camber_map": {
           "description": "Camber-vs-travel map reference (estimable → zero).",
           "anyOf": [
@@ -215,6 +234,22 @@
               "type": "null"
             }
           ]
+        },
+        "damper_bump_n_s_per_m": {
+          "description": "**T3**: bump (compression) damping coefficient at the wheel, N·s/m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "damper_rebound_n_s_per_m": {
+          "description": "**T3**: rebound (extension) damping coefficient at the wheel, N·s/m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "ride_rate_n_per_m": {
           "description": "Vertical ride rate at the wheel, N/m.",
@@ -232,7 +267,7 @@
           "format": "double"
         },
         "static_ride_height_m": {
-          "description": "Static (design) ride height at the wheel with the car at rest, m (estimable → axle-nominal).\n\nThe reference platform the T1 aero-platform equilibrium (§7.4) compresses under downforce:\n`h = static − ΔF_spring / (2·ride_rate)`. Only consumed by the ride-height aero map; the\nconstant-aero degenerate path ignores it.",
+          "description": "Static (design) ride height at the wheel with the car at rest, m (estimable → axle-nominal).\n\nThe reference platform the T1 aero-platform equilibrium (§7.4) compresses under downforce:\n`h = static − ΔF_spring / (2·ride_rate)`. Consumed by the ride-height aero map (T1/T2); the\nconstant-aero degenerate path ignores it. At **T3** it becomes a suspension equilibrium input\n(the static compression carrying the sprung corner load), so a T3 assembly refuses an\n*estimated* ride height (`allow_degraded` marks it) rather than silently using the nominal.",
           "type": [
             "number",
             "null"
@@ -249,6 +284,14 @@
               "type": "null"
             }
           ]
+        },
+        "unsprung_mass_kg": {
+          "description": "**T3**: per-corner unsprung mass, kg (rim + tyre + hub-side, L/R-symmetric). The sprung mass\nis `chassis.mass_kg − Σ(2·unsprung_mass_kg)`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         }
       },
       "required": [
@@ -373,8 +416,28 @@
         "disc"
       ]
     },
+    "Bumpstop": {
+      "description": "**T3** progressive bumpstop: an extra spring rate that engages once the suspension compresses\npast `gap_m`, smoothed C¹ (quadratic-to-linear knee) so the RK path never sees a discontinuous\nforce or stiffness at contact.",
+      "type": "object",
+      "properties": {
+        "gap_m": {
+          "description": "Compression before the bumpstop engages, m (≥ 0).",
+          "type": "number",
+          "format": "double"
+        },
+        "rate_n_per_m": {
+          "description": "Bumpstop spring rate once engaged, N/m (> 0).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "gap_m",
+        "rate_n_per_m"
+      ]
+    },
     "Chassis": {
-      "description": "Chassis bulk properties in the ISO 8855 body frame (x forward, y left, z up).\n\n`inertia` is a diagonal `[Ixx, Iyy, Izz]` for v1 (7/14-DOF tiers); products of inertia are an\nadditive MINOR field later.",
+      "description": "Chassis bulk properties in the ISO 8855 body frame (x forward, y left, z up).\n\n`inertia` is a diagonal `[Ixx, Iyy, Izz]` for v1 (7/14-DOF tiers); products of inertia are an\nadditive MINOR field later.\n\n**Inertia convention (D-M6, user-locked Option A).** For the T3 14-DOF tier, `inertia[0]` (roll,\n`Ixx`) and `inertia[1]` (pitch, `Iyy`) are the **sprung-mass** inertias about the sprung CG — the\nexact quantities the roll/pitch EOM consume, and how these are measured (a CAD sprung model / K&C\nrig). `inertia[2]` (yaw, `Izz`) is the **whole-car** yaw inertia (the value the T2 tier uses\nunchanged, as measured on a spin rig). Roll/pitch are motions of the sprung mass alone, so their\nresisting inertia is a sprung-mass property; yaw is a whole-car motion.",
       "type": "object",
       "properties": {
         "cg": {
@@ -388,7 +451,7 @@
           "minItems": 3
         },
         "inertia": {
-          "description": "Diagonal moments of inertia `[Ixx, Iyy, Izz]`, kg·m².",
+          "description": "Diagonal moments of inertia `[Ixx, Iyy, Izz]`, kg·m². Roll/pitch (`Ixx`/`Iyy`) are\nsprung-mass inertias about the sprung CG; yaw (`Izz`) is whole-car (see the type docs).",
           "type": "array",
           "items": {
             "type": "number",
@@ -398,7 +461,7 @@
           "minItems": 3
         },
         "mass_kg": {
-          "description": "Total sprung + unsprung mass, kg.",
+          "description": "Total sprung + unsprung mass, kg. (At T3 the per-axle `suspension.*.unsprung_mass_kg` split\nout of this total gives the sprung mass; the rest is unsprung.)",
           "type": "number",
           "format": "double"
         },

@@ -381,10 +381,17 @@ pub(crate) fn build_tire_thermal(
     let (rear, _) = load_tyr(spec.tires.rear.as_str(), vl).map_err(schema_err)?;
     let axle_geom = |t: &outlap_schema::tyr::Tyr| {
         let c = &t.mf61.0;
+        // Prefer the structured `.tyr` `vertical` block (tyr/1.2, T3); fall back to the raw
+        // `VERTICAL_STIFFNESS` MF6.1 key for back-compat, then the 250 kN/m default downstream.
+        let k_z = t
+            .vertical
+            .as_ref()
+            .map(|v| v.stiffness_n_per_m)
+            .or_else(|| c.get("VERTICAL_STIFFNESS").copied());
         outlap_transient::AxleGeometry::new(
             c.get("UNLOADED_RADIUS").copied().unwrap_or(0.33),
             c.get("WIDTH").copied(),
-            c.get("VERTICAL_STIFFNESS").copied(),
+            k_z,
         )
     };
     notes.push(
@@ -422,6 +429,13 @@ pub(crate) fn build_tire_march(
 ) -> PyResult<TireThermalMarch> {
     let (front, _) = load_tyr(resolved.spec.tires.front.as_str(), vl).map_err(schema_err)?;
     let c = &front.mf61.0;
+    // Prefer the structured `.tyr` `vertical` block (tyr/1.2, T3); fall back to the raw
+    // `VERTICAL_STIFFNESS` MF6.1 key, then the 250 kN/m default downstream.
+    let k_z = front
+        .vertical
+        .as_ref()
+        .map(|v| v.stiffness_n_per_m)
+        .or_else(|| c.get("VERTICAL_STIFFNESS").copied());
     notes.push(
         "QSS tyre-thermal march (M5 PR5): a representative front-tyre reduced Farroni-TRT ring + \
          Archard wear advanced segment-to-segment along the velocity profile (the third QSS slow \
@@ -435,7 +449,7 @@ pub(crate) fn build_tire_march(
         t1v.tire_thermal().clone(),
         c.get("UNLOADED_RADIUS").copied(),
         c.get("WIDTH").copied(),
-        c.get("VERTICAL_STIFFNESS").copied(),
+        k_z,
         front.thermal.t_opt,
         front.thermal.t_cold,
         conditions.air.temperature_c,
