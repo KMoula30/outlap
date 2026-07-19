@@ -24,7 +24,7 @@ pub use drivetrain::{
 };
 pub use ers::{Activation, Deployment, EnergyStore, Ers, OverrideMode, Recovery, SpeedTaper};
 pub use fuel::{default_lhv_j_per_kg, Fuel, FuelFlowLimit, RpmFlowLine};
-pub use suspension::{AxleKc, Suspension, SuspensionModel};
+pub use suspension::{AxleKc, Bumpstop, Suspension, SuspensionModel};
 pub use tires::Tires;
 
 use schemars::JsonSchema;

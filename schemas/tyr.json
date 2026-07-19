@@ -31,6 +31,17 @@
       "description": "Thermal-ring parameters (§7.2).",
       "$ref": "#/$defs/TyrThermal"
     },
+    "vertical": {
+      "description": "Optional structured tyre **vertical** dynamics (`tyr/1.2`, T3): the carcass vertical\nspring/damper the 14-DOF chassis uses to produce per-wheel `F_z` from the unsprung\ndeflection. This is the preferred home for the vertical stiffness over the raw\n`VERTICAL_STIFFNESS` MF6.1 map key (which stays supported as a fallback for back-compat);\nboth tiers' carcass-heat model already read the stiffness with a 250 kN/m fallback.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TyrVertical"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "wear": {
       "description": "Wear/cliff parameters (§7.3).",
       "$ref": "#/$defs/TyrWear"
@@ -226,6 +237,28 @@
         "t_c_ref",
         "p_cold",
         "t_cold"
+      ]
+    },
+    "TyrVertical": {
+      "description": "Structured tyre **vertical** dynamics (`tyr/1.2`, T3; Pacejka 2012 ch. 1). The tyre carcass acts\nas a vertical spring — and optionally a light damper — between the unsprung mass and the road,\nproducing the per-wheel normal load `F_z` at T3. Preferred over the raw `VERTICAL_STIFFNESS`\nMF6.1 coefficient (which stays supported as a fallback so existing `.tyr` files keep working).",
+      "type": "object",
+      "properties": {
+        "damping_n_s_per_m": {
+          "description": "Tyre vertical damping `c_z`, N·s/m (≥ 0). Optional; small — tyres are lightly damped.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "stiffness_n_per_m": {
+          "description": "Tyre vertical stiffness `k_z`, N/m (> 0). Racing-slick-representative ≈ 250 kN/m.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "stiffness_n_per_m"
       ]
     },
     "TyrWear": {

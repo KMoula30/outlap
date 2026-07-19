@@ -136,6 +136,24 @@ fn negative_driver_preview_time_is_a_semantic_error() {
 }
 
 #[test]
+fn negative_t3_suspension_field_is_a_semantic_error() {
+    let l = loader();
+    let mut spec = load_vehicle("ev_1du_rwd/vehicle.yaml", &l, &LoadOptions::default())
+        .unwrap()
+        .spec;
+    // A negative unsprung mass (T3, M6/PR6) must be rejected by the consumer-lands-the-checks rule.
+    spec.suspension.front.unsprung_mass_kg = Some(-12.0);
+    let err = resolve_vehicle(&spec, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("negative unsprung mass must be rejected");
+    match err {
+        outlap_schema::error::SchemaError::Semantic { message, .. } => {
+            assert!(message.contains("unsprung_mass_kg"), "message: {message}");
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+#[test]
 fn referenced_files_load_standalone() {
     let l = loader();
     let ptm = load_ptm("ptm/ice_v6.ptm.yaml", &l).unwrap();

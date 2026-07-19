@@ -246,6 +246,7 @@ fn sample_tyr(map: BTreeMap<String, f64>) -> Tyr {
         schema: SchemaVersion::new(schema_name::TYR, SCHEMA_MAJOR, 0),
         mf61: Mf61Coeffs(map),
         brush: None,
+        vertical: None,
         thermal: TyrThermal {
             c_s: 8000.0,
             c_c: 22000.0,

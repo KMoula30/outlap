@@ -55,6 +55,10 @@ jobs:
       # the venv without changing cwd.
       - run: cd docs/derivations && uv run --project "$GITHUB_WORKSPACE/python" jupyter execute --kernel_name python3 t2_chassis_kane.ipynb
       - run: git diff --exit-code docs/derivations/fixtures/t2_chassis_rhs.json
+      # T3 sibling (M6): the 14-DOF Kane derivation vs the hand-written ChassisT3 RHS
+      # (cargo test -p outlap-vehicle --test kane_fixture_t3), same re-execute-and-diff gate.
+      - run: cd docs/derivations && uv run --project "$GITHUB_WORKSPACE/python" jupyter execute --kernel_name python3 t3_chassis_kane.ipynb
+      - run: git diff --exit-code docs/derivations/fixtures/t3_chassis_rhs.json
 
   notebooks:
     runs-on: ubuntu-latest

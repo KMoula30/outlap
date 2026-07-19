@@ -110,10 +110,12 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// cap §8.0 + brakes `regen_blend` §7.6), 1.7 optional ERS
 /// `elec_mech_factor` + `recovery` recharge-phase fields (§8.3, M6/PR1), 1.8 optional `fuel`
 /// block (§8.1 mass/CG/flow-limit, M6/PR5) + drivetrain `shift_maps` (§8.3 named up-shift maps,
-/// M6/PR5); `ptm`: 1.1 optional Vdc
-/// axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block; `battery`: 1.1
-/// `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` + `r2_ohm`/`tau2_s`
-/// sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag.
+/// M6/PR5), 1.9 optional T3 suspension fields (per-axle `unsprung_mass_kg`, bump/rebound dampers,
+/// absolute `arb_stiffness_n_m_per_rad`, `bumpstop`, §7.5/§6.1 14-DOF, M6/PR6); `ptm`: 1.1 optional
+/// Vdc axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block, 1.2 optional
+/// structured `vertical` block (tyre `k_z`/`c_z` for the T3 per-wheel `F_z`, §7.5, M6/PR6);
+/// `battery`: 1.1 `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` +
+/// `r2_ohm`/`tau2_s` sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag.
 ///
 /// # Validation-tightening policy
 ///
@@ -132,9 +134,9 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// rulebook consumes it — any further semantics change is MAJOR.
 pub fn current_minor(name: &str) -> u16 {
     match name {
-        schema_name::VEHICLE => 8,
-        schema_name::PTM | schema_name::BATTERY => 2,
-        schema_name::TYR | schema_name::SIM => 1,
+        schema_name::VEHICLE => 9,
+        schema_name::PTM | schema_name::BATTERY | schema_name::TYR => 2,
+        schema_name::SIM => 1,
         // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.
         _ => 0,
     }
