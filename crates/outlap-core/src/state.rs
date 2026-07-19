@@ -88,6 +88,10 @@ impl ChassisState {
     /// The T2 degrees of freedom actually integrated in M4 — the first ten slots
     /// `[s, n, ψ_rel, vx, vy, r, ω₁..₄]`.
     pub const T2_DOF: usize = 10;
+
+    /// The T3 chassis degrees of freedom (M6) — the full 24-slot footprint: the T2 ten plus
+    /// sprung heave/pitch/roll + rates (6) and the four unsprung verticals + rates (8).
+    pub const T3_DOF: usize = ChassisState::COUNT as usize;
 }
 
 /// Per-wheel tire relaxation (lagged-slip) states, two per wheel (HANDOFF §11.2). PR4 populates
@@ -195,6 +199,25 @@ impl StateLayout {
     pub fn t2_integrated_slots(out: &mut [usize]) -> usize {
         let mut k = 0;
         for slot in 0..ChassisState::T2_DOF {
+            out[k] = slot;
+            k += 1;
+        }
+        for c in 0..(ControllerState::COUNT as usize) {
+            out[k] = CONTROLLER_BASE + c;
+            k += 1;
+        }
+        k
+    }
+
+    /// The fast-buffer slots the RK sweep integrates for the **T3** tier: the full 24-slot chassis
+    /// footprint ([`ChassisState::T3_DOF`], including the heave/pitch/roll + unsprung DOF) plus the
+    /// continuous controller states. Allocation-free into `out` (must hold at least
+    /// `T3_DOF + ControllerState::COUNT` entries); returns the number written. As with T2 the
+    /// relaxation slots are advanced on the exact-exponential channel, not the RK sweep.
+    #[must_use]
+    pub fn t3_integrated_slots(out: &mut [usize]) -> usize {
+        let mut k = 0;
+        for slot in 0..ChassisState::T3_DOF {
             out[k] = slot;
             k += 1;
         }
@@ -371,6 +394,25 @@ mod tests {
             StateLayout::controller_slot(ControllerState::SpeedIntegral)
         );
         // No relaxation slot is RK-integrated (they use the exact-exponential channel).
+        for wheel in 0..WHEELS {
+            assert!(!buf[..k].contains(&StateLayout::relax_slot(RelaxState::Kappa, wheel)));
+        }
+    }
+
+    #[test]
+    fn t3_integrated_slots_are_the_full_chassis_footprint_plus_controller() {
+        let mut buf = [0usize; ChassisState::T3_DOF + ControllerState::COUNT as usize];
+        let k = StateLayout::t3_integrated_slots(&mut buf);
+        assert_eq!(k, ChassisState::T3_DOF + ControllerState::COUNT as usize);
+        // All 24 chassis slots, in order, then the controller integral (the heave/pitch/roll +
+        // unsprung DOF are now live, not reserved-zero).
+        assert_eq!(ChassisState::T3_DOF, ChassisState::COUNT as usize);
+        assert_eq!(&buf[..ChassisState::T3_DOF], &(0..24).collect::<Vec<_>>()[..]);
+        assert_eq!(
+            buf[ChassisState::T3_DOF],
+            StateLayout::controller_slot(ControllerState::SpeedIntegral)
+        );
+        // No relaxation slot is RK-integrated (exact-exponential channel).
         for wheel in 0..WHEELS {
             assert!(!buf[..k].contains(&StateLayout::relax_slot(RelaxState::Kappa, wheel)));
         }

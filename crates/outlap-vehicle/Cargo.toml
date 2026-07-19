@@ -20,6 +20,8 @@ outlap-schema = { path = "../outlap-schema" }
 [dev-dependencies]
 serde_json.workspace = true
 proptest = { workspace = true }
+# Zero-allocation gate for the T3 chassis RHS (the hot-loop `derivatives` must not touch the heap).
+dhat = { workspace = true }
 
 [lints]
 workspace = true
