@@ -832,6 +832,57 @@ impl T1Powertrain {
         })
     }
 
+    /// The ICE fuel-burn rate, kg/s, delivering a **positive** ICE wheel force `ice_wheel_force_n`
+    /// (N) at speed `v` (m/s) — the fuel half of the §8.1 slow state (D-M6-4). Sums each ICE unit's
+    /// `EnergyPoint::fuel_kg_per_s` (chemical power `P_mech/η_thermal` ÷ LHV) at its share of the ICE
+    /// force; non-ICE units contribute nothing. Zero on a braking/coast segment (force ≤ 0) and for
+    /// a car with no ICE unit (a pure EV). This attributes the ICE SHARE of hybrid traction (the
+    /// electric deploy is subtracted upstream), the correct fuel accounting the QSS core wires (the
+    /// note at [`Self::traction_energy`]). Zero-allocation.
+    #[must_use]
+    pub fn ice_fuel_rate_kg_per_s(&self, v: f64, ice_wheel_force_n: f64) -> f64 {
+        if ice_wheel_force_n <= 0.0 {
+            return 0.0;
+        }
+        // ICE force share ∝ each ICE unit's best-gear capacity at this speed (usually one unit).
+        let mut total_cap = 0.0;
+        for u in &self.units {
+            if u.kind == PtmKind::Ice && u.eff_map.is_some() {
+                total_cap += u.max_wheel_force(v);
+            }
+        }
+        if total_cap <= 0.0 {
+            return 0.0;
+        }
+        let mut kg_per_s = 0.0;
+        for (idx, u) in self.units.iter().enumerate() {
+            if u.kind != PtmKind::Ice || u.eff_map.is_none() {
+                continue;
+            }
+            let share = u.max_wheel_force(v) / total_cap;
+            if let Some(pt) = self.source_and_loss_power(idx, v, ice_wheel_force_n * share) {
+                kg_per_s += pt.fuel_kg_per_s;
+            }
+        }
+        kg_per_s
+    }
+
+    /// The best-gear crank speed (rpm) of the fastest ICE unit at speed `v` (m/s), for the FIA
+    /// C5.2.5 low-rpm fuel-flow line. `None` when the car has no mapped ICE unit. Zero-allocation.
+    #[must_use]
+    pub fn ice_crank_rpm(&self, v: f64, wheel_force_n: f64) -> Option<f64> {
+        let mut rpm_out = None::<f64>;
+        for u in &self.units {
+            if u.kind != PtmKind::Ice {
+                continue;
+            }
+            if let Some((rpm, _)) = u.source_op(v, wheel_force_n.max(0.0)) {
+                rpm_out = Some(rpm_out.map_or(rpm, |r: f64| r.max(rpm)));
+            }
+        }
+        rpm_out
+    }
+
     /// The installed machine/thermal efficiency at a source-shaft operating point `(rpm, torque_nm)`
     /// — the raw interpolated map value (0..1), unclamped, for round-trip verification against the
     /// importer's source arrays. `None` if `unit_idx` has no installed efficiency map.

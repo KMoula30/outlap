@@ -151,6 +151,7 @@ fn plan<'a>(h: &'a Hybrid, ers: &'a ErsCoupling, path: &'a T0Path) -> StintPlan<
         }),
         ers: Some(ers),
         base_march: None,
+        fuel: None,
         request: LapRequest {
             line: LineDescriptor::Centerline,
             resolved_hash: String::new(),

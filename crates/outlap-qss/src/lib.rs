@@ -34,6 +34,7 @@
 
 pub mod error;
 pub mod ers;
+pub mod fuel;
 pub mod margin;
 pub mod path;
 pub mod qss;

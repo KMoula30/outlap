@@ -216,6 +216,9 @@ pub(crate) struct PreparedQss {
     pub stack: Option<(Option<MachineThermal>, Pack, PackState)>,
     pub ers_coupling: Option<ErsCoupling>,
     pub base_march: Option<TireThermalMarch>,
+    /// The fuel-mass model (§8.1, D-M6-4) parsed from the resolved vehicle, or `None` when the car
+    /// carries no `fuel:` block. Paired with `t1v` at the solve into a `FuelCoupling`.
+    pub fuel_model: Option<outlap_qss::fuel::FuelModel>,
     pub wanted: Tier,
     pub hash: String,
     pub fzc: outlap_schema::sim::FzCoupling,
@@ -348,6 +351,7 @@ pub(crate) fn prepare_qss(
         None
     };
 
+    let fuel_model = outlap_qss::fuel::FuelModel::from_spec(&resolved.spec);
     Ok(PreparedQss {
         t0v,
         t1v,
@@ -356,6 +360,7 @@ pub(crate) fn prepare_qss(
         stack,
         ers_coupling,
         base_march,
+        fuel_model,
         wanted,
         hash,
         fzc,
@@ -411,6 +416,7 @@ pub(crate) fn solve_lap(
         stack,
         ers_coupling,
         base_march: tire_march,
+        fuel_model,
         wanted,
         hash,
         fzc,
@@ -438,10 +444,15 @@ pub(crate) fn solve_lap(
         pack_state: *state,
         active: t1v.has_energy_maps(),
     });
+    let fuel_coupling = fuel_model.map(|model| outlap_qss::fuel::FuelCoupling {
+        model,
+        vehicle: &t1v,
+    });
     let couplings = Couplings {
         electro: coupling.as_ref(),
         tire: tire_march.as_ref(),
         ers: ers_coupling.as_ref(),
+        fuel: fuel_coupling.as_ref(),
     };
     let req = LapRequest {
         line: line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations),
@@ -780,6 +791,7 @@ pub(crate) fn solve_stint(
         stack,
         ers_coupling,
         base_march,
+        fuel_model,
         wanted,
         hash,
         fzc,
@@ -832,6 +844,10 @@ pub(crate) fn solve_stint(
             pack_state: *state,
             active: t1v.has_energy_maps(),
         });
+    let fuel_coupling = fuel_model.map(|model| outlap_qss::fuel::FuelCoupling {
+        model,
+        vehicle: &t1v,
+    });
     let plan = outlap_qss::StintPlan {
         tier: wanted,
         t0: &t0v,
@@ -841,6 +857,7 @@ pub(crate) fn solve_stint(
         electro,
         ers: ers_coupling.as_ref(),
         base_march: base_march.as_ref(),
+        fuel: fuel_coupling.as_ref(),
         request: LapRequest {
             line: line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations),
             resolved_hash: hash.clone(),

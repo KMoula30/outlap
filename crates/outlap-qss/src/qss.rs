@@ -44,6 +44,7 @@ use outlap_tire::TireThermalState;
 
 use crate::error::{T0Error, T1Error};
 use crate::ers::ErsCoupling;
+use crate::fuel::FuelCoupling;
 use crate::path::T0Path;
 use crate::result::{LapResult, LineDescriptor, T0Workspace};
 use crate::solver::{derive_ax, lap_result_from_ws, solve_into_ggv, solve_into_ggv_coupled};
@@ -238,6 +239,9 @@ pub struct SlowSnapshot {
     /// Terminal machine-thermal network (present iff a drive unit declared an `.emotor` and it was
     /// marched — never under an energy manager, D-M6-10). A per-lap diagnostic; not carried.
     pub machine: Option<MachineThermal>,
+    /// Terminal fuel mass, kg (present iff a [`FuelCoupling`] marched). Carried across a stint lap
+    /// boundary so lap N+1 starts lighter (D-M6-4).
+    pub fuel_kg: Option<f64>,
 }
 
 /// The electro slow-state stack the coupling marches: the T1 vehicle (its powertrain maps + the
@@ -270,6 +274,10 @@ pub struct Couplings<'a> {
     pub tire: Option<&'a TireThermalMarch>,
     /// The 2026 ERS energy manager (requires `electro` — the manager schedules the pack).
     pub ers: Option<&'a ErsCoupling>,
+    /// The fuel-mass slow state (§8.1, D-M6-4): the tank drains as the ICE burns fuel and the
+    /// shrinking mass + migrating CG feed the point-mass equations and the #31 envelope corrections.
+    /// `None` ⇒ mass is the assembly constant (byte-identical to pre-M6).
+    pub fuel: Option<&'a FuelCoupling<'a>>,
 }
 
 /// The per-lap request metadata threaded through the solve into the result artifact.
@@ -700,6 +708,56 @@ impl SwingBand {
     }
 }
 
+/// March the fuel-mass slow state over the current profile, filling the per-station `mass`/`a_f`/
+/// `h_cg` slices (station-ENTRY state, matching the SoC/temperature convention) and returning the
+/// terminal fuel mass (kg). The ICE burns fuel for the traction it covers — the drive force NET of
+/// the realized electric deploy (`deploy_w[i]/v`, the hybrid ICE-share, §8.1) — at the ICE map's
+/// brake-thermal efficiency. Zero-allocation (all buffers caller-owned).
+#[allow(clippy::too_many_arguments)] // model + envelope + profile + the three output slices.
+fn march_fuel(
+    fc: &FuelCoupling<'_>,
+    env: &GgvEnvelope,
+    path: &T0Path,
+    v: &[f64],
+    ax: &[f64],
+    deploy_w: &[f64],
+    fuel_start_kg: f64,
+    mass: &mut [f64],
+    a_f: &mut [f64],
+    h_cg: &mut [f64],
+) -> f64 {
+    let fm = &fc.model;
+    let pt = fc.vehicle.powertrain();
+    let n = path.len();
+    let mut fuel = fuel_start_kg;
+    for seg in 0..path.segments() {
+        let i = seg;
+        let j = if path.closed { (seg + 1) % n } else { seg + 1 };
+        let vi = v[i];
+        let dt = 2.0 * path.ds / (v[i] + v[j]).max(1e-6);
+        // Station-entry mass/CG (the state the car carries INTO segment i).
+        mass[i] = fm.mass_at(fuel);
+        let (af_i, hcg_i) = fm.cg_at(fuel);
+        a_f[i] = af_i;
+        h_cg[i] = hcg_i;
+        // Drive force the ICE must cover = total drive demand net of the electric deploy share.
+        let f_req = mass[i] * (ax[i] + env.drag_accel(vi) + G * path.sin_g[i]);
+        let f_drive = f_req.max(0.0);
+        let electric_force = if vi > 1e-6 { deploy_w[i] / vi } else { 0.0 };
+        let ice_force = (f_drive - electric_force).max(0.0);
+        let mdot = pt.ice_fuel_rate_kg_per_s(vi, ice_force);
+        fuel = (fuel - mdot * dt).max(0.0);
+    }
+    // An open path's final station carries the end-of-lap state (no segment starts there).
+    if !path.closed && n > 0 {
+        mass[n - 1] = fm.mass_at(fuel);
+        let (af_i, hcg_i) = fm.cg_at(fuel);
+        a_f[n - 1] = af_i;
+        h_cg[n - 1] = hcg_i;
+    }
+    fuel
+}
+
 /// Run the coupled (or uncoupled) velocity profile into `ws`, returning the lap time and — when a
 /// coupling is active — the filled slow-state logs (the electro `SlowLog` and/or the tyre-thermal
 /// `TireSlowLog`; each `None` when its coupling was absent).
@@ -725,10 +783,18 @@ fn solve_profile(
     // state — skip it entirely (bit-identical to the uncoupled solve by construction).
     let coupling = couplings.electro.filter(|c| c.active || ers.is_some());
     let tire = couplings.tire;
-    if coupling.is_none() && tire.is_none() {
+    let fuel = couplings.fuel;
+    if coupling.is_none() && tire.is_none() && fuel.is_none() {
         let lap_time = solve_into_ggv(t0, env, path, ws)?;
         return Ok((lap_time, None, None, SlowSnapshot::default()));
     }
+    // Fuel-mass slow-state buffers (station-entry mass/CG marched along the previous profile). Seeded
+    // at the lap-start fuel (the model's initial, overridden per stint lap by the carry).
+    let mut fuel_mass = vec![0.0; n];
+    let mut fuel_a_f = vec![0.0; n];
+    let mut fuel_h_cg = vec![0.0; n];
+    let mut fuel_kg = vec![0.0; n];
+    let fuel_start = fuel.map(|f| f.model.initial_kg);
     let mut ax = vec![0.0; n];
     let mut bufs = SlowMarchBuffers::new(n);
     // Previous-iteration copies for the recorded convergence residual (PR2c).
@@ -784,11 +850,43 @@ fn solve_profile(
                 &mut tire_log,
             );
         }
+        // Fuel burns along the current profile: the ICE-share fuel rate drains the tank and the
+        // shrinking mass + migrating CG feed the next solve (D-M6-4). The deploy slice is the
+        // realized electric share (all-zero without an ERS manager).
+        if let (Some(fc), Some(f0)) = (fuel, fuel_start) {
+            march_fuel(
+                fc,
+                env,
+                path,
+                &ws.v,
+                &ax,
+                &bufs.deploy_w,
+                f0,
+                &mut fuel_mass,
+                &mut fuel_a_f,
+                &mut fuel_h_cg,
+            );
+        }
         let scale_ref = coupling.map(|_| bufs.scale.as_slice());
         let deploy_ref = ers.and(coupling).map(|_| relaxed_deploy.as_slice());
         let tire_ref = tire.map(|_| (t_tire_k.as_slice(), wear_mm.as_slice()));
-        lap_time =
-            solve_into_ggv_coupled(t0, env, scale_ref, deploy_ref, tire_ref, None, path, ws)?;
+        let mass_cg_ref = fuel.map(|_| {
+            (
+                fuel_mass.as_slice(),
+                fuel_a_f.as_slice(),
+                fuel_h_cg.as_slice(),
+            )
+        });
+        lap_time = solve_into_ggv_coupled(
+            t0,
+            env,
+            scale_ref,
+            deploy_ref,
+            tire_ref,
+            mass_cg_ref,
+            path,
+            ws,
+        )?;
         convergence.dlap_s = (lap_time - prev_lap_time).abs();
         prev_lap_time = lap_time;
     }
@@ -836,10 +934,34 @@ fn solve_profile(
         ));
         tire_log
     });
+    // Final fuel march on the converged profile so the terminal (carried) fuel matches it. The
+    // per-station fuel-mass channel `fuel_kg[i] = mass[i] − dry_mass` is filled for the reported log.
+    let fuel_terminal = match (fuel, fuel_start) {
+        (Some(fc), Some(f0)) => {
+            let term = march_fuel(
+                fc,
+                env,
+                path,
+                &ws.v,
+                &ax,
+                &bufs.deploy_w,
+                f0,
+                &mut fuel_mass,
+                &mut fuel_a_f,
+                &mut fuel_h_cg,
+            );
+            for (dst, &m) in fuel_kg.iter_mut().zip(fuel_mass.iter()) {
+                *dst = m - fc.model.dry_mass_kg;
+            }
+            Some(term)
+        }
+        _ => None,
+    };
     let terminal = SlowSnapshot {
         tire: tire_terminal,
         pack: pack_terminal,
         machine: machine_terminal,
+        fuel_kg: fuel_terminal,
     };
     Ok((lap_time, slow, tire_slow, terminal))
 }
@@ -999,6 +1121,9 @@ pub struct StintPlan<'a> {
     pub ers: Option<&'a ErsCoupling>,
     /// The representative-tyre thermal march (built once; re-seeded per lap). `None` → frozen tyre.
     pub base_march: Option<&'a TireThermalMarch>,
+    /// The fuel-mass slow state (§8.1, D-M6-4). `None` → constant mass. Its `model.initial_kg` is the
+    /// LAP-1 fuel load; later laps re-seed from the carried terminal fuel (lap N+1 starts lighter).
+    pub fuel: Option<&'a FuelCoupling<'a>>,
     /// The per-lap request template (line / hash / fz-coupling / flat-track); cloned per lap with
     /// the notes reset (the per-lap manager notes are surfaced separately).
     pub request: LapRequest,
@@ -1060,6 +1185,9 @@ pub fn solve_stint(
     // The carried seeds — updated from each lap's terminal snapshot (the stint's whole point).
     let mut tire_seed = seeds.tire;
     let mut pack_seed = plan.electro.map(|e| e.pack_state);
+    // The carried fuel mass (kg): lap-1 uses the model's initial load, later laps the prior
+    // terminal (a lighter car ⇒ a faster lap, the D-M6-4 acceptance check).
+    let mut fuel_seed = plan.fuel.map(|f| f.model.initial_kg);
     // The machine-thermal network re-seeds from the assembled state each lap (see the boundary note
     // below): a constant lap-1 seed, never carried, so it is not `mut`.
     let machine_seed = plan.electro.and_then(|e| e.thermal.cloned());
@@ -1076,10 +1204,20 @@ pub fn solve_stint(
             pack_state: pack_seed.expect("pack seed set when an electro stack is supplied"),
             active: e.active,
         });
+        // Re-seed the fuel model with this lap's starting mass (carried from the prior lap's terminal).
+        let fuel_lap = plan.fuel.map(|f| {
+            let mut model = f.model;
+            model.initial_kg = fuel_seed.expect("fuel seed set when a fuel coupling is supplied");
+            FuelCoupling {
+                model,
+                vehicle: f.vehicle,
+            }
+        });
         let couplings = Couplings {
             electro: electro.as_ref(),
             tire: march_lap.as_ref(),
             ers: plan.ers,
+            fuel: fuel_lap.as_ref(),
         };
         let mut req = plan.request.clone();
         req.notes = Vec::new();
@@ -1115,6 +1253,9 @@ pub fn solve_stint(
                 ..p
             });
         }
+        // Carry the terminal fuel mass into the next lap (a lighter car ⇒ a faster lap, D-M6-4). A
+        // `None` terminal keeps the prior seed rather than resetting to the full tank.
+        fuel_seed = qss.slow_terminal.fuel_kg.or(fuel_seed);
         // The machine-thermal network is NOT carried across the QSS lap boundary — it re-seeds each
         // lap (the terminal is still surfaced as an end-of-lap diagnostic). Coupling a near-limit
         // winding temperature into the quasi-steady DISTANCE march creates a derate↔slowdown

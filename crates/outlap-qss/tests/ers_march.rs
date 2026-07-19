@@ -176,6 +176,7 @@ fn managed_lap(h: &Hybrid, override_active: bool) -> (QssLap, T0Path) {
             electro: Some(&electro),
             tire: None,
             ers: Some(&ers),
+            fuel: None,
         },
         &path,
         plain_request(),
@@ -301,6 +302,7 @@ fn the_c5_2_9_swing_clip_is_independent_of_the_physical_window() {
             electro: Some(&electro),
             tire: None,
             ers: Some(&ers),
+            fuel: None,
         },
         &path,
         plain_request(),
@@ -455,6 +457,7 @@ fn production_soc_closes_on_a_draining_lap(h: &Hybrid) {
             electro: Some(&electro),
             tire: None,
             ers: Some(&drain),
+            fuel: None,
         },
         &dpath,
         plain_request(),
@@ -572,6 +575,7 @@ fn override_extends_the_envelope_and_the_harvest_bonus() {
                 electro: Some(&electro),
                 tire: None,
                 ers: Some(&ers),
+                fuel: None,
             },
             &path,
             plain_request(),
@@ -779,7 +783,8 @@ fn no_ers_ev_stack_matches_the_pre_pr2_march_bit_for_bit() {
             &t1, &pack, state, &thermal, &env, &path, &ws.v, &ax, &mut scale, &mut soc,
         );
         lap_time =
-            solve_into_ggv_coupled(&t0, &env, Some(&scale), None, None, None, &path, &mut ws).unwrap();
+            solve_into_ggv_coupled(&t0, &env, Some(&scale), None, None, None, &path, &mut ws)
+                .unwrap();
     }
     derive_ax_like(&path, &ws.v, &mut ax);
     oracle_march(
@@ -835,6 +840,7 @@ fn ers_coupling_without_a_pack_is_a_typed_error() {
             electro: None,
             tire: None,
             ers: Some(&ers),
+            fuel: None,
         },
         &path,
         plain_request(),
@@ -880,6 +886,7 @@ fn soc_starved_and_budget_exhausted_laps_stay_stable() {
             electro: Some(&electro),
             tire: None,
             ers: Some(&ers),
+            fuel: None,
         },
         &path,
         plain_request(),
