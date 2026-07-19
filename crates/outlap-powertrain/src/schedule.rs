@@ -36,6 +36,20 @@ pub enum ScheduleError {
         /// The offending station index.
         index: usize,
     },
+    /// A `shift_map_id` names a map the vehicle does not define (§8.3, D-M6-9). Map id 0 is always
+    /// the derived default; the additional ids run `1..n_maps` over the `drivetrain.shift_maps`.
+    #[error(
+        "shift_map_id[{index}] = {id} names an undefined shift map (the vehicle defines {n_maps} \
+         map(s): id 0 is the derived default, ids 1..{n_maps} are the named `drivetrain.shift_maps`)"
+    )]
+    UnknownShiftMap {
+        /// The offending station index.
+        index: usize,
+        /// The out-of-range map id the schedule referenced.
+        id: u32,
+        /// The number of maps the vehicle actually defines (`1 + drivetrain.shift_maps.len()`).
+        n_maps: usize,
+    },
 }
 
 /// A per-station `u(s)` control schedule.
@@ -115,8 +129,27 @@ impl<T: Float> UsSchedule<T> {
         self.lift_point[station.min(self.lift_point.len() - 1)]
     }
 
-    /// The shift-map id at `station` (edge-clamped; consumed by the PR4 gearbox FSM).
+    /// The shift-map id at `station` (edge-clamped; consumed by the gearbox FSM, §8.3).
     pub fn shift_map_id(&self, station: usize) -> u32 {
         self.shift_map_id[station.min(self.shift_map_id.len() - 1)]
+    }
+
+    /// The full per-station shift-map id array (for the assembly-time [`ShiftSchedule`] build).
+    pub fn shift_map_ids(&self) -> &[u32] {
+        &self.shift_map_id
+    }
+
+    /// Validate every `shift_map_id` against the `n_maps` the vehicle actually defines (§8.3,
+    /// D-M6-9): id 0 is the derived default, ids `1..n_maps` the named `drivetrain.shift_maps`.
+    ///
+    /// # Errors
+    /// [`ScheduleError::UnknownShiftMap`] naming the first station whose id `≥ n_maps`.
+    pub fn validate_shift_maps(&self, n_maps: usize) -> Result<(), ScheduleError> {
+        for (index, &id) in self.shift_map_id.iter().enumerate() {
+            if id as usize >= n_maps {
+                return Err(ScheduleError::UnknownShiftMap { index, id, n_maps });
+            }
+        }
+        Ok(())
     }
 }
