@@ -134,6 +134,7 @@ CHANNEL_ATTRS: dict[str, dict[str, str]] = {
     "state_of_charge": {"units": "1", "long_name": "pack state of charge"},
     "machine_temp_c": {"units": "°C", "long_name": "machine winding temperature"},
     "pack_temp_c": {"units": "°C", "long_name": "pack temperature"},
+    "fuel_mass_kg": {"units": "kg", "long_name": "on-board fuel mass"},
     # Tyre-thermal slow-state channels (the reduced Farroni-TRT ring + Archard wear).
     "tire_surface_c": {
         "units": "°C",
@@ -264,6 +265,9 @@ def lap_dataset(lap: Lap) -> xr.Dataset:
     soc = lap.state_of_charge()
     if soc is not None:
         data["state_of_charge"] = ("s", soc, _attrs("state_of_charge"))
+    fuel = lap.fuel_mass_kg()
+    if fuel is not None:
+        data["fuel_mass_kg"] = ("s", fuel, _attrs("fuel_mass_kg"))
     machine_temp = lap.machine_temp_c()
     if machine_temp is not None:
         data["machine_temp_c"] = ("s", machine_temp, _attrs("machine_temp_c"))
@@ -597,6 +601,9 @@ def stint_dataset(stint: QssStint) -> xr.Dataset:
             stint.pack_temp_c(),
             _attrs("pack_temp_c", prefix="end-of-lap "),
         )
+    fuel = stint.fuel_mass_kg()
+    if fuel is not None:
+        data["fuel_mass_kg"] = (("lap", "s"), fuel, _attrs("fuel_mass_kg"))
         machine = stint.machine_temp_c()
         if machine is not None:
             data["machine_temp_c"] = (

@@ -27,6 +27,9 @@ pub struct Lap {
     // Slow-state channels (per station); `None` unless a coupled electrified stack was active.
     state_of_charge: Option<Vec<f64>>,
     machine_temp_c: Option<Vec<f64>>,
+    // Fuel-mass slow-state channel (per station, kg); `None` unless the car carries a `fuel:` block
+    // (§8.1, M6/PR5). Drains monotonically over the lap as the ICE burns.
+    fuel_mass_kg: Option<Vec<f64>>,
     // ERS energy-manager channels (per station, ELECTRICAL W, realized); `None` unless the
     // 2026 energy manager governed the march (M6 PR2).
     deploy_power_w: Option<Vec<f64>>,
@@ -132,6 +135,12 @@ impl Lap {
     /// Pack state of charge per station (0..1), or `None` when no coupled stack was active.
     fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.state_of_charge
+            .as_ref()
+            .map(|v| v.clone().into_pyarray(py))
+    }
+    /// Fuel mass per station (kg), or `None` when the car carries no `fuel:` block (§8.1, M6/PR5).
+    fn fuel_mass_kg<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.fuel_mass_kg
             .as_ref()
             .map(|v| v.clone().into_pyarray(py))
     }
@@ -548,6 +557,7 @@ pub(crate) fn qss_lap_to_py(qss: QssLap, track: &Track) -> Lap {
         aero_front_share: setup.map(|s| s.aero_front_share.clone()),
         state_of_charge: slow.map(|s| s.state_of_charge.clone()),
         machine_temp_c: slow.and_then(|s| s.machine_temp_c.clone()),
+        fuel_mass_kg: qss.fuel.as_ref().map(|f| f.fuel_mass_kg.clone()),
         deploy_power_w: slow.and_then(|s| s.ers.as_ref().map(|e| e.deploy_power_w.clone())),
         harvest_power_w: slow.and_then(|s| s.ers.as_ref().map(|e| e.harvest_power_w.clone())),
         tire_surface_c: tire.map(|t| t.surface_temp_c.clone()),
@@ -634,6 +644,9 @@ pub struct QssStint {
     // Per-`(lap × station)` pack state of charge (0..1), carried continuously across lap boundaries;
     // `None` when the car has no active electro stack.
     state_of_charge: Option<Vec<f64>>,
+    // Per-`(lap × station)` fuel mass, kg (drains lap-over-lap as the ICE burns); `None` when the
+    // car carries no `fuel:` block (§8.1, M6/PR5, D-M6-4).
+    fuel_mass_kg: Option<Vec<f64>>,
     // Per-lap END-of-lap pack + machine temperatures, °C (n_laps); `None` when absent (machine temp
     // is never surfaced under an energy manager — D-M6-10).
     pack_temp_c: Option<Vec<f64>>,
@@ -722,6 +735,14 @@ impl QssStint {
     fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
         let n = self.n_stations();
         self.state_of_charge
+            .as_ref()
+            .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Fuel mass, kg (`n_laps × station`), draining continuously across lap boundaries, or `None`
+    /// when the car carries no `fuel:` block (§8.1, M6/PR5).
+    fn fuel_mass_kg<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        let n = self.n_stations();
+        self.fuel_mass_kg
             .as_ref()
             .map(|f| array2d(py, f, self.n_laps, n))
     }
@@ -887,9 +908,11 @@ pub(crate) fn solve_stint(
     let (mut surf, mut carc, mut gas) = (Vec::new(), Vec::new(), Vec::new());
     let (mut wear, mut dmg, mut grip) = (Vec::new(), Vec::new(), Vec::new());
     let mut soc_flat: Vec<f64> = Vec::new();
+    let mut fuel_flat: Vec<f64> = Vec::new();
     let (mut pack_temp, mut machine_temp) = (Vec::new(), Vec::new());
     let mut have_tire = false;
     let (mut have_soc, mut have_pack_temp, mut have_machine_temp) = (false, false, false);
+    let mut have_fuel = false;
 
     for lap in &result.laps {
         lap_time_s.push(lap.lap_time_s);
@@ -906,6 +929,10 @@ pub(crate) fn solve_stint(
         if let Some(s) = &lap.slow {
             soc_flat.extend_from_slice(&s.state_of_charge);
             have_soc = true;
+        }
+        if let Some(f) = &lap.fuel {
+            fuel_flat.extend_from_slice(&f.fuel_mass_kg);
+            have_fuel = true;
         }
         // End-of-lap pack + machine temperature from the terminal snapshot the next lap seeded from.
         if let Some(p) = &lap.terminal.pack {
@@ -930,6 +957,7 @@ pub(crate) fn solve_stint(
         tire_damage: have_tire.then_some(dmg),
         tire_grip: have_tire.then_some(grip),
         state_of_charge: have_soc.then_some(soc_flat),
+        fuel_mass_kg: have_fuel.then_some(fuel_flat),
         pack_temp_c: have_pack_temp.then_some(pack_temp),
         machine_temp_c: have_machine_temp.then_some(machine_temp),
         tier: format!("{:?}", result.tier).to_lowercase(),
