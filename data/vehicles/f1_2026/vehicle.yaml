@@ -98,16 +98,16 @@ brakes:
 # On-board fuel (§8.1, M6/PR5, D-M6-4). initial_kg ADDS on top of the dry chassis.mass_kg, so the
 # car starts the race at m₀ = 848 kg and gets lighter (and faster) as the ICE burns fuel. The tank
 # centroid sits 0.10 m behind + 0.05 m above the dry CG (the fuel cell behind the driver), so the CG
-# migrates forward and down over a stint. The energy-flow limit is the 2026-style form (C5.2.3–5) —
-# APPROXIMATE testing values; verify the flat MJ/h cap against the published FIA 2026 regulations.
+# migrates forward and down over a stint.
+#
+# NO `flow_limit:` here on purpose. The fuel-flow ceiling (C5.2.3–5) is fully wired — it shrinks the
+# ICE traction envelope on power (`FuelModel::ice_power_cap_w`, `outlap-qss/src/solver.rs`) and is
+# exercised by `outlap-qss/tests/fuel.rs::flow_limit_binds_on_power_and_the_burn_respects_the_ceiling`
+# with a synthetic tight cap. But this car's ICE `.ptm` map is ALREADY calibrated to realistic 2026
+# (fuel-flow-limited) pace, so a separate flat cap would DOUBLE-COUNT the restriction and over-slow
+# the lap. Declare a `flow_limit` only alongside an *unrestricted* ICE map. (M6/PR5, D-M6-5.)
 fuel:
   initial_kg: 80.0
   tank_kg: 110.0
   cg_offset_m: [-0.10, 0.05]
   lhv_j_per_kg: 43.0e6
-  flow_limit:
-    mj_per_h: 3000.0
-    rpm_line:
-      below_rpm: 10500.0
-      slope_mj_per_h_per_rpm: 0.27
-      intercept_mj_per_h: 165.0
