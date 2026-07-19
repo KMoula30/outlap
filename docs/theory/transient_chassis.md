@@ -28,7 +28,9 @@ with (ISO 8855: x forward, y left, z up; SI throughout):
 | `ω_i`    | wheel spin, rad/s (FL, FR, RL, RR)                  |
 
 The registry reserves the full **14-DOF** footprint (heave/pitch/roll + four unsprung verticals) so
-the T3 tier drops in without a layout break; T2 integrates only these first ten slots.
+the T3 tier drops in without a layout break; T2 integrates only these first ten slots. The 14-DOF
+extension — sprung ride dynamics, tyre-spring `F_z`, gyroscopic and frame-transport terms — is
+documented in [`t3-chassis.md`](t3-chassis.md).
 
 ## 2. Equations of motion
 
