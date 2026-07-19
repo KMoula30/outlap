@@ -68,8 +68,15 @@ fn chassis_t3_rhs_matches_kane_derivation_to_1e_12() {
         ChassisState::ZuRateRr,
     ];
 
+    // Optional: dump the per-sample per-state residuals to CSV for the verification figure.
+    let mut csv = String::new();
+    let dump = std::env::var("OUTLAP_T3_RESIDUAL_CSV").ok();
+    if dump.is_some() {
+        csv.push_str("sample,state,rust,sympy,abs,rel\n");
+    }
+
     let mut worst = 0.0f64;
-    for sample in samples {
+    for (si, sample) in samples.iter().enumerate() {
         let inp = &sample["inputs"];
 
         let params = ChassisParams::<f64>::from_f64(
@@ -187,6 +194,10 @@ fn chassis_t3_rhs_matches_kane_derivation_to_1e_12() {
             // entry by O(1) relative — orders of magnitude above this gate.
             let rel = diff / (1.0 + e.abs());
             worst = worst.max(rel);
+            if dump.is_some() {
+                use std::fmt::Write as _;
+                let _ = writeln!(csv, "{si},{i},{rust:e},{e:e},{diff:e},{rel:e}");
+            }
             assert!(
                 rel < 1e-12,
                 "state {i} ({slot:?}): rust={rust} sympy={e} abs={diff:e} rel={rel:e}"
@@ -195,4 +206,7 @@ fn chassis_t3_rhs_matches_kane_derivation_to_1e_12() {
     }
     assert!(worst < 1e-12, "worst-case relative disagreement {worst:e}");
     println!("T3 Kane fixture: worst-case relative |rust − sympy| = {worst:e}");
+    if let Some(path) = dump {
+        std::fs::write(&path, csv).expect("write residual CSV");
+    }
 }
