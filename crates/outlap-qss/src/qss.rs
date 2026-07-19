@@ -778,6 +778,23 @@ fn solve_profile(
     ws: &mut T0Workspace,
 ) -> Result<(f64, Option<SlowLog>, Option<TireSlowLog>, SlowSnapshot), T0Error> {
     let n = path.len();
+    // Mass-owner invariant (PR5b): the point-mass reference mass and the envelope-build mass must be
+    // the SAME m₀ — otherwise the #31 mass correction (normalised by `env.mass_ref()`) would drift
+    // off a mismatched reference. Assembly builds both from `chassis.mass_kg (+ fuel.initial_kg)`, so
+    // this is exact; the assert catches any future mass owner that folds fuel into one tier only. A
+    // fuel coupling additionally shares the same T1 vehicle as the envelope reference.
+    debug_assert!(
+        (t0.mass_kg - env.mass_ref()).abs() < 1e-6,
+        "T0 point-mass ({}) and envelope reference mass ({}) must agree at m₀",
+        t0.mass_kg,
+        env.mass_ref()
+    );
+    debug_assert!(
+        couplings
+            .fuel
+            .is_none_or(|f| (f.vehicle.mass_kg - env.mass_ref()).abs() < 1e-6),
+        "the fuel coupling's T1 vehicle must be the envelope's full-tank reference"
+    );
     let ers = couplings.ers;
     // Assembly-time activity: an inactive stack (no energy maps, no manager) cannot move a slow
     // state — skip it entirely (bit-identical to the uncoupled solve by construction).
