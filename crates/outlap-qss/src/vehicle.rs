@@ -224,8 +224,14 @@ impl T0Vehicle {
                 .to_owned(),
         );
 
+        // Full-tank reference mass m₀ = dry + initial fuel when a `fuel:` block is present (D-M6-4b);
+        // the point-mass F/m then starts at m₀ and the fuel slow state marches it down. No fuel ⇒
+        // the raw chassis mass (byte-identical to pre-M6).
+        let mass_kg = crate::fuel::FuelModel::from_spec(spec)
+            .map_or(spec.chassis.mass_kg, |fm| fm.full_mass_kg());
+
         Ok(Self {
-            mass_kg: spec.chassis.mass_kg,
+            mass_kg,
             mu_x,
             mu_y,
             qx,

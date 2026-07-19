@@ -162,11 +162,28 @@ impl T1Vehicle {
         let r_rear = tyr_radius(&rear_doc);
 
         // --- Chassis geometry (CG measured from the front axle, §6.1) ---
+        // With a `fuel:` block the envelope reference is the FULL-TANK state m₀ (D-M6-4b): the mass
+        // is `chassis.mass_kg + fuel.initial_kg` and the CG the mass-weighted blend of the dry CG and
+        // the tank centroid. No fuel ⇒ the raw chassis mass/CG (byte-identical to pre-M6).
         let ch = &spec.chassis;
-        let a_f = ch.cg[0];
         let wheelbase_m = ch.wheelbase_m;
+        let fuel_model = crate::fuel::FuelModel::from_spec(spec);
+        let (mass_kg, a_f, h_cg) = match &fuel_model {
+            Some(fm) => {
+                let (a_f_full, h_cg_full) = fm.full_cg();
+                (fm.full_mass_kg(), a_f_full, h_cg_full)
+            }
+            None => (ch.mass_kg, ch.cg[0], ch.cg[2]),
+        };
+        if fuel_model.is_some() {
+            notes.push(format!(
+                "fuel: envelope built at the full-tank reference m₀ = {mass_kg:.1} kg (dry \
+                 {:.1} kg + fuel), CG a_f = {a_f:.3} m, h_cg = {h_cg:.3} m; the mass/CG correction \
+                 is 1.0 at lap start and drifts as the tank drains (D-M6-4).",
+                ch.mass_kg
+            ));
+        }
         let b_r = wheelbase_m - a_f;
-        let h_cg = ch.cg[2];
         let t_f = ch.track_m[0];
         let t_r = ch.track_m[1];
 
@@ -247,7 +264,7 @@ impl T1Vehicle {
         );
 
         Ok(Self {
-            mass_kg: ch.mass_kg,
+            mass_kg,
             izz: ch.inertia[2],
             a_f,
             b_r,

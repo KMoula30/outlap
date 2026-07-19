@@ -189,6 +189,7 @@ fn march(e: &Ev) -> Vec<f64> {
             electro: Some(&electro),
             tire: None,
             ers: None,
+            fuel: None,
         },
         &path,
         LapRequest {
