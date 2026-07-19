@@ -210,6 +210,7 @@ fn lighter_mass_slice_laps_faster_and_full_tank_is_identity() {
         None,
         None,
         Some((&mass_full, &af_full, &hcg_full)),
+        None,
         &path,
         &mut ws_full,
     )
@@ -235,6 +236,7 @@ fn lighter_mass_slice_laps_faster_and_full_tank_is_identity() {
         None,
         None,
         Some((&mass_light, &af_light, &hcg_light)),
+        None,
         &path,
         &mut ws_light,
     )
@@ -320,5 +322,104 @@ fn f1_stint_burns_fuel_and_gets_faster() {
     assert!(
         last < first,
         "the stint gets faster as the tank drains (lap {n_laps} {last} < lap 1 {first})"
+    );
+}
+
+/// The lower heating value the fuel block declares, J/kg.
+const LHV: f64 = 43.0e6;
+
+/// Solve one f1 lap with the given fuel flow limit and return `(lap_time, fuel_burned_kg,
+/// max_fuel_energy_rate_w)` — the peak per-segment fuel-energy rate `ṁ·LHV` reconstructed from the
+/// per-station fuel-mass channel and the speed profile.
+fn solve_one_lap(flow: Option<outlap_schema::vehicle::FuelFlowLimit>) -> (f64, f64, f64) {
+    let loader = fixtures();
+    let mut fueled = resolved_f1();
+    let mut fb = a_fuel_block();
+    fb.flow_limit = flow;
+    fueled.spec.fuel = Some(fb);
+    let mut t1 = T1Vehicle::assemble(&fueled, &Conditions::default(), &loader, true).unwrap();
+    t1.install_powertrain_maps(0, &ice_eff_table()).unwrap();
+    let res = EnvelopeRes {
+        v_points: 6,
+        ax_points: 5,
+        g_normal_points: 2,
+    };
+    let env = GgvEnvelope::generate(&t1, &res, FzCoupling::OneStepLag).unwrap();
+    let opts = T0Options {
+        allow_degraded: true,
+        ..T0Options::default()
+    };
+    let t0 = T0Vehicle::assemble(&fueled, &Conditions::default(), &loader, &opts).unwrap();
+    let path = T0Path::from_track(&oval(), 5.0);
+    let fm = FuelModel::from_spec(&fueled.spec).unwrap();
+    let fuel = FuelCoupling {
+        model: fm,
+        vehicle: &t1,
+    };
+    let plan = StintPlan {
+        tier: Tier::T0,
+        t0: &t0,
+        t1: &t1,
+        env: &env,
+        path: &path,
+        electro: None,
+        ers: None,
+        base_march: None,
+        fuel: Some(&fuel),
+        request: LapRequest {
+            line: LineDescriptor::Centerline,
+            resolved_hash: String::new(),
+            notes: vec![],
+            fz_coupling: FzCoupling::OneStepLag,
+            flat_track: false,
+        },
+    };
+    let result = solve_stint(&plan, 1, StintSeeds::default()).unwrap();
+    let lap = &result.laps[0];
+    let burned = fm.initial_kg - lap.terminal.fuel_kg.unwrap();
+    // Peak per-segment fuel-energy rate: ṁ_seg = Δfuel / dt, dt = 2·ds/(v_i+v_j).
+    let f = &lap.fuel.as_ref().unwrap().fuel_mass_kg;
+    let v = &lap.v;
+    let n = v.len();
+    let mut max_rate = 0.0_f64;
+    for i in 0..path.segments() {
+        let j = if path.closed { (i + 1) % n } else { i + 1 };
+        let dt = 2.0 * path.ds / (v[i] + v[j]).max(1e-6);
+        let mdot = ((f[i] - f[j]) / dt).max(0.0);
+        max_rate = max_rate.max(mdot * LHV);
+    }
+    (lap.lap_time_s, burned, max_rate)
+}
+
+/// The FIA fuel-flow ceiling (§8.1, D-M6-5) BINDS ON POWER: a tight flat limit shrinks the ICE
+/// traction envelope, so the lap is slower and burns less fuel than the un-limited car — and the
+/// honest per-station `ṁ` accounting stays at/below the imposed energy ceiling (the §14 closure the
+/// plan calls out: the envelope is shrunk, the `ṁ` bookkeeping is NEVER clamped).
+#[test]
+fn flow_limit_binds_on_power_and_the_burn_respects_the_ceiling() {
+    let (t_free, burn_free, _rate_free) = solve_one_lap(None);
+    // A tight 1500 MJ/h flat ceiling: η·EF ≈ 0.33·417 kW ≈ 138 kW of crank power, well below the
+    // f1's high-speed mechanical ceiling, so it binds hard on the straights.
+    let ef_limit_w = 1500.0e6 / 3600.0;
+    let (t_lim, burn_lim, rate_lim) = solve_one_lap(Some(outlap_schema::vehicle::FuelFlowLimit {
+        mj_per_h: 1500.0,
+        rpm_line: None,
+    }));
+    // (1) Binds on power: the shrunk envelope makes the lap strictly slower.
+    assert!(
+        t_lim > t_free * 1.02,
+        "the flow limit shrinks the envelope: capped lap {t_lim} s vs free {t_free} s"
+    );
+    // (2) Less work ⇒ less fuel (the car cannot draw the power it otherwise would).
+    assert!(
+        burn_lim < burn_free,
+        "the capped car burns less fuel: {burn_lim} kg vs {burn_free} kg"
+    );
+    // (3) §14 closure: the honest ṁ accounting stays within the imposed ceiling — the flow limit is
+    // realised by shrinking the traction envelope, NOT by clamping the burn. A small tolerance
+    // absorbs the central-vs-forward ax reconstruction and the representative-vs-map η spread.
+    assert!(
+        rate_lim <= ef_limit_w * 1.10,
+        "peak fuel-energy rate {rate_lim} W must respect the {ef_limit_w} W ceiling"
     );
 }

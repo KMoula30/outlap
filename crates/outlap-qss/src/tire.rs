@@ -438,6 +438,7 @@ mod tests {
             None,
             Some((&t_ref, &w_ref)),
             None,
+            None,
             &path,
             &mut ws_ref,
         )
@@ -479,6 +480,7 @@ mod tests {
             None,
             None,
             Some((&t_state, &w_state)),
+            None,
             None,
             &path,
             &mut ws2,

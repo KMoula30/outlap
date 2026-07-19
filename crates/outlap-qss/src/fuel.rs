@@ -108,6 +108,20 @@ impl FuelModel {
         self.cg_at(self.initial_kg)
     }
 
+    /// The **ICE mechanical-power ceiling** the flat energy-flow cap imposes, W, or `None` when the
+    /// car has no flat flow limit (§8.1, D-M6-5). A fuel-energy rate `EF` (MJ/h) burns
+    /// `P_mech = η·EF` of crank power, so the FIA flat fuel-flow ceiling caps the ICE mechanical power
+    /// at `η · flow_mj_per_h · 1e6/3600` — a CONSTRAINT ON AVAILABLE POWER that shrinks the traction
+    /// envelope (the car does less work and burns proportionally less), never a clamp on the `ṁ`
+    /// accounting (that would break the §14 energy closure). The C5.2.5 low-rpm line governs only
+    /// sub-`below_rpm` operation, where the cap is far above any binding force, so the envelope uses
+    /// the flat ceiling alone.
+    #[must_use]
+    pub fn ice_power_cap_w(&self, ice_thermal_eff: f64) -> Option<f64> {
+        self.flow_mj_per_h
+            .map(|mj| ice_thermal_eff * mj * 1.0e6 / 3600.0)
+    }
+
     /// The energy-flow cap at crank speed `rpm`, MJ/h, or `None` when the car has no flow limit.
     /// Below the C5.2.5 rpm line the linear `slope·N + intercept` applies; at/above it the flat
     /// `flow_mj_per_h`. The lower of the two binds where both are present.
