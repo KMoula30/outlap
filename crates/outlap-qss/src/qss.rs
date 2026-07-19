@@ -914,6 +914,15 @@ fn solve_profile(
                 fuel_h_cg.as_slice(),
             )
         });
+        // The FIA fuel-flow ceiling (§8.1, D-M6-5): the flat cap η·EF_limit shrinks the ICE traction
+        // envelope on power. `None` unless the car has a `fuel.flow_limit` with a flat `mj_per_h` and
+        // an ICE efficiency to convert it — so the default (and every non-ICE car) is bit-identical.
+        let ice_power_cap_w = fuel.and_then(|fc| {
+            fc.vehicle
+                .powertrain()
+                .representative_ice_efficiency()
+                .and_then(|eff| fc.model.ice_power_cap_w(eff))
+        });
         lap_time = solve_into_ggv_coupled(
             t0,
             env,
@@ -921,6 +930,7 @@ fn solve_profile(
             deploy_ref,
             tire_ref,
             mass_cg_ref,
+            ice_power_cap_w,
             path,
             ws,
         )?;

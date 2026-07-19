@@ -177,6 +177,13 @@ struct GgvGrip<'a> {
     /// and the lateral boundary + shoulders compose the Decision-#31 mass/CG correction (D-M6-4). The
     /// envelope is built at the full-tank reference m₀, so lap 1 station 0 is the identity slice.
     mass_cg: Option<(&'a [f64], &'a [f64], &'a [f64])>,
+    /// Optional **ICE mechanical-power ceiling**, W, from the fuel flow limit (`None` ⇒ no cap, the
+    /// pre-M6 behaviour, bit-identical). When present it caps the MECHANICAL traction share at
+    /// `cap_w / v` in the forward step (the FIA fuel-flow ceiling `P_mech ≤ η·EF_limit`, §8.1
+    /// D-M6-5), shrinking the envelope on power at high speed while the honest `ṁ` accounting in
+    /// [`crate::qss::march_fuel`] keeps the §14 closure. Braking and the electric deploy share are
+    /// unaffected. See [`crate::fuel::FuelModel::ice_power_cap_w`].
+    ice_power_cap_w: Option<f64>,
 }
 
 impl<'a> GgvGrip<'a> {
@@ -188,12 +195,14 @@ impl<'a> GgvGrip<'a> {
             deploy_force: None,
             tire_state: None,
             mass_cg: None,
+            ice_power_cap_w: None,
         }
     }
 
     /// As [`Self::new`] but with the optional per-station couplings: the traction `scale` (machine /
     /// battery), the additive ERS `deploy` force slice (the energy-manager march), and the `tire`
     /// state `(T_tire[i], wear[i])` (the tyre-thermal march).
+    #[allow(clippy::too_many_arguments)]
     fn coupled(
         veh: &'a T0Vehicle,
         env: &'a GgvEnvelope,
@@ -201,6 +210,7 @@ impl<'a> GgvGrip<'a> {
         deploy: Option<&'a [f64]>,
         tire: Option<(&'a [f64], &'a [f64])>,
         mass_cg: Option<(&'a [f64], &'a [f64], &'a [f64])>,
+        ice_power_cap_w: Option<f64>,
     ) -> Self {
         Self {
             veh,
@@ -209,6 +219,17 @@ impl<'a> GgvGrip<'a> {
             deploy_force: deploy,
             tire_state: tire,
             mass_cg,
+            ice_power_cap_w,
+        }
+    }
+
+    /// Cap a mechanical traction force by the ICE power ceiling `cap_w / v` when a fuel flow limit is
+    /// present (`None` ⇒ unchanged, bit-identical). `v` is floored so the cap never blows up at rest.
+    #[inline]
+    fn cap_mech(&self, mech_force: f64, v: f64) -> f64 {
+        match self.ice_power_cap_w {
+            Some(cap_w) => mech_force.min(cap_w / v.max(1.0)),
+            None => mech_force,
         }
     }
 
@@ -384,9 +405,13 @@ impl GripModel for GgvGrip<'_> {
             // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1. With an
             // energy-manager deploy slice, the scale multiplies the MECHANICAL share only and the
             // (budget/pack/machine-clipped, possibly negative) electric share adds on top.
+            // The FIA fuel-flow ceiling (§8.1, D-M6-5) caps the MECHANICAL (ICE) share only; the
+            // electric deploy slice is a separate pack draw. Uncoupled ⇒ `cap_mech` is a no-op.
             let pt_force = match self.deploy_force {
-                Some(d) => self.veh.mech_tractive_force(v_i) * self.scale(i) + d[i],
-                None => self.veh.tractive_force(v_i) * self.scale(i),
+                Some(d) => {
+                    self.cap_mech(self.veh.mech_tractive_force(v_i) * self.scale(i), v_i) + d[i]
+                }
+                None => self.cap_mech(self.veh.tractive_force(v_i) * self.scale(i), v_i),
             };
             let pt_net = pt_force / self.mass_at(i) - self.drag_at(i, v_i);
             ax_grip.min(pt_net) - G * p.sin_g[i]
@@ -544,7 +569,7 @@ pub fn solve_into_ggv_scaled(
     path: &T0Path,
     ws: &mut T0Workspace,
 ) -> Result<f64, T0Error> {
-    solve_into_ggv_coupled(veh, env, Some(scale), None, None, None, path, ws)
+    solve_into_ggv_coupled(veh, env, Some(scale), None, None, None, None, path, ws)
 }
 
 /// As [`solve_into_ggv`] but with the optional QSS slow-state couplings composed into one solve:
@@ -572,6 +597,7 @@ pub fn solve_into_ggv_coupled(
     deploy: Option<&[f64]>,
     tire: Option<(&[f64], &[f64])>,
     mass_cg: Option<(&[f64], &[f64], &[f64])>,
+    ice_power_cap_w: Option<f64>,
     path: &T0Path,
     ws: &mut T0Workspace,
 ) -> Result<f64, T0Error> {
@@ -602,7 +628,7 @@ pub fn solve_into_ggv_coupled(
         check(hcg.len())?;
     }
     solve_generic(
-        &GgvGrip::coupled(veh, env, scale, deploy, tire, mass_cg),
+        &GgvGrip::coupled(veh, env, scale, deploy, tire, mass_cg, ice_power_cap_w),
         path,
         ws,
     )
