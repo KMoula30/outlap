@@ -253,6 +253,13 @@ impl<T: Float> Shifter<T> {
     /// `dt` and reached speed `v`), and return the drive-torque scale `∈ [0, 1]` to apply this step:
     /// `0` through the torque-cut window, ramping to `1` over the clutch re-engagement, `1` when
     /// engaged. Draining due events swaps the gear and completes the shift.
+    ///
+    /// **Drain order vs. map selection (D-M6-9).** The due events are drained *first*, in the
+    /// [`EventQueue`]'s deterministic time-then-insertion (LIFO on equal-time ties) order, and only
+    /// then — while idle — is the threshold tested against the map [`Self::select_map`] chose at this
+    /// boundary. So a `shift_map_id` switch never races an in-flight ratio swap or completion: it can
+    /// only change *which threshold the next shift decision uses*, keeping the discrete timeline and
+    /// the per-station map selection cleanly separated.
     pub fn update(&mut self, t: T, dt: T, v: T) -> T {
         // Drain due discrete transitions (ratio swap, completion) at this boundary.
         while let Some(ev) = self.events.pop_due(t) {

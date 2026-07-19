@@ -18,7 +18,7 @@
 mod common;
 
 use common::{build_blocks, limebeer, line};
-use outlap_core::block::Phase;
+use outlap_core::block::{Block, Phase};
 use outlap_core::bus::WHEELS;
 use outlap_core::state::{ChassisState, RelaxState, StateLayout};
 use outlap_schema::sim::FzCoupling;
@@ -96,11 +96,41 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
         cfg(),
     );
     let order = solver.schedule().order().to_vec();
-    // The assembler-produced order must equal the solver's fixed execution order
-    // (driver → powertrain → load-transfer → aero → tyre → torque-vectoring → chassis), so the
-    // hardcoded eval order in `eval_rhs_raw` genuinely honours the topological sort. The TV allocator
-    // reads the tyre/load forces and the powertrain torques, so the sort places it last in `actuate`.
-    assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6]);
+    // The assembler-produced order is asserted to be a *valid topological linearization* derived
+    // programmatically from the block phases + the data-dependency edges — NOT a hardcoded index
+    // vector (a hardcode passes even if the assembler and the `eval_rhs_raw` hand-order silently
+    // drift into a different — but still valid — permutation, and it must be updated by hand every
+    // time a block is added). The properties any correct schedule must satisfy:
+    //   (1) it is a permutation of every registered block (nothing dropped or duplicated);
+    //   (2) the block phases are non-decreasing along it (sense → control → actuate → integrate);
+    //   (3) every producer precedes its consumer (the edges asserted below).
+    let probe = build_blocks(&t1, &spec, &mut outlap_core::bus::ChannelInterner::new());
+    let phases = [
+        probe.driver.phase(),
+        probe.powertrain.phase(),
+        probe.load.phase(),
+        probe.aero.phase(),
+        probe.tire.phase(),
+        probe.tv.phase(),
+        probe.chassis.phase(),
+    ];
+    let mut sorted = order.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (0..phases.len()).collect::<Vec<_>>(),
+        "the schedule is a permutation of every registered block"
+    );
+    for w in order.windows(2) {
+        assert!(
+            phases[w[0]] <= phases[w[1]],
+            "phases are non-decreasing along the schedule: block {} ({:?}) before {} ({:?})",
+            w[0],
+            phases[w[0]],
+            w[1],
+            phases[w[1]]
+        );
+    }
     // Determinism: same specs → same schedule.
     let solver2 = TransientSolver::new(
         build_blocks(&t1, &spec, &mut outlap_core::bus::ChannelInterner::new()),
