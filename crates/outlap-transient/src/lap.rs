@@ -44,6 +44,62 @@ use crate::line_table::LineTable;
 use crate::result::TransientLap;
 use crate::tire_thermal::TireThermalStack;
 
+/// The T2 fuel-mass slow state (§8.1, D-M6-4): a concrete field (NOT a `Box<dyn SlowStack>` — it
+/// must reach the block params the `SlowStack` `(dt, power)` contract cannot). Each fast step banks
+/// the ICE-share fuel burn; on the decimated slow clock the tank drains and the migrated mass/CG fan
+/// out through [`T2Blocks::apply_mass_state`]. Self-contained plain data (no QSS algebra — the solver
+/// crate stays free of `outlap-qss`, receiving the inertial model + the representative ICE
+/// brake-thermal efficiency PRE-SAMPLED by the assembly layer, exactly as it receives the sampled
+/// traction curve). Held on the solver so the fast path reads the cached block copies (zero alloc).
+///
+/// CG semantics mirror `outlap_qss::fuel::FuelModel`: mass = `dry + fuel`; CG is the mass-weighted
+/// blend of the dry CG and the tank centroid, migrating toward the dry CG as fuel burns (D-M6-4d).
+pub struct FuelSlow {
+    /// Dry (empty-tank) mass, kg — the all-inclusive `chassis.mass_kg`.
+    pub dry_mass_kg: f64,
+    /// Tank capacity, kg (fuel clamped to `[0, tank_kg]`).
+    pub tank_kg: f64,
+    /// Dry-CG longitudinal split `a_f`, m.
+    pub a_f_dry: f64,
+    /// Dry-CG height `h_cg`, m.
+    pub h_cg_dry: f64,
+    /// Fuel-tank centroid `a_f`, m.
+    pub a_f_tank: f64,
+    /// Fuel-tank centroid height, m.
+    pub h_cg_tank: f64,
+    /// Lower heating value, J/kg.
+    pub lhv_j_per_kg: f64,
+    /// Representative ICE brake-thermal efficiency (0..1), sampled from the ICE map at assembly. The
+    /// QSS tier uses the full per-operating-point map; this scalar is the T2 simplification (the
+    /// tier-parity fuel gate is recorded, Decision #48).
+    pub ice_thermal_eff: f64,
+    /// Remaining fuel mass, kg (set by [`TransientSolver::with_fuel`] to the lap-start load).
+    pub fuel_kg: f64,
+    /// Fuel burned since the last slow-clock fire, kg (banked each fast step, flushed on the fire).
+    pub burn_accum_kg: f64,
+}
+
+impl FuelSlow {
+    /// Total mass carrying `fuel_kg` of fuel, kg.
+    fn mass_at(&self, fuel_kg: f64) -> f64 {
+        self.dry_mass_kg + fuel_kg.clamp(0.0, self.tank_kg)
+    }
+
+    /// The mass-weighted CG `(a_f, h_cg)` carrying `fuel_kg` of fuel, m (dry CG at empty, the blend
+    /// toward the tank centroid at full).
+    fn cg_at(&self, fuel_kg: f64) -> (f64, f64) {
+        let f = fuel_kg.clamp(0.0, self.tank_kg);
+        let m = self.dry_mass_kg + f;
+        if m <= 0.0 {
+            return (self.a_f_dry, self.h_cg_dry);
+        }
+        (
+            (self.dry_mass_kg * self.a_f_dry + f * self.a_f_tank) / m,
+            (self.dry_mass_kg * self.h_cg_dry + f * self.h_cg_tank) / m,
+        )
+    }
+}
+
 /// Numerics for a transient run (the resolved subset the stepper needs; recorded in provenance).
 #[derive(Clone, Copy, Debug)]
 pub struct SimConfig<T> {
@@ -137,8 +193,8 @@ impl<T: Float> T2Blocks<T> {
     /// mass and CG geometry from the fuel slow state, so no copy can be silently missed. `mass_kg` is
     /// the current total mass; `a_f`/`h_cg` the migrated CG (front-axle→CG distance and CG height).
     /// The wheelbase and roll-centre heights are invariants read from the load geometry; `b_r` and the
-    /// roll-axis height `h_ra = rc_f + (rc_r − rc_f)·a_f/L` are recomputed (mirroring
-    /// [`outlap_qss::t1::T1Vehicle::with_cg`]). The mass owners refreshed are: the load-transfer
+    /// roll-axis height `h_ra = rc_f + (rc_r − rc_f)·a_f/L` are recomputed (mirroring the QSS
+    /// `T1Vehicle::with_cg`). The mass owners refreshed are: the load-transfer
     /// geometry (mass + CG + roll axis → `F_z`), the chassis inertia block (mass → `F/m`; wheel
     /// longitudinal positions rel the moved CG → the yaw-moment arms), and the tyre block's own
     /// wheel-geometry copy (slip-velocity arms). The Driver's understeer gradient stays at its
@@ -214,6 +270,10 @@ pub struct TransientSolver<T> {
     // advances on the same decimated slow clock as the battery; its held grip/pressure override lives
     // on `blocks.tire`.
     tire_thermal: Option<TireThermalStack<T>>,
+    /// The fuel-mass slow state (M6/PR5, §8.1). Absent ⇒ constant mass (byte-identical to the
+    /// pre-fuel skeleton). Burns the ICE share each fast step; drains + fans mass/CG out on the slow
+    /// clock through [`T2Blocks::apply_mass_state`].
+    fuel: Option<FuelSlow>,
     actuation: ActuationChannels,
     /// Drive-torque scale published this step (`1` when engaged / no shift FSM).
     torque_scale: T,
@@ -307,6 +367,7 @@ impl<T: Float> TransientSolver<T> {
             slow: None,
             ers: None,
             tire_thermal: None,
+            fuel: None,
             actuation,
             torque_scale: T::one(),
             regen_limit_w: T::zero(),
@@ -362,6 +423,27 @@ impl<T: Float> TransientSolver<T> {
         self.blocks.tire.set_thermal_grip(stack.current_grip());
         self.tire_thermal = Some(stack);
         self
+    }
+
+    /// Attach the fuel-mass slow state (consuming, M6/PR5, §8.1, D-M6-4): the ICE burns fuel each
+    /// step, and on the slow clock the tank drains and the migrated mass/CG fan out through
+    /// [`T2Blocks::apply_mass_state`]. `fuel_start_kg` seeds the tank (the model's `initial_kg` for
+    /// lap 1; the carried terminal for a stint lap). The blocks must already be assembled at the
+    /// FULL-TANK reference m₀, so the correction is identity at lap start (D-M6-4b). Without this the
+    /// mass is the assembly constant (byte-identical to the pre-fuel skeleton).
+    #[must_use]
+    pub fn with_fuel(mut self, mut fuel: FuelSlow, fuel_start_kg: f64) -> Self {
+        fuel.fuel_kg = fuel_start_kg;
+        fuel.burn_accum_kg = 0.0;
+        self.fuel = Some(fuel);
+        self
+    }
+
+    /// The remaining fuel mass, kg, or `None` when the car carries no fuel slow state — the terminal
+    /// a stint carries into the next lap (D-M6-4).
+    #[must_use]
+    pub fn fuel_remaining_kg(&self) -> Option<f64> {
+        self.fuel.as_ref().map(|f| f.fuel_kg)
     }
 
     /// The assembler-produced schedule (registration index order of the block specs).
@@ -610,9 +692,11 @@ impl<T: Float> TransientSolver<T> {
         // Tire-thermal accumulation (M5 PR3): bank this step's per-wheel frictional + carcass heat
         // from the post-step force solution now on the bus. The ring advances on the same clock fire.
         self.accumulate_tire_heat(dt);
+        self.accumulate_fuel(dt);
         if self.slow_clock.tick() {
             self.advance_slow(dt);
             self.advance_tire_slow();
+            self.advance_fuel();
         }
 
         self.t = self.t + dt;
@@ -672,6 +756,56 @@ impl<T: Float> TransientSolver<T> {
         if let Some(grip) = grip {
             self.blocks.tire.set_thermal_grip(grip);
         }
+    }
+
+    /// Bank this step's ICE-share fuel burn (M6/PR5, §8.1). The ICE covers the MECHANICAL drive it
+    /// delivers — the throttle-scaled traction ceiling (the ERS deploy is a separate ELECTRICAL share
+    /// from the pack, not fuel) — and burns at the map's brake-thermal efficiency via the SAME
+    /// `ice_fuel_rate_kg_per_s` the QSS tier uses (parity). No-op without a fuel state; no allocation.
+    fn accumulate_fuel(&mut self, dt: T) {
+        if self.fuel.is_none() {
+            return;
+        }
+        let vx = self.get_fast(ChassisState::Vx);
+        let throttle = self
+            .bus
+            .get(CoreSignal::Throttle, 0)
+            .to_f64()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        // ICE mechanical power = throttle × the mechanical traction ceiling force × speed. Fuel rate
+        // ṁ = P_mech / (η_thermal · LHV) — chemical power over the heating value (the ERS deploy is a
+        // separate ELECTRICAL share from the pack, not fuel).
+        let ice_mech_power = throttle
+            * self
+                .blocks
+                .powertrain
+                .traction
+                .eval(vx)
+                .to_f64()
+                .unwrap_or(0.0)
+            * vx.to_f64().unwrap_or(0.0).max(0.0);
+        let dt_f = dt.to_f64().unwrap_or(0.0);
+        if let Some(fs) = self.fuel.as_mut() {
+            if ice_mech_power > 0.0 && fs.ice_thermal_eff > 0.0 {
+                let mdot = ice_mech_power / (fs.ice_thermal_eff * fs.lhv_j_per_kg);
+                fs.burn_accum_kg += mdot * dt_f;
+            }
+        }
+    }
+
+    /// Drain the tank by the fuel banked since the last fire and fan the migrated mass/CG out through
+    /// [`T2Blocks::apply_mass_state`] (M6/PR5, D-M6-4). No-op without a fuel state. Zero-allocation.
+    fn advance_fuel(&mut self) {
+        let Some((mass, a_f, h_cg)) = self.fuel.as_mut().map(|fs| {
+            fs.fuel_kg = (fs.fuel_kg - fs.burn_accum_kg).max(0.0);
+            fs.burn_accum_kg = 0.0;
+            let (a_f, h_cg) = fs.cg_at(fs.fuel_kg);
+            (fs.mass_at(fs.fuel_kg), a_f, h_cg)
+        }) else {
+            return;
+        };
+        self.blocks.apply_mass_state(mass, a_f, h_cg);
     }
 
     /// Record the current state + bus diagnostics as one row of `lap`.
@@ -790,6 +924,7 @@ impl<T: Float> TransientSolver<T> {
         // boundary), then re-stamp the last recorded row so the end-of-lap values reflect the whole lap.
         self.advance_slow(self.cfg.dt);
         self.advance_tire_slow();
+        self.advance_fuel();
         self.restamp_final_row(&mut lap);
         lap.lap_time_s = self.t;
         lap
@@ -894,6 +1029,7 @@ impl<T: Float> TransientSolver<T> {
         // must reflect the whole lap, symmetric for the pack and the tyres.
         self.advance_slow(self.cfg.dt);
         self.advance_tire_slow();
+        self.advance_fuel();
         self.restamp_final_row(&mut lap);
         lap.lap_time_s = self.t;
         (lap, lap_end_idx)
@@ -903,6 +1039,12 @@ impl<T: Float> TransientSolver<T> {
     #[must_use]
     pub fn fast_state(&self) -> &[T] {
         &self.fast
+    }
+
+    /// Access the solver's blocks (tests/diagnostics) — e.g. to read the fuel-updated mass/CG.
+    #[must_use]
+    pub fn blocks(&self) -> &T2Blocks<T> {
+        &self.blocks
     }
 
     /// Whether the lap diverged (the closed loop left the finite/physical envelope and the run
