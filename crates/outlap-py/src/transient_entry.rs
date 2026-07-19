@@ -604,6 +604,11 @@ pub(crate) struct PreparedTransient {
     /// The 2026 ERS energy manager governor (`None` for a car without an `ers:` block or a degraded
     /// no-pack run). Drives the MGU-K deploy/harvest through the shared rulebook (M6/PR4).
     ers: Option<ErsController>,
+    /// The fuel-mass slow state + its initial load (`None` when the car carries no `fuel:` block).
+    /// Drains the tank as the ICE burns fuel, fanning the migrated mass/CG out through
+    /// `apply_mass_state` on the slow clock (M6/PR5, §8.1, D-M6-4). A stint's `run_laps` keeps the
+    /// solver's fuel state across lap boundaries automatically (lap N+1 starts lighter).
+    fuel: Option<(outlap_transient::FuelSlow, f64)>,
 }
 
 /// Assemble the transient block set + target line + slow subsystems for a T2 run (one lap or a
@@ -725,6 +730,30 @@ pub(crate) fn prepare_transient(
     let blocks: outlap_transient::T2Blocks<f64> =
         outlap_vehicle::assemble_t2(&t1v, &resolved.spec, &mut interner, &t2_opts, &mut notes)
             .into();
+
+    // Fuel-mass slow state (M6/PR5, §8.1): the blocks are assembled at the full-tank m₀, so the T2
+    // burn drains from there. The ICE brake-thermal efficiency is a representative scalar sampled
+    // from the ICE map (the QSS tier uses the full map; the tier-parity fuel gate is recorded); a car
+    // with no ICE eff map falls back to the ~33 % pump-fuel default.
+    let fuel = outlap_qss::fuel::FuelModel::from_spec(&resolved.spec).map(|fm| {
+        let eta = t1v
+            .powertrain()
+            .representative_ice_efficiency()
+            .unwrap_or(0.33);
+        let fs = outlap_transient::FuelSlow {
+            dry_mass_kg: fm.dry_mass_kg,
+            tank_kg: fm.tank_kg,
+            a_f_dry: fm.a_f_dry,
+            h_cg_dry: fm.h_cg_dry,
+            a_f_tank: fm.a_f_tank,
+            h_cg_tank: fm.h_cg_tank,
+            lhv_j_per_kg: fm.lhv_j_per_kg,
+            ice_thermal_eff: eta,
+            fuel_kg: 0.0,
+            burn_accum_kg: 0.0,
+        };
+        (fs, fm.initial_kg)
+    });
 
     let v_target = outlap_qss::corner_scaled_targets(
         &env_shape,
@@ -878,6 +907,7 @@ pub(crate) fn prepare_transient(
         tire_stack,
         shifter,
         ers,
+        fuel,
     })
 }
 
@@ -983,6 +1013,7 @@ pub(crate) fn solve_transient_lap(
         tire_stack,
         shifter,
         ers,
+        fuel,
     } = prepare_transient(
         vehicle_dir,
         track,
@@ -1013,6 +1044,9 @@ pub(crate) fn solve_transient_lap(
     }
     if let Some(stack) = tire_stack {
         solver = solver.with_tire_thermal(stack);
+    }
+    if let Some((fuel_slow, initial_kg)) = fuel {
+        solver = solver.with_fuel(fuel_slow, initial_kg);
     }
 
     let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
@@ -1257,6 +1291,7 @@ pub(crate) fn solve_transient_stint(
         tire_stack,
         shifter,
         ers,
+        fuel,
     } = prepare_transient(
         vehicle_dir,
         track,
@@ -1291,6 +1326,9 @@ pub(crate) fn solve_transient_stint(
     }
     if let Some(stack) = tire_stack {
         solver = solver.with_tire_thermal(stack);
+    }
+    if let Some((fuel_slow, initial_kg)) = fuel {
+        solver = solver.with_fuel(fuel_slow, initial_kg);
     }
 
     let (lap, lap_end_idx) = solver.run_laps(length, n_laps, MAX_TRANSIENT_STEPS);
