@@ -120,6 +120,12 @@ const H_MU: f64 = 0.15;
 const H_MASS: f64 = 0.10;
 /// Central-difference step for the downforce (ClA) sensitivity (± the ClA band).
 const H_CLA: f64 = 0.30;
+/// Central-difference step for the CG longitudinal-split (`a_f`) sensitivity, m — the fuel-tank CG
+/// migration band (D-M6-4c). An ABSOLUTE step (metres), so the stored secant is per-metre and the
+/// runtime correction uses the CG's metre offset from the full-tank reference.
+const H_CGX: f64 = 0.05;
+/// Central-difference step for the CG-height (`h_cg`) sensitivity, m (as [`H_CGX`]).
+const H_CGZ: f64 = 0.05;
 /// Lateral acceleration below which corrections are suppressed (the node carries ≈ no grip to
 /// correct; a relative sensitivity there would divide by ≈ 0), m/s².
 const AY_FLOOR: f64 = 0.5;
@@ -161,6 +167,60 @@ const T_BAND_HI_C: f64 = 35.0;
 /// the bald depth `w_max`.
 const WEAR_PAST_CLIFF_SW: f64 = 3.0;
 
+/// The off-reference state the Decision-#31 corrections are evaluated at (PR5d). Named fields
+/// replace the former position-indexed `[f64; N]` sensitivity arrays so the mass/CG/grip/downforce
+/// slots cannot be silently mis-wired as the arrays widen. Construct with [`CorrectionSet::identity`]
+/// (the reference — every factor 1.0) and override only what migrates.
+#[derive(Clone, Copy, Debug)]
+pub struct CorrectionSet {
+    /// Uniform tyre-grip scale (1.0 = reference).
+    pub mu_scale: f64,
+    /// Absolute vehicle mass, kg (normalised by the envelope's `mass_ref`).
+    pub mass_kg: f64,
+    /// Uniform downforce (ClA) scale (1.0 = reference).
+    pub cla_scale: f64,
+    /// CG longitudinal split `a_f`, m (offset from the full-tank reference drives the correction).
+    pub a_f: f64,
+    /// CG height `h_cg`, m (offset from the full-tank reference drives the correction).
+    pub h_cg: f64,
+}
+
+impl CorrectionSet {
+    /// The reference correction set for `env`: reference grip/downforce, the envelope's own
+    /// reference mass and CG. [`GgvEnvelope::ay_boundary_query`] with this reproduces the frozen
+    /// boundary bit-for-bit.
+    #[must_use]
+    pub fn identity(env: &GgvEnvelope) -> Self {
+        Self {
+            mu_scale: 1.0,
+            mass_kg: env.mass_ref,
+            cla_scale: 1.0,
+            a_f: env.a_f_ref,
+            h_cg: env.h_cg_ref,
+        }
+    }
+}
+
+/// A composed boundary query: the operating point `(v, a_x, g_normal)`, the live tyre state, and the
+/// [`CorrectionSet`] (mass/CG/grip/downforce). The single entry point for
+/// [`GgvEnvelope::ay_boundary_query`] (PR5d — one struct so the tyre axes and the #31 corrections
+/// compose without arg-order ambiguity).
+#[derive(Clone, Copy, Debug)]
+pub struct BoundaryQuery {
+    /// Speed, m/s.
+    pub v: f64,
+    /// Actual longitudinal acceleration, m/s².
+    pub ax: f64,
+    /// Normal-load gravity proxy, m/s² (Decision #29).
+    pub g_normal: f64,
+    /// Live tyre surface temperature, K (ignored when the envelope has no tyre-state axes).
+    pub t_tire_k: f64,
+    /// Live tread wear, mm (ignored when the envelope has no tyre-state axes).
+    pub wear_mm: f64,
+    /// The off-reference mass/CG/grip/downforce state.
+    pub corrections: CorrectionSet,
+}
+
 /// A generated g-g-g-v acceleration envelope: the base velocity-frame lateral-acceleration boundary
 /// `a_y,corr(v, a_x, g_normal)` (on a normalised `a_x` axis), the three Decision #31 sensitivity
 /// fields, and the per-`(v, g_normal)` longitudinal capability the normalisation uses.
@@ -184,6 +244,20 @@ pub struct GgvEnvelope {
     s_cla_up: GriddedMapN<f64>,
     /// Per-node downward relative secant of the boundary in ClA.
     s_cla_dn: GriddedMapN<f64>,
+    /// Per-node relative secant of the boundary in the CG longitudinal split `a_f` (per metre;
+    /// upward = CG moved rearward from reference, D-M6-4c). Zero when the correction is suppressed.
+    s_cgx_up: GriddedMapN<f64>,
+    /// Per-node downward (CG forward) relative secant in `a_f` (per metre).
+    s_cgx_dn: GriddedMapN<f64>,
+    /// Per-node upward relative secant in CG height `h_cg` (per metre; CG raised).
+    s_cgz_up: GriddedMapN<f64>,
+    /// Per-node downward relative secant in `h_cg` (per metre; CG lowered).
+    s_cgz_dn: GriddedMapN<f64>,
+    /// Reference CG longitudinal split `a_f`, m (the CG correction normalises `a_f` by the offset
+    /// from this full-tank value). D-M6-4b.
+    a_f_ref: f64,
+    /// Reference CG height `h_cg`, m (the CG correction uses the metre offset from this).
+    h_cg_ref: f64,
     /// Straight-line acceleration capability `a_x,cap⁺(v, g_normal)`, m/s² (the `â_x = +1` shoulder).
     accel_cap: GriddedMapN<f64>,
     /// Straight-line braking capability magnitude `a_x,cap⁻(v, g_normal)`, m/s² (the `â_x = −1`
@@ -300,8 +374,14 @@ impl GgvEnvelope {
         let mut s_mass_dn = vec![0.0; n_nodes];
         let mut s_cla_up = vec![0.0; n_nodes];
         let mut s_cla_dn = vec![0.0; n_nodes];
+        let mut s_cgx_up = vec![0.0; n_nodes];
+        let mut s_cgx_dn = vec![0.0; n_nodes];
+        let mut s_cgz_up = vec![0.0; n_nodes];
+        let mut s_cgz_dn = vec![0.0; n_nodes];
         let mut accel = vec![CAP_FLOOR; n_vg];
         let mut brake = vec![CAP_FLOOR; n_vg];
+        let a_f_ref = car.a_f;
+        let h_cg_ref = car.h_cg;
         // Perturbed vehicles for the central-difference sensitivities (cold clones).
         let car_mu_p = car.with_mu_scale(1.0 + H_MU);
         let car_mu_m = car.with_mu_scale(1.0 - H_MU);
@@ -309,6 +389,12 @@ impl GgvEnvelope {
         let car_m_m = car.with_mass(mass_ref * (1.0 - H_MASS));
         let car_cla_p = car.with_cla_scale(1.0 + H_CLA);
         let car_cla_m = car.with_cla_scale(1.0 - H_CLA);
+        // CG perturbations (absolute metre steps). +x = CG rearward (a_f up, b_r down, L preserved);
+        // +z = CG raised. `with_cg` recomputes h_ra so no derived geometry goes stale (D-M6-4c).
+        let car_cgx_p = car.with_cg(car.a_f + H_CGX, car.b_r - H_CGX, car.h_cg);
+        let car_cgx_m = car.with_cg(car.a_f - H_CGX, car.b_r + H_CGX, car.h_cg);
+        let car_cgz_p = car.with_cg(car.a_f, car.b_r, car.h_cg + H_CGZ);
+        let car_cgz_m = car.with_cg(car.a_f, car.b_r, car.h_cg - H_CGZ);
         let clamp_s = |s: f64| s.clamp(-S_CLAMP, S_CLAMP);
         // Index of the â_x node nearest 0 (the pure-lateral seed for the outward march).
         let i0 = (0..nax)
@@ -339,7 +425,7 @@ impl GgvEnvelope {
             // so this halves the dominant sensitivity cost; the #31 CI gate guards accuracy.
             let peak = fibre.iter().fold(0.0_f64, |m, b| m.max(b.ay_corr));
             let thresh = (CORR_MIN_FRAC * peak).max(AY_FLOOR);
-            let mut sens = vec![[0.0; 6]; nax];
+            let mut sens = vec![[0.0; 10]; nax];
             for (iax, &axn) in axn_axis.iter().enumerate() {
                 let h = fibre[iax].hint();
                 if !sens_sampled(iax, nax) || fibre[iax].ay_corr < thresh || h.is_none() {
@@ -357,6 +443,10 @@ impl GgvEnvelope {
                 let b_m_m = max_lateral(&car_m_m, v, ax, gn, coupling, h).ay_corr;
                 let b_cla_p = max_lateral(&car_cla_p, v, ax, gn, coupling, h).ay_corr;
                 let b_cla_m = max_lateral(&car_cla_m, v, ax, gn, coupling, h).ay_corr;
+                let b_cgx_p = max_lateral(&car_cgx_p, v, ax, gn, coupling, h).ay_corr;
+                let b_cgx_m = max_lateral(&car_cgx_m, v, ax, gn, coupling, h).ay_corr;
+                let b_cgz_p = max_lateral(&car_cgz_p, v, ax, gn, coupling, h).ay_corr;
+                let b_cgz_m = max_lateral(&car_cgz_m, v, ax, gn, coupling, h).ay_corr;
                 sens[iax] = [
                     clamp_s((b_mu_p - ay0) / (H_MU * ay0)),
                     clamp_s((ay0 - b_mu_m) / (H_MU * ay0)),
@@ -364,6 +454,10 @@ impl GgvEnvelope {
                     clamp_s((ay0 - b_m_m) / (H_MASS * ay0)),
                     clamp_s((b_cla_p - ay0) / (H_CLA * ay0)),
                     clamp_s((ay0 - b_cla_m) / (H_CLA * ay0)),
+                    clamp_s((b_cgx_p - ay0) / (H_CGX * ay0)),
+                    clamp_s((ay0 - b_cgx_m) / (H_CGX * ay0)),
+                    clamp_s((b_cgz_p - ay0) / (H_CGZ * ay0)),
+                    clamp_s((ay0 - b_cgz_m) / (H_CGZ * ay0)),
                 ];
             }
 
@@ -399,16 +493,24 @@ impl GgvEnvelope {
                 s_mass_dn[node] = out.sens[iax][3];
                 s_cla_up[node] = out.sens[iax][4];
                 s_cla_dn[node] = out.sens[iax][5];
+                s_cgx_up[node] = out.sens[iax][6];
+                s_cgx_dn[node] = out.sens[iax][7];
+                s_cgz_up[node] = out.sens[iax][8];
+                s_cgz_dn[node] = out.sens[iax][9];
             }
         }
         fill_sensitivities(
-            [
+            &mut [
                 &mut s_mu_up,
                 &mut s_mu_dn,
                 &mut s_mass_up,
                 &mut s_mass_dn,
                 &mut s_cla_up,
                 &mut s_cla_dn,
+                &mut s_cgx_up,
+                &mut s_cgx_dn,
+                &mut s_cgz_up,
+                &mut s_cgz_dn,
             ],
             &base,
             &axn_axis,
@@ -452,6 +554,12 @@ impl GgvEnvelope {
             s_mass_dn: build3(s_mass_dn)?,
             s_cla_up: build3(s_cla_up)?,
             s_cla_dn: build3(s_cla_dn)?,
+            s_cgx_up: build3(s_cgx_up)?,
+            s_cgx_dn: build3(s_cgx_dn)?,
+            s_cgz_up: build3(s_cgz_up)?,
+            s_cgz_dn: build3(s_cgz_dn)?,
+            a_f_ref,
+            h_cg_ref,
             accel_cap: build2(accel)?,
             brake_cap: build2(brake)?,
             drag_accel,
@@ -509,24 +617,65 @@ impl GgvEnvelope {
     ) -> f64 {
         let x = [v, self.normalize_ax(v, ax, g_normal), g_normal];
         let base = self.base.eval(&x);
+        // CG at the reference (no migration input) ⇒ the CG factors are exactly 1.0.
+        (base * self.corrections_factor(&x, mu_scale, mass_kg, cla_scale, self.a_f_ref, self.h_cg_ref))
+            .max(0.0)
+    }
+
+    /// The Decision-#31 multiplicative correction factor at grid coords `x = [v, â_x, g_normal]` for
+    /// an off-reference `(μ, mass, ClA, a_f, h_cg)`. Each factor is `(1 + s·δ)` clamped to
+    /// `[F_MIN, F_MAX]` with the upward secant when `δ ≥ 0` and the downward one below — so the
+    /// factor is exactly `1.0` at the reference state (identity slice, D-M6-4b) and the whole product
+    /// is bit-identical to the frozen boundary when nothing is perturbed. Zero-allocation.
+    #[inline]
+    fn corrections_factor(
+        &self,
+        x: &[f64; 3],
+        mu_scale: f64,
+        mass_kg: f64,
+        cla_scale: f64,
+        a_f: f64,
+        h_cg: f64,
+    ) -> f64 {
         // Piecewise-linear per parameter: the upward secant for a value above the reference, the
         // downward one below — exact at each probe band edge by construction (Decision #31).
         let f = |up: &GriddedMapN<f64>, dn: &GriddedMapN<f64>, delta: f64| {
-            let s = if delta >= 0.0 {
-                up.eval(&x)
-            } else {
-                dn.eval(&x)
-            };
+            let s = if delta >= 0.0 { up.eval(x) } else { dn.eval(x) };
             (1.0 + s * delta).clamp(F_MIN, F_MAX)
         };
         let f_mu = f(&self.s_mu_up, &self.s_mu_dn, mu_scale - 1.0);
-        let f_mass = f(
-            &self.s_mass_up,
-            &self.s_mass_dn,
-            mass_kg / self.mass_ref - 1.0,
-        );
+        let f_mass = f(&self.s_mass_up, &self.s_mass_dn, mass_kg / self.mass_ref - 1.0);
         let f_cla = f(&self.s_cla_up, &self.s_cla_dn, cla_scale - 1.0);
-        (base * f_mu * f_mass * f_cla).max(0.0)
+        // CG deltas are ABSOLUTE metre offsets from the full-tank reference (D-M6-4c).
+        let f_cgx = f(&self.s_cgx_up, &self.s_cgx_dn, a_f - self.a_f_ref);
+        let f_cgz = f(&self.s_cgz_up, &self.s_cgz_dn, h_cg - self.h_cg_ref);
+        f_mu * f_mass * f_cla * f_cgx * f_cgz
+    }
+
+    /// The corrected lateral boundary composing the LIVE tyre-state base (`T_tire`/`wear` axes when
+    /// present) with the Decision-#31 mass/CG/ClA corrections — the REQUIRED composed query for the
+    /// fuel-burn stint (the tyre march stays live, PR3; mass/CG migrate, D-M6-4). Bit-identical to
+    /// [`Self::ay_boundary_at`] when the [`CorrectionSet`] is at the reference state. Zero-allocation.
+    #[must_use]
+    pub fn ay_boundary_query(&self, q: &BoundaryQuery) -> f64 {
+        let base = self.ay_boundary_at(q.v, q.ax, q.g_normal, q.t_tire_k, q.wear_mm);
+        let x = [q.v, self.normalize_ax(q.v, q.ax, q.g_normal), q.g_normal];
+        let c = &q.corrections;
+        (base * self.corrections_factor(&x, c.mu_scale, c.mass_kg, c.cla_scale, c.a_f, c.h_cg))
+            .max(0.0)
+    }
+
+    /// The full-tank reference CG longitudinal split `a_f`, m (the identity value for the CG
+    /// correction; a [`CorrectionSet`] with `a_f == this` and `h_cg == [`Self::h_cg_ref`]` is CG-neutral).
+    #[must_use]
+    pub fn a_f_ref(&self) -> f64 {
+        self.a_f_ref
+    }
+
+    /// The full-tank reference CG height `h_cg`, m.
+    #[must_use]
+    pub fn h_cg_ref(&self) -> f64 {
+        self.h_cg_ref
     }
 
     /// The reference boundary with the [`EvalFlags`] recording whether the query left the grid.
@@ -658,9 +807,10 @@ struct FibreOut {
     b_cap: f64,
     /// Velocity-frame lateral boundary per â_x node, m/s².
     ay: Vec<f64>,
-    /// `[s_mu_up, s_mu_dn, s_mass_up, s_mass_dn, s_cla_up, s_cla_dn]` per â_x node (0 where
-    /// suppressed/unsampled).
-    sens: Vec<[f64; 6]>,
+    /// `[s_mu_up, s_mu_dn, s_mass_up, s_mass_dn, s_cla_up, s_cla_dn, s_cgx_up, s_cgx_dn, s_cgz_up,
+    /// s_cgz_dn]` per â_x node (0 where suppressed/unsampled). Widened from 6 to 10 for the CG
+    /// migration corrections (D-M6-4c).
+    sens: Vec<[f64; 10]>,
 }
 
 /// Resolution of the optional g-g-g-v **tyre-state** grid axes (T_tire surface temperature and tread
@@ -1123,7 +1273,7 @@ fn sens_sampled(i: usize, n: usize) -> bool {
 /// full resolution). Only bulk nodes — boundary ≥ the fibre's correction threshold — are filled;
 /// the rest keep the suppressed 0, matching the full-grid semantics.
 fn fill_sensitivities(
-    mut fields: [&mut Vec<f64>; 6],
+    fields: &mut [&mut Vec<f64>],
     base: &[f64],
     axn_axis: &[f64],
     [nv, nax, ngn]: [usize; 3],
@@ -1143,7 +1293,7 @@ fn fill_sensitivities(
                     .find(|&i| sens_sampled(i, nax))
                     .unwrap_or(nax - 1);
                 let w = (axn_axis[iax] - axn_axis[lo]) / (axn_axis[hi] - axn_axis[lo]);
-                for f in &mut fields {
+                for f in fields.iter_mut() {
                     let (a, b) = (f[node(iv, lo, ign)], f[node(iv, hi, ign)]);
                     f[node(iv, iax, ign)] = a + w * (b - a);
                 }

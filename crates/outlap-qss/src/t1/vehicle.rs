@@ -395,6 +395,24 @@ impl T1Vehicle {
         c
     }
 
+    /// A clone of this vehicle with the CG longitudinal split (`a_f`, `b_r`) and height (`h_cg`)
+    /// set, recomputing EVERY derived geometry term so no invariant goes stale — the roll-axis
+    /// height under the CG, `h_ra = rc_f + (rc_r − rc_f)·a_f/L`, derives from `a_f` and is refreshed
+    /// here (D-M6-4c). The ∂/∂CG perturbation for the fuel-migration envelope corrections and the
+    /// per-station CG update in the QSS march. Wheelbase `L = a_f + b_r` is preserved (fuel burn
+    /// shifts the split, not the wheelbase). Cold path.
+    #[must_use]
+    pub fn with_cg(&self, a_f: f64, b_r: f64, h_cg: f64) -> Self {
+        let mut c = self.clone();
+        let wheelbase_m = a_f + b_r;
+        c.a_f = a_f;
+        c.b_r = b_r;
+        c.wheelbase_m = wheelbase_m;
+        c.h_cg = h_cg;
+        c.h_ra = c.rc_f + (c.rc_r - c.rc_f) * (a_f / wheelbase_m);
+        c
+    }
+
     /// Whether a ride-height/yaw aero map is installed.
     pub fn has_aero_map(&self) -> bool {
         self.aero_map.is_some()
