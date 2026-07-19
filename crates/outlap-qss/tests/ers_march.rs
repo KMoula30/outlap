@@ -779,7 +779,7 @@ fn no_ers_ev_stack_matches_the_pre_pr2_march_bit_for_bit() {
             &t1, &pack, state, &thermal, &env, &path, &ws.v, &ax, &mut scale, &mut soc,
         );
         lap_time =
-            solve_into_ggv_coupled(&t0, &env, Some(&scale), None, None, &path, &mut ws).unwrap();
+            solve_into_ggv_coupled(&t0, &env, Some(&scale), None, None, None, &path, &mut ws).unwrap();
     }
     derive_ax_like(&path, &ws.v, &mut ax);
     oracle_march(

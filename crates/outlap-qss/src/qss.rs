@@ -787,7 +787,8 @@ fn solve_profile(
         let scale_ref = coupling.map(|_| bufs.scale.as_slice());
         let deploy_ref = ers.and(coupling).map(|_| relaxed_deploy.as_slice());
         let tire_ref = tire.map(|_| (t_tire_k.as_slice(), wear_mm.as_slice()));
-        lap_time = solve_into_ggv_coupled(t0, env, scale_ref, deploy_ref, tire_ref, path, ws)?;
+        lap_time =
+            solve_into_ggv_coupled(t0, env, scale_ref, deploy_ref, tire_ref, None, path, ws)?;
         convergence.dlap_s = (lap_time - prev_lap_time).abs();
         prev_lap_time = lap_time;
     }

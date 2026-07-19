@@ -285,6 +285,7 @@ fn hot_paths_are_zero_alloc() {
         Some(&scale),
         Some(&deploy),
         None,
+        None,
         &path,
         &mut ws,
     )
@@ -296,6 +297,7 @@ fn hot_paths_are_zero_alloc() {
             &env,
             Some(&scale),
             Some(&deploy),
+            None,
             None,
             &path,
             &mut ws,
