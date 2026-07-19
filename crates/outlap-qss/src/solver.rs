@@ -405,8 +405,13 @@ impl GripModel for GgvGrip<'_> {
             // powertrain traction ceiling (drag is unaffected). Uncoupled ⇒ scale ≡ 1. With an
             // energy-manager deploy slice, the scale multiplies the MECHANICAL share only and the
             // (budget/pack/machine-clipped, possibly negative) electric share adds on top.
-            // The FIA fuel-flow ceiling (§8.1, D-M6-5) caps the MECHANICAL (ICE) share only; the
-            // electric deploy slice is a separate pack draw. Uncoupled ⇒ `cap_mech` is a no-op.
+            // The FIA fuel-flow ceiling (§8.1, D-M6-5) shrinks the ICE traction envelope on power.
+            // With a real energy manager (the `deploy` slice), it caps the MECHANICAL share only and
+            // the separately-budgeted electric deploy adds on top. In the uncoupled *greedy* path
+            // there is no manager to allocate the electric share, and `tractive_force` is the
+            // budget-free quasi-steady traction ceiling; capping that whole ceiling is the
+            // conservative flow-limited envelope (the greedy adder must not escape the fuel limit).
+            // No cap ⇒ `cap_mech` is a no-op ⇒ bit-identical.
             let pt_force = match self.deploy_force {
                 Some(d) => {
                     self.cap_mech(self.veh.mech_tractive_force(v_i) * self.scale(i), v_i) + d[i]
