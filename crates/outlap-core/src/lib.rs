@@ -27,7 +27,7 @@ pub mod spline;
 pub mod state;
 
 pub use assembler::{assemble, AssemblyError, BlockSpec, Schedule};
-pub use block::{Block, CoreBlock, Phase, Ports, SuspensionStub};
+pub use block::{Block, Phase, Ports};
 pub use bus::{
     core_channel_count, Bus, ChannelId, ChannelInterner, CoreSignal, WheelSignal, WHEELS,
 };

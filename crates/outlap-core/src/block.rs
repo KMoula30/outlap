@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The [`Block`] abstraction and the [`CoreBlock`] dispatch enum (HANDOFF §6.2).
+//! The [`Block`] abstraction (HANDOFF §6.2): a block is *a declaration + an eval contract*.
 //!
 //! A block is `(immutable parameters, states, typed ports on the [`Bus`](crate::bus::Bus))`. It
 //! exposes three pure, `f32`/`f64`-generic evaluations — an algebraic [`equilibrium`](Block::equilibrium)
@@ -8,9 +8,12 @@
 //! plus a static [`ports`](Block::ports)/[`phase`](Block::phase) declaration the assembler sorts on.
 //!
 //! Blocks run per lane: the caller binds the `SoA` views to a lane and passes the same `lane` for the
-//! bus accessors. In the hot loop, dispatch is via the [`CoreBlock`] enum — **never `dyn`**
-//! (Decision #26). The external plugin trait is deferred (Decision #38); the built-in controllers
-//! and physics blocks are core enum variants.
+//! bus accessors. **Dispatch is static** (Decision #26 — never `dyn` in the hot path): each tier owns
+//! a concrete block set with named fields (e.g. `outlap-transient`'s `T2Blocks` holds `Chassis`,
+//! `Tire`, `Aero`, … and the T3 tier holds `ChassisT3` + suspension) and runs them in a fixed,
+//! assembly-computed schedule order — there is no per-step enum match and no trait object. The
+//! external plugin trait is deferred (Decision #38); the built-in controllers and physics blocks are
+//! concrete types the tier structs compose directly.
 
 use num_traits::Float;
 
@@ -84,118 +87,21 @@ pub trait Block<T: Float> {
     }
 }
 
-/// The **stubbed suspension interface** (T3 groundwork, Decision #3). In M4 it is a no-op that owns
-/// no state: it reserves the block slot and the port surface so the T3 lumped-K&C model drops in
-/// without a scaffolding break. It declares no ports and contributes nothing to any evaluation.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SuspensionStub;
-
-impl<T: Float> Block<T> for SuspensionStub {
-    fn phase(&self) -> Phase {
-        Phase::Actuate
-    }
-
-    fn ports(&self) -> Ports {
-        Ports::none()
-    }
-}
-
-/// The hot-loop block dispatch (enum, not `dyn`; Decision #26). Physics and controller blocks are
-/// added as variants in later PRs (Chassis, Tire×4, Aero, Driver, …); M4 ships the suspension stub.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum CoreBlock {
-    /// The T3-groundwork suspension stub.
-    Suspension(SuspensionStub),
-}
-
-impl CoreBlock {
-    /// The phase this block runs in.
-    #[must_use]
-    pub fn phase(&self) -> Phase {
-        match self {
-            CoreBlock::Suspension(b) => Block::<f64>::phase(b),
-        }
-    }
-
-    /// The block's static ports.
-    #[must_use]
-    pub fn ports(&self) -> Ports {
-        match self {
-            CoreBlock::Suspension(b) => Block::<f64>::ports(b),
-        }
-    }
-
-    /// Dispatch [`Block::derivatives`] to the concrete variant.
-    pub fn derivatives<T: Float>(
-        &self,
-        x: &StateView<T>,
-        bus: &mut Bus<T>,
-        dx: &mut DerivView<T>,
-        lane: usize,
-    ) {
-        match self {
-            CoreBlock::Suspension(b) => b.derivatives(x, bus, dx, lane),
-        }
-    }
-
-    /// Dispatch [`Block::equilibrium`] to the concrete variant.
-    pub fn equilibrium<T: Float>(&self, bus: &mut Bus<T>, slow: &SlowStateView<T>, lane: usize) {
-        match self {
-            CoreBlock::Suspension(b) => b.equilibrium(bus, slow, lane),
-        }
-    }
-
-    /// Dispatch [`Block::slow_derivatives`] to the concrete variant.
-    pub fn slow_derivatives<T: Float>(
-        &self,
-        bus: &Bus<T>,
-        dslow: &mut SlowDerivView<T>,
-        lane: usize,
-    ) {
-        match self {
-            CoreBlock::Suspension(b) => b.slow_derivatives(bus, dslow, lane),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::float_cmp)]
     use super::*;
-    use crate::bus::{core_channel_count, Bus};
-    use crate::state::{fast_slot_count, DerivView, StateView};
 
     #[test]
-    fn suspension_stub_is_an_inert_actuate_block() {
-        let stub = SuspensionStub;
-        assert_eq!(Block::<f64>::phase(&stub), Phase::Actuate);
-        let ports = Block::<f64>::ports(&stub);
-        assert!(ports.reads.is_empty() && ports.writes.is_empty());
+    fn phases_order_sense_before_integrate() {
+        // The scheduler sorts on the phase ordinal; the integrate-phase RHS runs last.
+        assert!(Phase::Sense < Phase::Control);
+        assert!(Phase::Control < Phase::Actuate);
+        assert!(Phase::Actuate < Phase::Integrate);
     }
 
     #[test]
-    fn core_block_dispatch_is_a_no_op_for_the_stub() {
-        // Wrapping in the dispatch enum and running derivatives leaves the derivative buffer at zero.
-        let block = CoreBlock::Suspension(SuspensionStub);
-        assert_eq!(block.phase(), Phase::Actuate);
-        let fast = vec![0.0f64; fast_slot_count()];
-        let mut dfast = vec![7.0f64; fast_slot_count()]; // pre-filled sentinel
-        let mut bus = Bus::<f64>::new(core_channel_count(), 1);
-        let x = StateView::new(&fast, 1, 0);
-        let mut dx = DerivView::new(&mut dfast, 1, 0);
-        block.derivatives(&x, &mut bus, &mut dx, 0);
-        // The stub wrote nothing; the sentinel is untouched.
-        assert!(dfast.iter().all(|&v| v == 7.0));
-    }
-
-    #[test]
-    fn core_block_dispatch_is_generic_over_f32() {
-        let block = CoreBlock::Suspension(SuspensionStub);
-        let bus = Bus::<f32>::new(core_channel_count(), 1);
-        let mut dslow = [0.0f32; 2];
-        let mut d = crate::state::SlowDerivView::new(&mut dslow, 1, 0);
-        block.slow_derivatives(&bus, &mut d, 0);
-        assert_eq!(dslow, [0.0, 0.0]);
+    fn empty_ports_read_and_write_nothing() {
+        let p = Ports::none();
+        assert!(p.reads.is_empty() && p.writes.is_empty());
     }
 }

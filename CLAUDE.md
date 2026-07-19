@@ -31,15 +31,17 @@ implementing anything new; the Locked Decisions log in §1 overrides everything 
 - Hot loop discipline: zero allocations per step (CI-enforced), no Python inside a timestep
   (controllers included — Rust/C-ABI only), blocks pure + generic over f32/f64, SoA state with
   explicit batch dimension.
-- Composition is runtime + data-driven: one binary loads any vehicle.yaml; enum dispatch in the
-  loop; never add per-vehicle-architecture compile paths. ALL config logic (extends-merge,
+- Composition is runtime + data-driven: one binary loads any vehicle.yaml; static dispatch in the
+  loop (each tier composes concrete block structs — no `dyn`, no per-step enum match); never add
+  per-vehicle-architecture compile paths. ALL config logic (extends-merge,
   validation, estimation, topology checks, channel interning) happens in the assembly pipeline —
   never inside the loop. Step phases: sense → control → actuate → integrate.
 - The input quartet is sacred: vehicle + track + conditions + sim — never mix car identity with
   environment or numerics. Estimated/inherited/degraded values always surface in the loaded-model
   report; `allow_degraded: true` is the only fallback path and it marks the results.
 - Exactly three plugin points (custom blocks via Rust trait registration, C-ABI tires,
-  controllers). Everything else is core enums — do not add dynamic dispatch to the hot path.
+  controllers). Everything else is a built-in block the tier composes statically — do not add
+  dynamic dispatch to the hot path.
 - Config errors are a product surface: miette spans, did-you-mean, plain-language topology
   messages. A bare serde error reaching the user is a bug.
 - Errors: thiserror-typed enums on public APIs; solver kernels panic-free (`Result`), physics
