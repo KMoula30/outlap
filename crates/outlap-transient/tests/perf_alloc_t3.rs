@@ -43,7 +43,8 @@ fn t3_step_is_zero_alloc() {
     }
     let after = dhat::HeapStats::get();
     assert_eq!(
-        after.total_blocks, before.total_blocks,
+        after.total_blocks,
+        before.total_blocks,
         "the T3 step allocated {} heap block(s) — the hot loop must be zero-alloc",
         after.total_blocks - before.total_blocks
     );

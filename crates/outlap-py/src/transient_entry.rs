@@ -682,7 +682,11 @@ fn tyre_vertical(tyr_ref: &str, vl: &FsLoader) -> PyResult<(f64, f64)> {
         .map(|v| v.stiffness_n_per_m)
         .or_else(|| t.mf61.0.get("VERTICAL_STIFFNESS").copied())
         .unwrap_or(250_000.0);
-    let c_z = t.vertical.as_ref().and_then(|v| v.damping_n_s_per_m).unwrap_or(0.0);
+    let c_z = t
+        .vertical
+        .as_ref()
+        .and_then(|v| v.damping_n_s_per_m)
+        .unwrap_or(0.0);
     Ok((k_z, c_z))
 }
 

@@ -177,7 +177,17 @@ fn t3_tracks_t2_on_a_stiffened_platform() {
     let (t1, spec) = f1_2026();
     let steps = 6_000;
     let r = 80.0;
-    let mk_line = || line(2.0 * std::f64::consts::PI * r, 400, true, 1.0 / r, 1.0 / r, 42.0, Some(r));
+    let mk_line = || {
+        line(
+            2.0 * std::f64::consts::PI * r,
+            400,
+            true,
+            1.0 / r,
+            1.0 / r,
+            42.0,
+            Some(r),
+        )
+    };
     // Fine step so a 30× corner mode (~5.5× the physical ~18 Hz wheel hop) stays inside Heun.
     let fine = SimConfig {
         dt: 0.0002,
@@ -516,7 +526,10 @@ fn t3_stays_planted_over_a_crest_without_the_floor() {
         );
     }
     // The suspension actually worked the crest (the platform moved), and the lap completed.
-    assert!(lap.s.last().copied().unwrap_or(0.0) >= len, "the crest lap completed");
+    assert!(
+        lap.s.last().copied().unwrap_or(0.0) >= len,
+        "the crest lap completed"
+    );
     assert!(
         lap.heave_m.iter().any(|&z| z.abs() > 1e-4),
         "the suspension travelled over the crest"

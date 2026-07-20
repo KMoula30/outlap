@@ -495,8 +495,7 @@ impl<T: Float> TierBlocks<T> for T3Blocks<T> {
             .iter()
             .fold(T::zero(), |a, &m| a + m);
         self.chassis.params.mass = T::from(mass_kg).unwrap_or_else(T::zero);
-        self.chassis.susp.sprung_mass =
-            T::from(mass_kg).unwrap_or_else(T::zero) - total_unsprung;
+        self.chassis.susp.sprung_mass = T::from(mass_kg).unwrap_or_else(T::zero) - total_unsprung;
         self.chassis.susp.h_cg = T::from(h_cg).unwrap_or_else(T::zero);
         self.chassis.susp.h_s = T::from(h_cg).unwrap_or_else(T::zero);
         let wheelbase = self.chassis.susp.wheelbase.to_f64().unwrap_or(0.0);
@@ -529,7 +528,8 @@ impl<T: Float> TierBlocks<T> for T3Blocks<T> {
             fast[chassis_zu(i) as usize] = -d_tyre;
             z_corner[i] = -(d_tyre + d_susp);
         }
-        let z = (z_corner[0] + z_corner[1] + z_corner[2] + z_corner[3]) * T::from(0.25).unwrap_or_else(T::zero);
+        let z = (z_corner[0] + z_corner[1] + z_corner[2] + z_corner[3])
+            * T::from(0.25).unwrap_or_else(T::zero);
         let z_front = (z_corner[0] + z_corner[1]) * half;
         let z_rear = (z_corner[2] + z_corner[3]) * half;
         // z_corner_front = z − a_f·θ, z_corner_rear = z + b_r·θ ⇒ θ = (z_rear − z_front)/L.
@@ -666,7 +666,12 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
     /// Build a solver from the assembled blocks, the line table, the interner (bus width), and the
     /// numerics config, seeding the initial state from the target line at `s = 0`.
     #[must_use]
-    pub fn new(blocks: B, line: LineTable<T>, interner: &ChannelInterner, cfg: SimConfig<T>) -> Self {
+    pub fn new(
+        blocks: B,
+        line: LineTable<T>,
+        interner: &ChannelInterner,
+        cfg: SimConfig<T>,
+    ) -> Self {
         // The RK sweep integrates the tier's chassis DOF plus the continuous controller states (the
         // driver speed integral); the tyre-relaxation states are advanced separately on the
         // exact-exponential channel and are not in this set. Size to the full 14-DOF footprint so
@@ -761,7 +766,9 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
     /// immediately so the very first step's forces already carry the seed grip/pressure.
     #[must_use]
     pub fn with_tire_thermal(mut self, stack: TireThermalStack<T>) -> Self {
-        self.blocks.tire_mut().set_thermal_grip(stack.current_grip());
+        self.blocks
+            .tire_mut()
+            .set_thermal_grip(stack.current_grip());
         self.tire_thermal = Some(stack);
         self
     }

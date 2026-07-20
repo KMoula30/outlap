@@ -476,7 +476,10 @@ fn check_t3_axle(axle: &AxleKc, side: &str, out: &mut Vec<String>) {
     let need = [
         ("static_ride_height_m", axle.static_ride_height_m.is_some()),
         ("unsprung_mass_kg", axle.unsprung_mass_kg.is_some()),
-        ("damper_bump_n_s_per_m", axle.damper_bump_n_s_per_m.is_some()),
+        (
+            "damper_bump_n_s_per_m",
+            axle.damper_bump_n_s_per_m.is_some(),
+        ),
         (
             "damper_rebound_n_s_per_m",
             axle.damper_rebound_n_s_per_m.is_some(),
