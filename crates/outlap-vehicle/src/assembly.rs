@@ -21,12 +21,12 @@ use outlap_core::bus::{ChannelInterner, WHEELS};
 use outlap_core::interp::MonotoneCubic;
 use outlap_qss::t1::LoadTransferGeometry;
 use outlap_qss::T1Vehicle;
-use outlap_schema::vehicle::{Driver as DriverCfg, Vehicle};
+use outlap_schema::vehicle::{AxleKc, Driver as DriverCfg, Vehicle};
 
-use crate::chassis::Chassis;
+use crate::chassis::{Chassis, ChassisT3, T3RoadVertical};
 use crate::control::{drive_weights, AxleRegen, Driver, Powertrain, RegenParams, TorqueVectoring};
-use crate::forces::{Aero, LoadTransfer, RelaxProvider, Tire};
-use crate::params::{ActuationChannels, ChassisParams, RoadChannels, G};
+use crate::forces::{Aero, AeroT3, LoadTransfer, RelaxProvider, T3Load, Tire};
+use crate::params::{ActuationChannels, ChassisParams, RoadChannels, SuspensionParams, G};
 
 /// Fallback rolling radius when a tyre model carries no unloaded radius, m.
 const FALLBACK_RADIUS_M: f64 = 0.33;
@@ -288,7 +288,6 @@ pub fn assemble_t2(
         opts.max_brake_torque_nm, opts.wheel_inertia_kgm2
     ));
 
-    let split = &spec.drivetrain.control.split;
     let regen = regen_params(t1, spec, opts);
     if spec.brakes.regen_blend.is_some() && !regen.enabled {
         notes.push(
@@ -325,30 +324,59 @@ pub fn assemble_t2(
             qz_r: t1.qz_r,
         },
         driver: driver(t1, spec, road, opts),
-        powertrain: Powertrain {
-            traction: traction_curve(t1, opts),
-            drive_weight: drive_weights(t1.driven, split.front, split.left),
-            radius,
-            max_brake_torque: opts.max_brake_torque_nm,
-            brake_front_bias: t1.brake_front_bias,
-            regen,
-            // A car with an `ers:` block is governed by the rule-based energy manager (a
-            // schema-derived FACT, not an estimate — PR4i): the boundary controller schedules the
-            // MGU-K deploy and owns the pack electrical accounting.
-            ers_governed: spec.ers.is_some(),
-            actuation,
-        },
-        tv: TorqueVectoring {
-            enabled: tv_cfg.enabled,
-            k_yaw: tv_cfg.k_yaw,
-            max_moment: tv_cfg.max_yaw_moment_nm.unwrap_or(f64::INFINITY),
-            mu: opts.mu,
-            y,
-            radius,
-            drive_capable: t1.driven,
-            road,
-            actuation,
-        },
+        powertrain: powertrain_block(t1, spec, opts, radius, regen, actuation),
+        tv: tv_block(t1, spec, opts, y, radius, road, actuation),
+        road,
+        actuation,
+    }
+}
+
+/// The powertrain block (drive/brake actuation + series regen blend), shared by the T2 and T3
+/// assembly. Pure extraction — the `regen` blend is resolved by the caller (which also reports the
+/// no-regen note).
+fn powertrain_block(
+    t1: &T1Vehicle,
+    spec: &Vehicle,
+    opts: &T2Options,
+    radius: [f64; WHEELS],
+    regen: RegenParams<f64>,
+    actuation: ActuationChannels,
+) -> Powertrain<f64> {
+    let split = &spec.drivetrain.control.split;
+    Powertrain {
+        traction: traction_curve(t1, opts),
+        drive_weight: drive_weights(t1.driven, split.front, split.left),
+        radius,
+        max_brake_torque: opts.max_brake_torque_nm,
+        brake_front_bias: t1.brake_front_bias,
+        regen,
+        // A car with an `ers:` block is governed by the rule-based energy manager (a schema-derived
+        // FACT, not an estimate — PR4i): the boundary controller schedules the MGU-K deploy and owns
+        // the pack electrical accounting.
+        ers_governed: spec.ers.is_some(),
+        actuation,
+    }
+}
+
+/// The torque-vectoring allocator block, shared by the T2 and T3 assembly. Pure extraction.
+fn tv_block(
+    t1: &T1Vehicle,
+    spec: &Vehicle,
+    opts: &T2Options,
+    y: [f64; WHEELS],
+    radius: [f64; WHEELS],
+    road: RoadChannels,
+    actuation: ActuationChannels,
+) -> TorqueVectoring<f64> {
+    let tv_cfg = &spec.drivetrain.control.torque_vectoring;
+    TorqueVectoring {
+        enabled: tv_cfg.enabled,
+        k_yaw: tv_cfg.k_yaw,
+        max_moment: tv_cfg.max_yaw_moment_nm.unwrap_or(f64::INFINITY),
+        mu: opts.mu,
+        y,
+        radius,
+        drive_capable: t1.driven,
         road,
         actuation,
     }
@@ -358,4 +386,286 @@ pub fn assemble_t2(
 #[must_use]
 pub fn driver_defaults() -> DriverCfg {
     DriverCfg::default()
+}
+
+// =============================================================================================
+// T3 assembly (14-DOF tier)
+// =============================================================================================
+
+/// Default C¹ bumpstop knee width, m (the quadratic-to-linear smoothing scale).
+const BUMPSTOP_SMOOTH_M: f64 = 0.005;
+/// Fallback tyre vertical stiffness, N/m (matches the QSS `VERTICAL_STIFFNESS_FALLBACK`).
+const TYRE_K_Z_FALLBACK: f64 = 250_000.0;
+
+/// Assembly knobs for the T3 (14-DOF) tier: the shared T2 knobs plus the suspension data the vehicle
+/// document does not carry inline (the tyre vertical spring, resolved from the `.tyr` `vertical`
+/// block at the binding edge like the tyre-thermal geometry, and the bumpstop smoothing scale). Its
+/// own struct beside [`T2Options`] (`PR7e` — `T2Options` is not widened).
+#[derive(Clone, Copy, Debug)]
+pub struct T3Options {
+    /// The shared T2 assembly knobs (wheel inertia, envelope grid, brake torque, μ, regen, …).
+    pub base: T2Options,
+    /// C¹ bumpstop knee width `s`, m.
+    pub bumpstop_smooth_m: f64,
+    /// Per-axle tyre vertical stiffness `k_z`, N/m: `[front, rear]` (resolved from the `.tyr`
+    /// `vertical` block → `VERTICAL_STIFFNESS` map key → 250 kN/m at the binding).
+    pub tyre_vertical_stiffness_n_per_m: [f64; 2],
+    /// Per-axle tyre vertical damping `c_z`, N·s/m: `[front, rear]` (default 0).
+    pub tyre_vertical_damping_n_s_per_m: [f64; 2],
+}
+
+impl Default for T3Options {
+    fn default() -> Self {
+        Self {
+            base: T2Options::default(),
+            bumpstop_smooth_m: BUMPSTOP_SMOOTH_M,
+            tyre_vertical_stiffness_n_per_m: [TYRE_K_Z_FALLBACK; 2],
+            tyre_vertical_damping_n_s_per_m: [0.0; 2],
+        }
+    }
+}
+
+/// The assembled T3 (14-DOF) blocks, before `outlap-transient` packs them into its `T3Blocks`.
+pub struct T3Parts<T> {
+    /// The 14-DOF chassis RHS block.
+    pub chassis: ChassisT3<T>,
+    /// The tyre block.
+    pub tire: Tire<T>,
+    /// The dynamic-ride-height aero block.
+    pub aero: AeroT3<T>,
+    /// The tyre-spring per-wheel `F_z` block (replaces the algebraic `LoadTransfer` at T3).
+    pub load: T3Load<T>,
+    /// The ideal-driver block (reused from T2, §7.7).
+    pub driver: Driver<T>,
+    /// The powertrain block.
+    pub powertrain: Powertrain<T>,
+    /// The torque-vectoring allocator block.
+    pub tv: TorqueVectoring<T>,
+    /// The interned road channels.
+    pub road: RoadChannels,
+    /// The interned per-corner road vertical excitation channels.
+    pub road_v: T3RoadVertical,
+    /// The interned actuation channels.
+    pub actuation: ActuationChannels,
+}
+
+/// A `tier: t3` vehicle is missing suspension data the 14-DOF tier needs (and which the estimation
+/// stage must never invent — the `per_lap_deploy_mj` trap pattern). Carries the plain-language list
+/// of the fields to add. Surfaced at assembly, never a panic (`PR7c`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct T3AssemblyError {
+    /// The dotted paths of the missing (or estimated-not-allowed) fields.
+    pub missing: Vec<String>,
+}
+
+impl std::fmt::Display for T3AssemblyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tier `t3` (14-DOF suspension) needs vehicle data this car does not carry: {}. \
+             Add these fields (T3 suspension data is never estimated), or select tier `t2`.",
+            self.missing.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for T3AssemblyError {}
+
+/// Collect the missing/estimated-not-allowed T3 fields on one axle into `out`.
+fn check_t3_axle(axle: &AxleKc, side: &str, out: &mut Vec<String>) {
+    let need = [
+        ("static_ride_height_m", axle.static_ride_height_m.is_some()),
+        ("unsprung_mass_kg", axle.unsprung_mass_kg.is_some()),
+        ("damper_bump_n_s_per_m", axle.damper_bump_n_s_per_m.is_some()),
+        (
+            "damper_rebound_n_s_per_m",
+            axle.damper_rebound_n_s_per_m.is_some(),
+        ),
+        (
+            "arb_stiffness_n_m_per_rad",
+            axle.arb_stiffness_n_m_per_rad.is_some(),
+        ),
+        ("bumpstop", axle.bumpstop.is_some()),
+    ];
+    for (field, present) in need {
+        if !present {
+            out.push(format!("suspension.{side}.{field}"));
+        }
+    }
+}
+
+/// Assemble the full T3 (14-DOF) block set from an assembled [`T1Vehicle`] and its resolved vehicle
+/// document. Reuses the T2 driver / tyre / powertrain / torque-vectoring builders and swaps the
+/// chassis + `F_z`/aero pieces for the suspension model.
+///
+/// Estimated values are pushed onto `notes` for the loaded-model report.
+///
+/// # Errors
+/// [`T3AssemblyError`] when the vehicle omits (or only estimates) the required T3 suspension fields
+/// — a plain-language list the caller surfaces (never a panic; the vehicle loads without knowing the
+/// tier, so this is an assembly-stage check, not a semantic-stage one).
+///
+/// # Panics
+/// Panics if no wheel is driven (an assembly-time topology error the loader rejects earlier).
+#[allow(clippy::too_many_lines)] // one flat block that fans the schema into the suspension params
+pub fn assemble_t3(
+    t1: &T1Vehicle,
+    spec: &Vehicle,
+    interner: &mut ChannelInterner,
+    opts: &T3Options,
+    notes: &mut Vec<String>,
+) -> Result<T3Parts<f64>, T3AssemblyError> {
+    let front = &spec.suspension.front;
+    let rear = &spec.suspension.rear;
+    let mut missing = Vec::new();
+    check_t3_axle(front, "front", &mut missing);
+    check_t3_axle(rear, "rear", &mut missing);
+    if !missing.is_empty() {
+        return Err(T3AssemblyError { missing });
+    }
+
+    let base = &opts.base;
+    let road = RoadChannels::intern(interner);
+    let road_v = T3RoadVertical::intern(interner);
+    let actuation = ActuationChannels::intern(interner);
+
+    let (a, b, tf, tr) = (t1.a_f, t1.b_r, t1.t_f, t1.t_r);
+    let x = [a, a, -b, -b];
+    let y = [tf * 0.5, -tf * 0.5, tr * 0.5, -tr * 0.5];
+    let r_f = t1.tire_front.unloaded_radius(FALLBACK_RADIUS_M);
+    let r_r = t1.tire_rear.unloaded_radius(FALLBACK_RADIUS_M);
+    let radius = [r_f, r_f, r_r, r_r];
+    let params = ChassisParams::from_f64(
+        t1.mass_kg,
+        t1.izz,
+        x,
+        y,
+        [true, true, false, false],
+        radius,
+        [base.wheel_inertia_kgm2; WHEELS],
+    );
+    let wheels = params.wheels;
+
+    // --- suspension parameters (all required fields validated above) ---
+    let g = G;
+    let l = t1.wheelbase_m;
+    let m_uf = front.unsprung_mass_kg.unwrap();
+    let m_ur = rear.unsprung_mass_kg.unwrap();
+    let m_total = t1.mass_kg;
+    let m_s = m_total - 2.0 * (m_uf + m_ur);
+    // Sprung CG height (Option-A): remove the unsprung point masses (at hub height ≈ wheel radius)
+    // from the whole-car CG, so `m·h_cg = m_s·h_s + Σ m_u·h_u`.
+    let h_s = (m_total * t1.h_cg - 2.0 * m_uf * r_f - 2.0 * m_ur * r_r) / m_s;
+    let (kf, kr) = (front.ride_rate_n_per_m, rear.ride_rate_n_per_m);
+    let k_ride = [kf, kf, kr, kr];
+    // Static sprung corner loads from the whole-car weight split (b_r/L front, a_f/L rear).
+    let front_corner = m_s * g * (b / l) / 2.0;
+    let rear_corner = m_s * g * (a / l) / 2.0;
+    let static_defl = [
+        front_corner / kf,
+        front_corner / kf,
+        rear_corner / kr,
+        rear_corner / kr,
+    ];
+    let (ktzf, ktzr) = (
+        opts.tyre_vertical_stiffness_n_per_m[0].max(1.0),
+        opts.tyre_vertical_stiffness_n_per_m[1].max(1.0),
+    );
+    let k_tyre = [ktzf, ktzf, ktzr, ktzr];
+    let (ctzf, ctzr) = (
+        opts.tyre_vertical_damping_n_s_per_m[0],
+        opts.tyre_vertical_damping_n_s_per_m[1],
+    );
+    let c_tyre = [ctzf, ctzf, ctzr, ctzr];
+    // The tyre carries its sprung corner load + its own unsprung weight.
+    let tyre_static_defl = [
+        (front_corner + m_uf * g) / ktzf,
+        (front_corner + m_uf * g) / ktzf,
+        (rear_corner + m_ur * g) / ktzr,
+        (rear_corner + m_ur * g) / ktzr,
+    ];
+    let (cbf, cbr) = (
+        front.damper_bump_n_s_per_m.unwrap(),
+        rear.damper_bump_n_s_per_m.unwrap(),
+    );
+    let (crf, crr) = (
+        front.damper_rebound_n_s_per_m.unwrap(),
+        rear.damper_rebound_n_s_per_m.unwrap(),
+    );
+    let (bsf, bsr) = (front.bumpstop.unwrap(), rear.bumpstop.unwrap());
+    let susp = SuspensionParams::<f64> {
+        sprung_mass: m_s,
+        ixx: spec.chassis.inertia[0],
+        iyy: spec.chassis.inertia[1],
+        h_s,
+        h_cg: t1.h_cg,
+        h_ra: t1.h_ra,
+        wheelbase: l,
+        track_f: tf,
+        track_r: tr,
+        anti_dive: t1.anti_dive,
+        anti_squat: t1.anti_squat,
+        arb_f: front.arb_stiffness_n_m_per_rad.unwrap(),
+        arb_r: rear.arb_stiffness_n_m_per_rad.unwrap(),
+        bumpstop_smooth: opts.bumpstop_smooth_m,
+        k_ride,
+        static_defl,
+        damp_bump: [cbf, cbf, cbr, cbr],
+        damp_rebound: [crf, crf, crr, crr],
+        bumpstop_rate: [
+            bsf.rate_n_per_m,
+            bsf.rate_n_per_m,
+            bsr.rate_n_per_m,
+            bsr.rate_n_per_m,
+        ],
+        bumpstop_gap: [bsf.gap_m, bsf.gap_m, bsr.gap_m, bsr.gap_m],
+        k_tyre,
+        c_tyre,
+        tyre_static_defl,
+        unsprung_mass: [m_uf, m_uf, m_ur, m_ur],
+    };
+
+    notes.push(format!(
+        "T3 assembly: sprung mass {m_s:.1} kg (total {m_total:.1} − unsprung 2×{m_uf:.1} f / 2×{m_ur:.1} r), \
+         sprung CG height {h_s:.3} m; tyre vertical stiffness {ktzf:.0}/{ktzr:.0} N/m f/r; bumpstop knee \
+         {:.3} m and per-wheel spin inertia {:.2} kg·m² are estimated (the document carries neither)",
+        opts.bumpstop_smooth_m, base.wheel_inertia_kgm2
+    ));
+
+    let regen = regen_params(t1, spec, base);
+    if spec.brakes.regen_blend.is_some() && !regen.enabled {
+        notes.push(
+            "brakes.regen_blend is declared but no regen is possible (no battery, or no electric \
+             machine on any driven axle); the friction brakes do all the braking"
+                .to_owned(),
+        );
+    }
+
+    Ok(T3Parts {
+        chassis: ChassisT3::new(params, susp, road, road_v),
+        tire: tire_block(t1, wheels, r_f, r_r),
+        aero: AeroT3 {
+            qx: t1.qx,
+            qz_f: t1.qz_f,
+            qz_r: t1.qz_r,
+            map: t1.aero_map().cloned(),
+            rho: t1.rho,
+            h_ref_f_m: t1.h_ref_f_m,
+            h_ref_r_m: t1.h_ref_r_m,
+            a_f: a,
+            b_r: b,
+        },
+        load: T3Load {
+            k_tyre,
+            c_tyre,
+            tyre_static_defl,
+            road_v,
+        },
+        driver: driver(t1, spec, road, base),
+        powertrain: powertrain_block(t1, spec, base, radius, regen, actuation),
+        tv: tv_block(t1, spec, base, y, radius, road, actuation),
+        road,
+        road_v,
+        actuation,
+    })
 }

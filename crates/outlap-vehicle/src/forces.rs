@@ -11,8 +11,10 @@ use num_traits::Float;
 use outlap_core::block::{Block, Phase, Ports};
 use outlap_core::bus::{Bus, CoreSignal, WheelSignal, WHEELS};
 use outlap_core::state::{ChassisState, StateView};
+use outlap_qss::t1::AeroMap;
 use outlap_tire::{relax_step, Relaxation, SlipState, TireModel};
 
+use crate::chassis::T3RoadVertical;
 use crate::params::WheelGeometry;
 
 /// Minimum contact-patch speed used in the slip denominators, m/s (avoids the standstill 0/0).
@@ -151,6 +153,174 @@ impl<T: Float> Block<T> for LoadTransfer<T> {
             let fz_floored = T::from(fz_w).unwrap_or_else(T::zero).max(floor);
             bus.set_wheel(WheelSignal::TireFz, w, lane, fz_floored);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// T3 aero (dynamic ride height) + T3 tyre-spring Fz
+// ---------------------------------------------------------------------------------------------
+
+/// The **T3 aero block**: drag + per-axle downforce evaluated at the **instantaneous** ride heights
+/// (§7.4). Under braking the platform pitches (nose-down), the front/rear ride heights change, and
+/// the ride-height-keyed aero map (the shared [`AeroMap`], Decision #30) returns a shifted downforce
+/// balance — the §6.1 "downforce car is real" behaviour. The downforce is published on the per-axle
+/// `AeroFz*` channels the [`ChassisT3`](crate::ChassisT3) reads into its sprung heave/pitch dynamics.
+///
+/// A car without an aero map keeps the constant lumped coefficients (ride-height inert, so a
+/// map-less car's T3 aero is byte-identical to its T2 aero). Generic over `f32`/`f64`; the map eval
+/// is `f64` at its boundary (the map algebra is `f64`), like [`LoadTransfer`]. Allocation-free.
+#[derive(Clone, Debug)]
+pub struct AeroT3<T> {
+    /// Constant drag coefficient `q_x = ½ρ·C_xA`, N/(m/s)² (the map-absent fallback).
+    pub qx: T,
+    /// Constant front downforce coefficient `q_{z,f} = ½ρ·C_zA_f`, N/(m/s)².
+    pub qz_f: T,
+    /// Constant rear downforce coefficient `q_{z,r} = ½ρ·C_zA_r`, N/(m/s)².
+    pub qz_r: T,
+    /// Ride-height/yaw aero map; `None` ⇒ the constant coefficients above (ride-height inert).
+    pub map: Option<AeroMap>,
+    /// Air density `ρ`, kg/m³ (folds the map's `C·A` into `q = ½ρ·C·A`).
+    pub rho: T,
+    /// Static (design) front / rear ride heights `h_ref`, m — the ride-height datum the heave/pitch
+    /// state perturbs.
+    pub h_ref_f_m: T,
+    /// Static (design) rear ride height, m.
+    pub h_ref_r_m: T,
+    /// Front-axle longitudinal position `a_f`, m (the pitch arm for the front ride height).
+    pub a_f: T,
+    /// Rear-axle longitudinal position `b_r`, m (the pitch arm for the rear ride height).
+    pub b_r: T,
+}
+
+impl<T: Float> Block<T> for AeroT3<T> {
+    fn phase(&self) -> Phase {
+        Phase::Actuate
+    }
+
+    fn ports(&self) -> Ports {
+        Ports::new(
+            Vec::new(),
+            vec![
+                CoreSignal::AeroDrag as usize,
+                CoreSignal::AeroFzFront as usize,
+                CoreSignal::AeroFzRear as usize,
+            ],
+        )
+    }
+
+    fn derivatives(
+        &self,
+        x: &StateView<T>,
+        bus: &mut Bus<T>,
+        _dx: &mut outlap_core::state::DerivView<T>,
+        lane: usize,
+    ) {
+        let vx = x.chassis(ChassisState::Vx);
+        let v2 = vx * vx;
+        let (qx, qz_f, qz_r) = match &self.map {
+            None => (self.qx, self.qz_f, self.qz_r),
+            Some(map) => {
+                // Instantaneous ride height at each axle = design datum + sprung-corner vertical
+                // (z − x·θ): heave up raises it, nose-down pitch (θ>0) lowers the front / raises the
+                // rear. The map takes mm; it clamps out-of-domain (below-grid heights under load).
+                let z = x.chassis(ChassisState::Heave);
+                let th = x.chassis(ChassisState::Pitch);
+                let mm = |h: T| h.to_f64().unwrap_or(0.0) * 1000.0;
+                let h_f = self.h_ref_f_m + (z - self.a_f * th);
+                let h_r = self.h_ref_r_m + (z + self.b_r * th);
+                let c = map.eval(mm(h_f), mm(h_r), 0.0, 0.0);
+                let half_rho = T::from(0.5).unwrap_or_else(T::zero) * self.rho;
+                (
+                    half_rho * T::from(c.cx_a_m2).unwrap_or_else(T::zero),
+                    half_rho * T::from(c.cz_front_a_m2).unwrap_or_else(T::zero),
+                    half_rho * T::from(c.cz_rear_a_m2).unwrap_or_else(T::zero),
+                )
+            }
+        };
+        bus.set(CoreSignal::AeroDrag, lane, qx * v2);
+        bus.set(CoreSignal::AeroFzFront, lane, qz_f * v2);
+        bus.set(CoreSignal::AeroFzRear, lane, qz_r * v2);
+    }
+}
+
+/// The **T3 tyre-spring `F_z` block**: per-wheel normal load from the tyre vertical spring/damper
+/// (`F_z,i = k_{tz,i}·(δ_static,i + z_road,i − z_{u,i}) + c_{tz,i}·(ż_road,i − ż_{u,i})`), the
+/// `TyreSpring` half of the `PR6a` Fz-coupling seam (HANDOFF #53). It reads the four unsprung
+/// verticals + the per-corner road excitation and publishes `TireFz` for the [`Tire`] block —
+/// replacing the algebraic [`LoadTransfer`] at T3. The identical expression lives inside
+/// [`ChassisT3`](crate::ChassisT3)'s unsprung dynamics (the load also carries the aero downforce that
+/// compressed the springs, so no separate contact-patch aero term). Pure, generic, allocation-free.
+#[derive(Clone, Copy, Debug)]
+pub struct T3Load<T> {
+    /// Per-corner tyre vertical stiffness `k_{tz}`, N/m.
+    pub k_tyre: [T; WHEELS],
+    /// Per-corner tyre vertical damping `c_{tz}`, N·s/m.
+    pub c_tyre: [T; WHEELS],
+    /// Per-corner static tyre compression carrying the corner load, m.
+    pub tyre_static_defl: [T; WHEELS],
+    /// Interned per-corner road vertical excitation channels.
+    pub road_v: T3RoadVertical,
+}
+
+impl<T: Float> Block<T> for T3Load<T> {
+    fn phase(&self) -> Phase {
+        Phase::Actuate
+    }
+
+    fn ports(&self) -> Ports {
+        let mut reads = Vec::with_capacity(2 * WHEELS);
+        for w in 0..WHEELS {
+            reads.push(self.road_v.height[w].index());
+            reads.push(self.road_v.rate[w].index());
+        }
+        let base = CoreSignal::COUNT as usize;
+        let writes = (0..WHEELS)
+            .map(|w| base + (WheelSignal::TireFz as usize) * WHEELS + w)
+            .collect();
+        Ports::new(reads, writes)
+    }
+
+    fn derivatives(
+        &self,
+        x: &StateView<T>,
+        bus: &mut Bus<T>,
+        _dx: &mut outlap_core::state::DerivView<T>,
+        lane: usize,
+    ) {
+        let floor = T::from(FZ_FLOOR_N).unwrap_or_else(T::zero);
+        for i in 0..WHEELS {
+            let zu = x.chassis(t3_zu(i));
+            let zud = x.chassis(t3_zu_rate(i));
+            let zr = bus.get_channel(self.road_v.height[i], lane);
+            let zrd = bus.get_channel(self.road_v.rate[i], lane);
+            let fz = self.k_tyre[i] * (self.tyre_static_defl[i] + zr - zu)
+                + self.c_tyre[i] * (zrd - zud);
+            // Floor at a small positive load so a wheel that goes light keeps a finite relaxation
+            // length `σ(F_z)` (matches the T2 `LoadTransfer` floor).
+            bus.set_wheel(WheelSignal::TireFz, i, lane, fz.max(floor));
+        }
+    }
+}
+
+/// The [`ChassisState`] unsprung-position slot for wheel `i`.
+#[inline]
+fn t3_zu(wheel: usize) -> ChassisState {
+    match wheel {
+        0 => ChassisState::ZuFl,
+        1 => ChassisState::ZuFr,
+        2 => ChassisState::ZuRl,
+        _ => ChassisState::ZuRr,
+    }
+}
+
+/// The [`ChassisState`] unsprung-velocity slot for wheel `i`.
+#[inline]
+fn t3_zu_rate(wheel: usize) -> ChassisState {
+    match wheel {
+        0 => ChassisState::ZuRateFl,
+        1 => ChassisState::ZuRateFr,
+        2 => ChassisState::ZuRateRl,
+        _ => ChassisState::ZuRateRr,
     }
 }
 

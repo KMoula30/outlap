@@ -32,13 +32,18 @@ pub mod control;
 pub mod forces;
 pub mod params;
 
-pub use assembly::{assemble_t2, regen_params, traction_curve, T2Options, T2Parts};
+pub use assembly::{
+    assemble_t2, assemble_t3, regen_params, traction_curve, T2Options, T2Parts, T3AssemblyError,
+    T3Options, T3Parts,
+};
 pub use chassis::{Chassis, ChassisT3, T3RoadVertical};
 pub use control::{
     allocate_yaw_moment, drive_weights, preview_distance, AxleRegen, Driver, Powertrain,
     RegenParams, TorqueVectoring, YawAllocation, PREVIEW_FLOOR_M, REGEN_FADE_SPEED_MPS,
 };
-pub use forces::{relax_wheel, Aero, LoadTransfer, RelaxProvider, RelaxTargets, ThermalGrip, Tire};
+pub use forces::{
+    relax_wheel, Aero, AeroT3, LoadTransfer, RelaxProvider, RelaxTargets, T3Load, ThermalGrip, Tire,
+};
 pub use params::{
     ActuationChannels, ChassisParams, RoadChannels, SuspensionParams, WheelGeometry, G,
 };
