@@ -328,6 +328,14 @@ impl T1Vehicle {
         Ok(())
     }
 
+    /// The installed ride-height/yaw aero map, if any (§7.4). The T3 transient tier evaluates it at
+    /// the **instantaneous** ride heights each step (dynamic pitch-under-braking aero-balance shift),
+    /// rather than the T1 quasi-static [`AeroPlatform`] equilibrium.
+    #[must_use]
+    pub fn aero_map(&self) -> Option<&AeroMap> {
+        self.aero_map.as_ref()
+    }
+
     /// The aero-platform parameters for the ride-height equilibrium.
     pub(crate) fn platform(&self) -> AeroPlatform {
         AeroPlatform {
