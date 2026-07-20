@@ -2,6 +2,18 @@
 resolver = "2"
 members = ["crates/*"]
 
+# Disk-lite dev builds. `target/debug` is dominated by DWARF debug info; most of it belongs to
+# dependencies we never step into. Keeping only line tables for our own crates preserves readable
+# backtraces + panic locations (and does NOT change codegen, so the alloc/perf/determinism gates are
+# unaffected), while dropping dependency debug info entirely — together this roughly halves
+# `target/debug` at no correctness cost. Release/wasm profiles are untouched (the perf gates run
+# release). Full `RUST_BACKTRACE` line numbers in our code still work.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.package]
 edition = "2021"
 license = "AGPL-3.0-only"
