@@ -135,6 +135,61 @@ With the states as displacements from the design ride position and the static co
 DOF (`Σ k_ride·δ_static = m_s·g`; each tyre carries its sprung corner + unsprung weight). The Rust
 `static_equilibrium_settles` test ties the compressions to gravity.
 
+## Tier integration (PR7): the 14-DOF chassis in a lap
+
+PR6 proved the RHS; PR7 wires it into a full transient lap. The pieces:
+
+### One shared `TransientSolver`, an Fz-coupling strategy per tier (Decision #53)
+
+The transient solver is a single type generic over the block composition
+(`TransientSolver<T, B: TierBlocks<T>>`), monomorphised per tier — static dispatch, concrete block
+structs, no `dyn` and no per-step enum match. The T2 path is instruction-for-instruction the pre-PR7
+solver, so a T2 lap stays byte-identical. The tier differences live behind the trait:
+
+- **the block chain** — T2 runs `driver → powertrain → load(algebraic Fz) → aero → tyre → tv →
+  chassis`; T3 runs `driver → powertrain → aero(ride-height) → t3-load(tyre-spring Fz) → tyre → tv →
+  chassis(14-DOF)`;
+- **the Fz-coupling strategy** — T2 resolves the *algebraic* load transfer, which depends on the
+  accelerations, so it iterates a Picard fixed point at the step start and applies the crest floor;
+  T3's per-wheel `F_z` is the *tyre-spring deflection* (a function of the suspension state alone), so
+  one evaluation resolves the forces — no Picard loop, and the crest floor retires with the strategy;
+- **the integrated slot set** — `t2_integrated_slots` (10 DOF + controller) vs `t3_integrated_slots`
+  (the full 24 + controller).
+
+The slow-clock / energy-ledger / fuel / tyre-thermal / ERS machinery is written once against the
+trait and shared by both tiers — the seam does not fork it (Decision #53).
+
+### Aero at dynamic ride height, applied to the sprung mass (Decision #54)
+
+The aero block evaluates drag + per-axle downforce at the **instantaneous** ride heights
+`h_f = h_ref,f + (z − a_f·θ)`, `h_r = h_ref,r + (z + b_r·θ)` (mm) through the shared ride-height aero
+map (Decision #30). Under braking the platform pitches nose-down, the front ride height drops, and
+the map returns a **forward** aero-balance shift — *the* defining downforce-car behaviour (§6.1). A
+car without an aero map keeps the constant lumped coefficients (ride-height inert, so its T3 aero is
+byte-identical to its T2 aero).
+
+The downforce is applied to the **sprung body** (heave force `−(F_z,f + F_z,r)`, pitch moment
+`F_z,f·a_f − F_z,r·b_r`), exactly as the PR6 RHS derives (the `fzaf`/`fzar` terms above). It reaches
+the tyres *through the springs*: the sprung mass sinks under load, compressing the suspension, which
+compresses the tyre spring, which raises the per-wheel `F_z` the contact patch carries — the honest
+ground-effect coupling (more downforce → lower platform → the map re-reads a lower ride height). This
+is why the per-wheel `F_z` "comes from the tyre-spring deflection" carries the downforce without a
+separate contact-patch aero term. The 14-DOF RHS + its 1e-12 fixture were extended for this in PR7
+(the `fzaf`/`fzar` inputs); the T2 chassis and its fixture are untouched.
+
+The solver seeds the suspension near its aero-loaded static equilibrium at the entry speed so the
+platform does not slam under the (large) downforce load at the first step.
+
+### Numerics — bumpstop stiffness and the sub-cycle
+
+Free wheel-hop (~15–20 Hz on a stiff race car) sits comfortably inside Heun's stability region at
+`dt = 1 ms`. The binding case is a very stiff bumpstop or a heavily over-stiffened platform, where the
+corner mode frequency `ω = √(k_eff/m_u)` rises as `√k` while the damping ratio falls as `1/√k`; once
+`ω·dt` approaches ~0.5 the explicit step goes unstable. At the shipped f1_2026 stiffness the T3 lap is
+comfortably stable at 1 ms; the parity stiffness sweep (below) runs at a finer `dt` so even a 30×
+platform stays inside Heun. A deterministic fixed sub-cycle of the unsprung block (never adaptive) is
+the documented remedy if a future setup needs it.
+
 ## Verification
 
 - **1e-12 EOM check** — all 24 RHS entries vs the `SymPy` `KanesMethod` derivation, 64 randomised
@@ -145,6 +200,27 @@ DOF (`Σ k_ride·δ_static = m_s·g`; each tyre carries its sprung corner + unsp
 - Static equilibrium; spring/ARB restoring; damper dissipation; gyroscopic coupling live;
   braking-dives sign; `f32`/`f64` parity; **alloc = 0** for the RHS.
 - The T2 chassis and its fixture are **untouched** — a T2 lap is byte-identical.
+- **Aero on the sprung mass** (PR7): downforce pushes the platform down; front downforce pitches the
+  nose down (the aero-balance-shift mechanism) — unit-tested against the sign of the heave/pitch RHS.
+
+### Tier-integration gates (PR7)
+
+- **T2↔T3 parity** — on a flat skidpad the two tiers share the same constant aero; stiffening the T3
+  suspension over `k ∈ {1, 3, 10, 30}×` (dampers `×√k`, static compressions `÷k`, tyre `k_z` held
+  physical) holds the T3 speed trajectory to **0.53 %** of the T2 one across the whole sweep. The
+  small, stiffness-independent residual is the refinement physics T3 adds and T2 neglects (the
+  gyroscopic spin×yaw coupling and the `κ_v·v²` frame transport) — recorded, not a suspension
+  artifact (Decision #48).
+- **Eau-Rouge crest** — T3 rides a sustained crest whose `κ_v·v²` unloading (~0.55 g) is well past the
+  T2 crest floor (0.15 g), staying finite on the honest 3-D physics with **no floor** — the
+  suspension absorbs the unloading.
+- **Throughput** — the T3 step runs at ~**96 k steps/s/core**, *faster* than T2's ~62 k: the
+  tyre-spring `F_z` resolves in one evaluation per RK stage where T2 runs three extra Picard
+  evaluations for the algebraic coupling, more than paying for the heavier 24-DOF RHS. Its own
+  regression tripwire (40 k) is set at ~half; T2's 30 k tripwire is untouched.
+- **Zero-alloc** T3 step; the **T3 block schedule** is asserted a valid topological linearization
+  (programmatically, not a hardcoded order); a `tier: t3` vehicle missing suspension data fails at
+  assembly with a plain-language field list (never estimated, never a panic).
 
 ## References
 
