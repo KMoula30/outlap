@@ -359,10 +359,17 @@ pub struct TransientLap {
     tire_wear_mm: Option<Vec<f64>>,
     tire_damage: Option<Vec<f64>>,
     tire_grip: Option<Vec<f64>>,
+    // T3 suspension channels; `None` at T2 (empty). Scalars per station + per-wheel travel `n × 4`.
+    heave_m: Option<Vec<f64>>,
+    pitch_rad: Option<Vec<f64>>,
+    roll_rad: Option<Vec<f64>>,
+    ride_height_f_m: Option<Vec<f64>>,
+    ride_height_r_m: Option<Vec<f64>>,
+    suspension_travel_m: Option<Vec<f64>>,
     /// Total lap time, s.
     #[pyo3(get)]
     lap_time_s: f64,
-    /// The resolved solver tier (always `"t2"`).
+    /// The resolved solver tier (`"t2"` / `"t3"`).
     #[pyo3(get)]
     tier: String,
     /// The recorded normal-load coupling mode (`"one_step_lag"` / `"fixed_point"`).
@@ -570,6 +577,30 @@ impl TransientLap {
     fn tire_grip<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
         wheel_array(py, self.tire_grip.as_ref())
     }
+    /// Sprung heave `z`, m (+up) — `None` unless `tier="t3"`.
+    fn heave_m<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.heave_m.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Sprung pitch `θ`, rad (+nose-down) — `None` unless `tier="t3"`.
+    fn pitch_rad<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.pitch_rad.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Sprung roll `φ`, rad (+roll right) — `None` unless `tier="t3"`.
+    fn roll_rad<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.roll_rad.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Front ride height, m — `None` unless `tier="t3"`.
+    fn ride_height_f_m<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.ride_height_f_m.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Rear ride height, m — `None` unless `tier="t3"`.
+    fn ride_height_r_m<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.ride_height_r_m.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Per-wheel suspension compression (travel), m (`time × wheel`) — `None` unless `tier="t3"`.
+    fn suspension_travel_m<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray2<f64>>> {
+        wheel_array(py, self.suspension_travel_m.as_ref())
+    }
     /// The number of recorded steps.
     fn __len__(&self) -> usize {
         self.t.len()
@@ -582,8 +613,34 @@ impl TransientLap {
 /// [`TransientSolver`] over them (which borrows the interner) and runs one lap or a multi-lap stint,
 /// so [`solve_transient_lap`] and [`solve_transient_stint`] share one assembly path (byte-identical
 /// single-lap numerics).
+/// The assembled tier block set — T2 or the T3 14-DOF composition. The run branches on this ONCE
+/// (per lap, not per step) into the monomorphised generic solver.
+#[allow(clippy::large_enum_variant)] // constructed + consumed once per lap, never in the hot path
+pub(crate) enum PreparedBlocks {
+    T2(outlap_transient::T2Blocks<f64>),
+    T3(outlap_transient::T3Blocks<f64>),
+}
+
+impl PreparedBlocks {
+    fn tier(&self) -> &'static str {
+        match self {
+            PreparedBlocks::T2(_) => "t2",
+            PreparedBlocks::T3(_) => "t3",
+        }
+    }
+
+    /// Mean wheel radius, m (the ERS deploy-force ↔ torque arm; ≥ 0.1 m guarded).
+    fn mean_wheel_radius(&self) -> f64 {
+        let r = match self {
+            PreparedBlocks::T2(b) => b.powertrain.radius,
+            PreparedBlocks::T3(b) => b.powertrain.radius,
+        };
+        ((r[0] + r[1] + r[2] + r[3]) / 4.0).max(0.1)
+    }
+}
+
 pub(crate) struct PreparedTransient {
-    blocks: outlap_transient::T2Blocks<f64>,
+    blocks: PreparedBlocks,
     line: outlap_transient::LineTable<f64>,
     interner: outlap_transient::ChannelInterner,
     cfg: outlap_transient::SimConfig<f64>,
@@ -614,9 +671,107 @@ pub(crate) struct PreparedTransient {
     lift: outlap_transient::LiftSchedule,
 }
 
-/// Assemble the transient block set + target line + slow subsystems for a T2 run (one lap or a
-/// stint). This is the entire `solve_transient_lap` prologue factored out so the stint driver reuses
-/// the identical assembly; only the run (one lap vs. `n_laps`) and the result surface differ.
+/// Resolve one axle's tyre vertical spring `(k_z, c_z)` from its `.tyr` file: the structured
+/// `vertical` block (tyr/1.2) → the raw `VERTICAL_STIFFNESS` MF6.1 key → the 250 kN/m default; the
+/// damping defaults to 0 when the block omits it. Mirrors the tyre-thermal geometry resolution.
+fn tyre_vertical(tyr_ref: &str, vl: &FsLoader) -> PyResult<(f64, f64)> {
+    let (t, _) = load_tyr(tyr_ref, vl).map_err(schema_err)?;
+    let k_z = t
+        .vertical
+        .as_ref()
+        .map(|v| v.stiffness_n_per_m)
+        .or_else(|| t.mf61.0.get("VERTICAL_STIFFNESS").copied())
+        .unwrap_or(250_000.0);
+    let c_z = t.vertical.as_ref().and_then(|v| v.damping_n_s_per_m).unwrap_or(0.0);
+    Ok((k_z, c_z))
+}
+
+/// The optional slow subsystems attached to a solver before the run — bundled so the tier-generic
+/// run helper takes one argument, not six positional `Option`s.
+struct LapSubsystems {
+    pack: Option<(Pack, PackState)>,
+    ers: Option<ErsController>,
+    shifter: Option<outlap_transient::Shifter<f64>>,
+    lift: outlap_transient::LiftSchedule,
+    tire_stack: Option<outlap_transient::TireThermalStack<f64>>,
+    fuel: Option<(outlap_transient::FuelSlow, f64)>,
+}
+
+/// Build the tier-generic solver, attach the slow subsystems, and run one lap to `s_end`. Returns the
+/// raw lap, the divergence flag, and the provenance. Monomorphised per tier (T2/T3) — the with-*
+/// builder chain and the slow machinery are the SAME for both.
+fn run_solver_lap<B: outlap_transient::TierBlocks<f64>>(
+    blocks: B,
+    line: outlap_transient::LineTable<f64>,
+    interner: &outlap_transient::ChannelInterner,
+    cfg: outlap_transient::SimConfig<f64>,
+    sub: LapSubsystems,
+    s_end: f64,
+) -> (
+    outlap_transient::TransientLap<f64>,
+    bool,
+    outlap_transient::Provenance,
+) {
+    let mut solver = outlap_transient::TransientSolver::new(blocks, line, interner, cfg);
+    if let Some((pack, state)) = sub.pack {
+        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    if let Some(ers) = sub.ers {
+        solver = solver.with_ers_governor(Box::new(ers));
+    }
+    if let Some(shifter) = sub.shifter {
+        solver = solver.with_shifter(shifter);
+    }
+    solver = solver.with_lift(sub.lift);
+    if let Some(stack) = sub.tire_stack {
+        solver = solver.with_tire_thermal(stack);
+    }
+    if let Some((fuel_slow, initial_kg)) = sub.fuel {
+        solver = solver.with_fuel(fuel_slow, initial_kg);
+    }
+    let lap = solver.run(s_end, MAX_TRANSIENT_STEPS);
+    (lap, solver.diverged(), solver.provenance())
+}
+
+/// Build the tier-generic solver, attach the slow subsystems, and run an `n_laps` stint continuously.
+fn run_solver_stint<B: outlap_transient::TierBlocks<f64>>(
+    blocks: B,
+    line: outlap_transient::LineTable<f64>,
+    interner: &outlap_transient::ChannelInterner,
+    cfg: outlap_transient::SimConfig<f64>,
+    sub: LapSubsystems,
+    length: f64,
+    n_laps: usize,
+) -> (
+    outlap_transient::TransientLap<f64>,
+    Vec<usize>,
+    bool,
+    outlap_transient::Provenance,
+) {
+    let mut solver = outlap_transient::TransientSolver::new(blocks, line, interner, cfg);
+    if let Some((pack, state)) = sub.pack {
+        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
+    }
+    if let Some(ers) = sub.ers {
+        solver = solver.with_ers_governor(Box::new(ers));
+    }
+    if let Some(shifter) = sub.shifter {
+        solver = solver.with_shifter(shifter);
+    }
+    solver = solver.with_lift(sub.lift);
+    if let Some(stack) = sub.tire_stack {
+        solver = solver.with_tire_thermal(stack);
+    }
+    if let Some((fuel_slow, initial_kg)) = sub.fuel {
+        solver = solver.with_fuel(fuel_slow, initial_kg);
+    }
+    let (lap, lap_end_idx) = solver.run_laps(length, n_laps, MAX_TRANSIENT_STEPS);
+    (lap, lap_end_idx, solver.diverged(), solver.provenance())
+}
+
+/// Assemble the transient block set + target line + slow subsystems for a transient run (T2 or T3,
+/// one lap or a stint). This is the entire `solve_transient_lap` prologue factored out so the stint
+/// driver reuses the identical assembly; only the run (one lap vs. `n_laps`) and the surface differ.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn prepare_transient(
     vehicle_dir: &str,
@@ -638,8 +793,15 @@ pub(crate) fn prepare_transient(
     // A `u(s)` control schedule (deploy/regen + override per station) driving the manager instead
     // of the rule-based policy; `None` ⇒ the greedy rule-based policy.
     us_schedule: Option<UsSchedule<f64>>,
+    // The requested transient tier: `"t2"` (double-track) or `"t3"` (14-DOF suspension).
+    tier: &str,
 ) -> PyResult<PreparedTransient> {
     check_ds(ds_m)?;
+    if tier != "t2" && tier != "t3" {
+        return Err(PyValueError::new_err(format!(
+            "transient tier must be `t2` or `t3`; got `{tier}`"
+        )));
+    }
     if !(speed_margin > 0.0 && speed_margin <= 1.0) {
         return Err(PyValueError::new_err(format!(
             "speed_margin must lie in (0, 1]; got {speed_margin}"
@@ -653,7 +815,7 @@ pub(crate) fn prepare_transient(
         }
     }
     // Sim FIRST: its `allow_degraded` feeds the load pipeline (the ers↔battery integrity checks).
-    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, Some("t2"))?;
+    let sim_cfg = build_sim(&FsLoader::new(vehicle_dir), sim, Some(tier))?;
     let (vl, resolved) =
         resolve_with_overrides_opts(vehicle_dir, overrides, sim_cfg.allow_degraded)?;
     let base_conditions = match load_conditions("conditions.yaml", &vl) {
@@ -730,9 +892,34 @@ pub(crate) fn prepare_transient(
         battery_present: pack.is_some(),
         ..outlap_vehicle::T2Options::default()
     };
-    let blocks: outlap_transient::T2Blocks<f64> =
-        outlap_vehicle::assemble_t2(&t1v, &resolved.spec, &mut interner, &t2_opts, &mut notes)
-            .into();
+    let blocks: PreparedBlocks = if tier == "t3" {
+        // Resolve the tyre vertical spring from the `.tyr` `vertical` block (→ VERTICAL_STIFFNESS map
+        // key → 250 kN/m), like the tyre-thermal geometry, and hand it to `assemble_t3` via T3Options.
+        let (kzf, czf) = tyre_vertical(resolved.spec.tires.front.as_str(), &vl)?;
+        let (kzr, czr) = tyre_vertical(resolved.spec.tires.rear.as_str(), &vl)?;
+        let t3_opts = outlap_vehicle::T3Options {
+            base: t2_opts,
+            tyre_vertical_stiffness_n_per_m: [kzf, kzr],
+            tyre_vertical_damping_n_s_per_m: [czf, czr],
+            ..outlap_vehicle::T3Options::default()
+        };
+        let parts =
+            outlap_vehicle::assemble_t3(&t1v, &resolved.spec, &mut interner, &t3_opts, &mut notes)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        notes.push(
+            "T3 14-DOF tier: sprung heave/pitch/roll + four unsprung verticals are live; per-wheel \
+             F_z comes from the tyre vertical spring (not the algebraic load transfer), aero is \
+             evaluated at the instantaneous ride heights (pitch-under-braking → aero-balance shift), \
+             and the T2 crest-unloading floor retires with the suspension travel (§6.1)."
+                .to_owned(),
+        );
+        PreparedBlocks::T3(parts.into())
+    } else {
+        PreparedBlocks::T2(
+            outlap_vehicle::assemble_t2(&t1v, &resolved.spec, &mut interner, &t2_opts, &mut notes)
+                .into(),
+        )
+    };
 
     // Fuel-mass slow state (M6/PR5, §8.1): the blocks are assembled at the full-tank m₀, so the T2
     // burn drains from there. The ICE brake-thermal efficiency is a representative scalar sampled
@@ -924,8 +1111,7 @@ pub(crate) fn prepare_transient(
             &mut notes,
         )? {
             Some(coupling) => {
-                let r = blocks.powertrain.radius;
-                let mean_radius = ((r[0] + r[1] + r[2] + r[3]) / 4.0).max(0.1);
+                let mean_radius = blocks.mean_wheel_radius();
                 let max_brake_force_n = t2_opts.max_brake_torque_nm / mean_radius;
                 let schedule_s = schedule_stations(length, n_stations);
                 notes.push(format!(
@@ -1045,7 +1231,7 @@ fn schedule_stations(length: f64, n: usize) -> Vec<f64> {
 ///
 /// Returns a time-indexed [`TransientLap`]. Use `outlap.transient_lap_dataset` for an xarray view.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false, r#override = false, us_schedule = None))]
+#[pyo3(signature = (vehicle_dir, track, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = false, r#override = false, us_schedule = None, tier = "t2"))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn solve_transient_lap(
     vehicle_dir: &str,
@@ -1071,6 +1257,8 @@ pub(crate) fn solve_transient_lap(
     // A `u(s)` control schedule `{deploy_regen, override_flag?, lift_point?, shift_map_id?}` (arrays
     // over s) driving the manager instead of the greedy rule-based policy.
     us_schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
+    // The transient solver tier: `"t2"` (double-track) or `"t3"` (14-DOF suspension).
+    tier: &str,
 ) -> PyResult<TransientLap> {
     let us_schedule = us_schedule_from_py(us_schedule)?;
     let PreparedTransient {
@@ -1105,48 +1293,46 @@ pub(crate) fn solve_transient_lap(
         None,
         r#override,
         us_schedule,
+        tier,
     )?;
     let start_s = cfg.start_s;
-    let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
-    if let Some((pack, state)) = pack {
-        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
-    }
-    if let Some(ers) = ers {
-        solver = solver.with_ers_governor(Box::new(ers));
-    }
-    if let Some(shifter) = shifter {
-        solver = solver.with_shifter(shifter);
-    }
-    solver = solver.with_lift(lift);
-    if let Some(stack) = tire_stack {
-        solver = solver.with_tire_thermal(stack);
-    }
-    if let Some((fuel_slow, initial_kg)) = fuel {
-        solver = solver.with_fuel(fuel_slow, initial_kg);
-    }
-
-    let lap = solver.run(start_s + length, MAX_TRANSIENT_STEPS);
-    let diverged = solver.diverged();
-    let provenance = solver.provenance();
+    let tier = blocks.tier();
+    let subsystems = LapSubsystems {
+        pack,
+        ers,
+        shifter,
+        lift,
+        tire_stack,
+        fuel,
+    };
+    // Branch on the tier ONCE (per lap, not per step) into the monomorphised generic solver.
+    let (lap, diverged, provenance) = match blocks {
+        PreparedBlocks::T2(b) => {
+            run_solver_lap(b, line, &interner, cfg, subsystems, start_s + length)
+        }
+        PreparedBlocks::T3(b) => {
+            run_solver_lap(b, line, &interner, cfg, subsystems, start_s + length)
+        }
+    };
     // `run` breaks the moment the recorded arc length passes the finish line, so the last sample
     // tells us whether the car got there inside the step budget.
     let completed = lap.s.last().copied().unwrap_or(0.0) >= start_s + length;
     if diverged {
-        notes.push(
-            "T2 lap diverged: the closed loop left the physical envelope (a spin the driver could \
-             not catch) and the run stopped early. The trace is truncated and `lap_time_s` is not a \
-             lap time. Try a lower `speed_margin`"
-                .to_owned(),
-        );
+        notes.push(format!(
+            "{tier} lap diverged: the closed loop left the physical envelope (a spin the driver \
+             could not catch) and the run stopped early. The trace is truncated and `lap_time_s` is \
+             not a lap time. Try a lower `speed_margin`"
+        ));
     } else if !completed {
         notes.push(format!(
-            "T2 lap did not reach the finish line within {MAX_TRANSIENT_STEPS} steps — the trace is \
-             truncated and `lap_time_s` is not a lap time"
+            "{tier} lap did not reach the finish line within {MAX_TRANSIENT_STEPS} steps — the \
+             trace is truncated and `lap_time_s` is not a lap time"
         ));
     }
 
     let has_slow = !lap.state_of_charge.is_empty();
     let has_tire = !lap.tire_surface_c.is_empty();
+    let has_susp = !lap.heave_m.is_empty();
     Ok(TransientLap {
         t: lap.t,
         s: lap.s,
@@ -1184,8 +1370,14 @@ pub(crate) fn solve_transient_lap(
         tire_wear_mm: has_tire.then(|| flat4(&lap.tire_wear_mm)),
         tire_damage: has_tire.then(|| flat4(&lap.tire_damage)),
         tire_grip: has_tire.then(|| flat4(&lap.tire_grip)),
+        heave_m: has_susp.then(|| lap.heave_m.clone()),
+        pitch_rad: has_susp.then(|| lap.pitch_rad.clone()),
+        roll_rad: has_susp.then(|| lap.roll_rad.clone()),
+        ride_height_f_m: has_susp.then(|| lap.ride_height_f_m.clone()),
+        ride_height_r_m: has_susp.then(|| lap.ride_height_r_m.clone()),
+        suspension_travel_m: has_susp.then(|| flat4(&lap.suspension_travel_m)),
         lap_time_s: lap.lap_time_s,
-        tier: "t2".to_owned(),
+        tier: tier.to_owned(),
         fz_coupling: fz_coupling_str(provenance.fz_coupling),
         flat_track: flat,
         dt_s: provenance.dt_s,
@@ -1327,7 +1519,7 @@ impl TransientStint {
 /// line table wraps `s`, so the geometry + reference profile repeat every lap). Returns per-lap
 /// summaries: lap time, per-wheel end-of-lap + peak tyre state, and end-of-lap pack state.
 #[pyfunction]
-#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = true, initial_tire_temp_c = None, r#override = false, us_schedule = None))]
+#[pyo3(signature = (vehicle_dir, track, n_laps, ds_m = DEFAULT_DS_M, raceline_ds_m = None, raceline_generator = None, raceline_iterations = None, overrides = None, conditions = None, sim = None, speed_margin = DEFAULT_SPEED_MARGIN, initial_soc = None, tire_thermal = true, initial_tire_temp_c = None, r#override = false, us_schedule = None, tier = "t2"))]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn solve_transient_stint(
     vehicle_dir: &str,
@@ -1346,6 +1538,7 @@ pub(crate) fn solve_transient_stint(
     initial_tire_temp_c: Option<f64>,
     r#override: bool,
     us_schedule: Option<&Bound<'_, pyo3::types::PyDict>>,
+    tier: &str,
 ) -> PyResult<TransientStint> {
     if !(1..=MAX_STINT_LAPS).contains(&n_laps) {
         return Err(PyValueError::new_err(format!(
@@ -1385,33 +1578,30 @@ pub(crate) fn solve_transient_stint(
         initial_tire_temp_c,
         r#override,
         us_schedule,
+        tier,
     )?;
+    let tier = blocks.tier();
     notes.push(format!(
-        "T2 stint: {n_laps} laps integrated continuously (one run, no re-seed) — the per-wheel \
+        "{tier} stint: {n_laps} laps integrated continuously (one run, no re-seed) — the per-wheel \
          tyre-thermal ring + wear and the battery SoC carry across the start/finish line with no \
          reset (the line table wraps s, so the road geometry + speed reference repeat each lap)."
     ));
-    let mut solver = outlap_transient::TransientSolver::new(blocks, line, &interner, cfg);
-    if let Some((pack, state)) = pack {
-        solver = solver.with_slow_stack(Box::new(PackSlowStack { pack, state }));
-    }
-    if let Some(ers) = ers {
-        solver = solver.with_ers_governor(Box::new(ers));
-    }
-    if let Some(shifter) = shifter {
-        solver = solver.with_shifter(shifter);
-    }
-    solver = solver.with_lift(lift);
-    if let Some(stack) = tire_stack {
-        solver = solver.with_tire_thermal(stack);
-    }
-    if let Some((fuel_slow, initial_kg)) = fuel {
-        solver = solver.with_fuel(fuel_slow, initial_kg);
-    }
-
-    let (lap, lap_end_idx) = solver.run_laps(length, n_laps, MAX_TRANSIENT_STEPS);
-    let diverged = solver.diverged();
-    let provenance = solver.provenance();
+    let subsystems = LapSubsystems {
+        pack,
+        ers,
+        shifter,
+        lift,
+        tire_stack,
+        fuel,
+    };
+    let (lap, lap_end_idx, diverged, provenance) = match blocks {
+        PreparedBlocks::T2(b) => {
+            run_solver_stint(b, line, &interner, cfg, subsystems, length, n_laps)
+        }
+        PreparedBlocks::T3(b) => {
+            run_solver_stint(b, line, &interner, cfg, subsystems, length, n_laps)
+        }
+    };
     let laps_done = lap_end_idx.len();
     let completed = laps_done == n_laps && !diverged;
     if diverged {
