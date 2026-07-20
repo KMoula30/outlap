@@ -351,6 +351,10 @@ pub struct TransientLap {
     // Slow states; `None` when the car has no battery (or its files are absent).
     state_of_charge: Option<Vec<f64>>,
     pack_temp_c: Option<Vec<f64>>,
+    /// Remaining fuel mass at the end of the lap, kg; `None` when the car carries no `fuel:` block
+    /// (§8.1, M6/PR5). Fuel burned over the lap = `fuel.initial_kg − fuel_remaining_kg`.
+    #[pyo3(get)]
+    fuel_remaining_kg: Option<f64>,
     // Per-wheel tyre-thermal channels (row-major `n × 4`, FL/FR/RL/RR); `None` unless the M5
     // tyre-thermal stack was attached (`tire_thermal=True`).
     tire_surface_c: Option<Vec<f64>>,
@@ -713,6 +717,7 @@ fn run_solver_lap<B: outlap_transient::TierBlocks<f64>>(
     s_end: f64,
 ) -> (
     outlap_transient::TransientLap<f64>,
+    Option<f64>,
     bool,
     outlap_transient::Provenance,
 ) {
@@ -734,7 +739,14 @@ fn run_solver_lap<B: outlap_transient::TierBlocks<f64>>(
         solver = solver.with_fuel(fuel_slow, initial_kg);
     }
     let lap = solver.run(s_end, MAX_TRANSIENT_STEPS);
-    (lap, solver.diverged(), solver.provenance())
+    // Capture the terminal fuel mass before the solver is dropped (§8.1, M6/PR5 — the T2 result
+    // arrays do not carry fuel, so the parity gate #4 reads the end-of-lap scalar from here).
+    (
+        lap,
+        solver.fuel_remaining_kg(),
+        solver.diverged(),
+        solver.provenance(),
+    )
 }
 
 /// Build the tier-generic solver, attach the slow subsystems, and run an `n_laps` stint continuously.
@@ -1310,7 +1322,7 @@ pub(crate) fn solve_transient_lap(
         fuel,
     };
     // Branch on the tier ONCE (per lap, not per step) into the monomorphised generic solver.
-    let (lap, diverged, provenance) = match blocks {
+    let (lap, fuel_remaining_kg, diverged, provenance) = match blocks {
         PreparedBlocks::T2(b) => {
             run_solver_lap(b, line, &interner, cfg, subsystems, start_s + length)
         }
@@ -1368,6 +1380,7 @@ pub(crate) fn solve_transient_lap(
         force_lat_n: flat4(&lap.fy),
         state_of_charge: has_slow.then(|| lap.state_of_charge.clone()),
         pack_temp_c: has_slow.then(|| lap.pack_temp_c.clone()),
+        fuel_remaining_kg,
         tire_surface_c: has_tire.then(|| flat4(&lap.tire_surface_c)),
         tire_carcass_c: has_tire.then(|| flat4(&lap.tire_carcass_c)),
         tire_gas_c: has_tire.then(|| flat4(&lap.tire_gas_c)),
@@ -1423,6 +1436,16 @@ pub struct TransientStint {
     tire_peak_surface_c: Option<Vec<f64>>,
     /// Per-lap end-of-lap pack state of charge (n_laps); `None` when the car carries no battery.
     state_of_charge: Option<Vec<f64>>,
+    /// Per-lap minimum / maximum on-track pack SoC (n_laps); `None` when no battery. The within-lap
+    /// swing (`soc_max − soc_min`) makes the harvest/recharge recovery visible on the stint surface
+    /// (the T2 half of the M6 PR8 gate #2 "SoC increases during harvest" clause).
+    soc_min: Option<Vec<f64>>,
+    soc_max: Option<Vec<f64>>,
+    /// Per-lap electrical ERS deploy / harvest energy, MJ (n_laps); `None` when no battery. Integrated
+    /// from the per-step `traction_power_w` / `regen_power_w` (CU-K DC bus) — the honest per-lap
+    /// net-charge quantity for the closure check (gate #2) and the energy story.
+    deploy_mj: Option<Vec<f64>>,
+    harvest_mj: Option<Vec<f64>>,
     /// Per-lap end-of-lap pack temperature, °C (n_laps); `None` when no battery.
     pack_temp_c: Option<Vec<f64>>,
     /// The resolved tier (always `"t2"`).
@@ -1508,6 +1531,22 @@ impl TransientStint {
     /// Per-lap end-of-lap pack state of charge (shape `n_laps`), or `None` without a battery.
     fn state_of_charge<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.state_of_charge.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Per-lap minimum on-track pack SoC (shape `n_laps`), or `None` without a battery.
+    fn soc_min<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.soc_min.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Per-lap maximum on-track pack SoC (shape `n_laps`), or `None` without a battery.
+    fn soc_max<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.soc_max.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Per-lap electrical ERS deploy energy, MJ (shape `n_laps`), or `None` without a battery.
+    fn deploy_mj<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.deploy_mj.clone().map(|v| v.into_pyarray(py))
+    }
+    /// Per-lap electrical ERS harvest energy, MJ (shape `n_laps`), or `None` without a battery.
+    fn harvest_mj<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.harvest_mj.clone().map(|v| v.into_pyarray(py))
     }
     /// Per-lap end-of-lap pack temperature, °C (shape `n_laps`), or `None` without a battery.
     fn pack_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
@@ -1626,6 +1665,8 @@ pub(crate) fn solve_transient_stint(
     let (mut surf, mut carc, mut gas) = (Vec::new(), Vec::new(), Vec::new());
     let (mut wear, mut dmg, mut grip, mut peak) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut soc, mut temp) = (Vec::new(), Vec::new());
+    let (mut soc_lo, mut soc_hi) = (Vec::new(), Vec::new());
+    let (mut deploy, mut harvest) = (Vec::new(), Vec::new());
     let mut prev_t = 0.0;
     for (k, &end_idx) in lap_end_idx.iter().enumerate() {
         let start_idx = if k == 0 { 0 } else { lap_end_idx[k - 1] };
@@ -1649,6 +1690,24 @@ pub(crate) fn solve_transient_stint(
         if has_slow {
             soc.push(lap.state_of_charge[end_idx]);
             temp.push(lap.pack_temp_c[end_idx]);
+            // Per-lap SoC extremes (the within-lap swing = the harvest recovery) and the electrical
+            // deploy/harvest energy integrals (trapezoidal on the CU-K DC power channels).
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &v in &lap.state_of_charge[start_idx..=end_idx] {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+            soc_lo.push(lo);
+            soc_hi.push(hi);
+            let (mut dep_j, mut har_j) = (0.0, 0.0);
+            for i in (start_idx + 1)..=end_idx {
+                let dt = lap.t[i] - lap.t[i - 1];
+                dep_j += 0.5 * (lap.traction_power_w[i - 1] + lap.traction_power_w[i]) * dt;
+                har_j += 0.5 * (lap.regen_power_w[i - 1] + lap.regen_power_w[i]) * dt;
+            }
+            deploy.push(dep_j * 1e-6);
+            harvest.push(har_j * 1e-6);
         }
     }
 
@@ -1664,6 +1723,10 @@ pub(crate) fn solve_transient_stint(
         tire_grip: has_tire.then_some(grip),
         tire_peak_surface_c: has_tire.then_some(peak),
         state_of_charge: has_slow.then_some(soc),
+        soc_min: has_slow.then_some(soc_lo),
+        soc_max: has_slow.then_some(soc_hi),
+        deploy_mj: has_slow.then_some(deploy),
+        harvest_mj: has_slow.then_some(harvest),
         pack_temp_c: has_slow.then_some(temp),
         tier: "t2".to_owned(),
         fz_coupling: fz_coupling_str(provenance.fz_coupling),

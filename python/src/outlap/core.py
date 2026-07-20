@@ -139,6 +139,16 @@ CHANNEL_ATTRS: dict[str, dict[str, str]] = {
         "long_name": "ERS electrical harvest power (realized, all Recharge paths)",
     },
     "state_of_charge": {"units": "1", "long_name": "pack state of charge"},
+    "soc_min": {"units": "1", "long_name": "per-lap minimum on-track pack SoC"},
+    "soc_max": {"units": "1", "long_name": "per-lap maximum on-track pack SoC"},
+    "deploy_energy_mj": {
+        "units": "MJ",
+        "long_name": "per-lap electrical ERS deploy energy",
+    },
+    "harvest_energy_mj": {
+        "units": "MJ",
+        "long_name": "per-lap electrical ERS harvest energy",
+    },
     "machine_temp_c": {"units": "°C", "long_name": "machine winding temperature"},
     "pack_temp_c": {"units": "°C", "long_name": "pack temperature"},
     "fuel_mass_kg": {"units": "kg", "long_name": "on-board fuel mass"},
@@ -554,6 +564,13 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
             "flat_track": int(lap.flat_track),
             "completed": int(lap.completed),
             "notes": tuple(lap.notes),
+            # End-of-lap fuel mass, kg — omitted entirely when the car carries no `fuel:` block
+            # (netCDF attrs have no null type).
+            **(
+                {"fuel_remaining_kg": lap.fuel_remaining_kg}
+                if lap.fuel_remaining_kg is not None
+                else {}
+            ),
         },
     )
 
@@ -631,6 +648,18 @@ def stint_dataset(stint: QssStint) -> xr.Dataset:
             "lap",
             stint.pack_temp_c(),
             _attrs("pack_temp_c", prefix="end-of-lap "),
+        )
+    # The per-lap energy-manager ledger (deploy/harvest MJ) + on-track SoC extremes, when the 2026
+    # manager governed the stint — the closure quantity and the harvest/recharge story.
+    deploy = stint.deploy_mj()
+    if deploy is not None:
+        data["soc_min"] = ("lap", stint.soc_min(), _attrs("soc_min"))
+        data["soc_max"] = ("lap", stint.soc_max(), _attrs("soc_max"))
+        data["deploy_energy_mj"] = ("lap", deploy, _attrs("deploy_energy_mj"))
+        data["harvest_energy_mj"] = (
+            "lap",
+            stint.harvest_mj(),
+            _attrs("harvest_energy_mj"),
         )
     fuel = stint.fuel_mass_kg()
     if fuel is not None:
@@ -723,6 +752,20 @@ def transient_stint_dataset(stint: TransientStint) -> xr.Dataset:
             "lap",
             stint.pack_temp_c(),
             _attrs("pack_temp_c", prefix=eol),
+        )
+        # Per-lap on-track SoC extremes (the within-lap swing = the harvest recovery, visible on the
+        # T2 stint surface for the M6 PR8 gate #2 check) + the electrical deploy/harvest energy.
+        data["soc_min"] = ("lap", stint.soc_min(), _attrs("soc_min"))
+        data["soc_max"] = ("lap", stint.soc_max(), _attrs("soc_max"))
+        data["deploy_energy_mj"] = (
+            "lap",
+            stint.deploy_mj(),
+            _attrs("deploy_energy_mj"),
+        )
+        data["harvest_energy_mj"] = (
+            "lap",
+            stint.harvest_mj(),
+            _attrs("harvest_energy_mj"),
         )
 
     return xr.Dataset(

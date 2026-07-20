@@ -665,6 +665,13 @@ pub struct QssStint {
     // Per-`(lap × station)` fuel mass, kg (drains lap-over-lap as the ICE burns); `None` when the
     // car carries no `fuel:` block (§8.1, M6/PR5, D-M6-4).
     fuel_mass_kg: Option<Vec<f64>>,
+    // Per-lap on-track SoC extremes + electrical ERS deploy/harvest energy, MJ (n_laps); `None`
+    // unless the 2026 energy manager governed the stint. `deploy − harvest` is the per-lap net
+    // electrical charge — the honest closure quantity for the M6 PR8 gate #2 check.
+    soc_min: Option<Vec<f64>>,
+    soc_max: Option<Vec<f64>>,
+    deploy_mj: Option<Vec<f64>>,
+    harvest_mj: Option<Vec<f64>>,
     // Per-lap END-of-lap pack + machine temperatures, °C (n_laps); `None` when absent (machine temp
     // is never surfaced under an energy manager — D-M6-10).
     pack_temp_c: Option<Vec<f64>>,
@@ -763,6 +770,22 @@ impl QssStint {
         self.fuel_mass_kg
             .as_ref()
             .map(|f| array2d(py, f, self.n_laps, n))
+    }
+    /// Per-lap minimum on-track pack SoC (`n_laps`), or `None` without an energy manager.
+    fn soc_min<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.soc_min.as_ref().map(|f| f.clone().into_pyarray(py))
+    }
+    /// Per-lap maximum on-track pack SoC (`n_laps`), or `None` without an energy manager.
+    fn soc_max<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.soc_max.as_ref().map(|f| f.clone().into_pyarray(py))
+    }
+    /// Per-lap electrical ERS deploy energy, MJ (`n_laps`), or `None` without an energy manager.
+    fn deploy_mj<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.deploy_mj.as_ref().map(|f| f.clone().into_pyarray(py))
+    }
+    /// Per-lap electrical ERS harvest energy, MJ (`n_laps`), or `None` without an energy manager.
+    fn harvest_mj<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.harvest_mj.as_ref().map(|f| f.clone().into_pyarray(py))
     }
     /// End-of-lap pack temperature, °C (`n_laps`), or `None` when the car carries no battery.
     fn pack_temp_c<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
@@ -928,9 +951,11 @@ pub(crate) fn solve_stint(
     let mut soc_flat: Vec<f64> = Vec::new();
     let mut fuel_flat: Vec<f64> = Vec::new();
     let (mut pack_temp, mut machine_temp) = (Vec::new(), Vec::new());
+    let (mut soc_lo, mut soc_hi) = (Vec::new(), Vec::new());
+    let (mut deploy_mj, mut harvest_mj) = (Vec::new(), Vec::new());
     let mut have_tire = false;
     let (mut have_soc, mut have_pack_temp, mut have_machine_temp) = (false, false, false);
-    let mut have_fuel = false;
+    let (mut have_fuel, mut have_ers) = (false, false);
 
     for lap in &result.laps {
         lap_time_s.push(lap.lap_time_s);
@@ -947,6 +972,15 @@ pub(crate) fn solve_stint(
         if let Some(s) = &lap.slow {
             soc_flat.extend_from_slice(&s.state_of_charge);
             have_soc = true;
+            // The per-lap energy-manager ledger (was dropped before M6 PR8): surface the deploy /
+            // harvest MJ and the on-track SoC extremes the closure gate reads.
+            if let Some(e) = &s.ers {
+                deploy_mj.push(e.ledger_deploy_j * 1e-6);
+                harvest_mj.push(e.ledger_harvest_j * 1e-6);
+                soc_lo.push(e.soc_min);
+                soc_hi.push(e.soc_max);
+                have_ers = true;
+            }
         }
         if let Some(f) = &lap.fuel {
             fuel_flat.extend_from_slice(&f.fuel_mass_kg);
@@ -975,6 +1009,10 @@ pub(crate) fn solve_stint(
         tire_damage: have_tire.then_some(dmg),
         tire_grip: have_tire.then_some(grip),
         state_of_charge: have_soc.then_some(soc_flat),
+        soc_min: have_ers.then_some(soc_lo),
+        soc_max: have_ers.then_some(soc_hi),
+        deploy_mj: have_ers.then_some(deploy_mj),
+        harvest_mj: have_ers.then_some(harvest_mj),
         fuel_mass_kg: have_fuel.then_some(fuel_flat),
         pack_temp_c: have_pack_temp.then_some(pack_temp),
         machine_temp_c: have_machine_temp.then_some(machine_temp),
