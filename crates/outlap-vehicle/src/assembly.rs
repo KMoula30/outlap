@@ -24,7 +24,9 @@ use outlap_qss::T1Vehicle;
 use outlap_schema::vehicle::{AxleKc, Driver as DriverCfg, Vehicle};
 
 use crate::chassis::{Chassis, ChassisT3, T3RoadVertical};
-use crate::control::{drive_weights, AxleRegen, Driver, Powertrain, RegenParams, TorqueVectoring};
+use crate::control::{
+    drive_weights, AxleRegen, Driver, Powertrain, RegenParams, SteerSource, TorqueVectoring,
+};
 use crate::forces::{Aero, AeroT3, LoadTransfer, RelaxProvider, T3Load, Tire};
 use crate::params::{ActuationChannels, ChassisParams, RoadChannels, SuspensionParams, G};
 
@@ -203,6 +205,7 @@ pub fn driver(t1: &T1Vehicle, spec: &Vehicle, road: RoadChannels, opts: &T2Optio
         traction_slip_gain: cfg.traction_slip_gain(),
         integral_limit: opts.integral_limit,
         road,
+        steer_source: SteerSource::default(),
     }
 }
 
