@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+// Release-only: a full T3 maneuver is far too slow to gate in debug (like the perf tests). The whole
+// file is compiled out in debug builds so its helpers do not read as dead code.
+#![cfg(not(debug_assertions))]
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -97,7 +100,6 @@ fn skidpad_steady_yaw(v: f64, r: f64, delta: f64) -> f64 {
     yaw_sum / n
 }
 
-#[cfg(not(debug_assertions))]
 #[test]
 fn t3_yaw_rate_gain_matches_the_commonroad_single_track() {
     let o = oracle();
@@ -143,7 +145,6 @@ fn t3_yaw_rate_gain_matches_the_commonroad_single_track() {
 /// The transient step-steer vs the CommonRoad ST golden is RECORDED, not gated (D-M6-6): the ST
 /// model has no roll/unsprung dynamics, so the 14-DOF rise differs. This pins the golden is readable
 /// and the steady value it reaches agrees with the analytic oracle (the asserted part above).
-#[cfg(not(debug_assertions))]
 #[test]
 fn commonroad_step_steer_golden_is_present_and_consistent() {
     let path = PathBuf::from(concat!(
