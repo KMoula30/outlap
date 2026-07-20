@@ -92,6 +92,18 @@ pub struct TransientLap<T> {
     /// Per-wheel total grip multiplier `λ_μ,total` (grip window × wear cliff × thermal damage), the
     /// factor scaling `LMUX`/`LMUY` this step (empty without a tire-thermal stack).
     pub tire_grip: Vec<Wheels<T>>,
+    /// Sprung heave `z`, m (+up) — T3 only (empty at T2).
+    pub heave_m: Vec<T>,
+    /// Sprung pitch `θ`, rad (+nose-down) — T3 only.
+    pub pitch_rad: Vec<T>,
+    /// Sprung roll `φ`, rad (+roll right) — T3 only.
+    pub roll_rad: Vec<T>,
+    /// Front ride height, m — T3 only.
+    pub ride_height_f_m: Vec<T>,
+    /// Rear ride height, m — T3 only.
+    pub ride_height_r_m: Vec<T>,
+    /// Per-wheel suspension compression (travel) `δ`, m (+compressed) — T3 only.
+    pub suspension_travel_m: Vec<Wheels<T>>,
     /// Total lap time (last `t` on a completed lap), s.
     pub lap_time_s: T,
 }
@@ -135,6 +147,12 @@ impl<T: Float> Default for TransientLap<T> {
             tire_wear_mm: Vec::new(),
             tire_damage: Vec::new(),
             tire_grip: Vec::new(),
+            heave_m: Vec::new(),
+            pitch_rad: Vec::new(),
+            roll_rad: Vec::new(),
+            ride_height_f_m: Vec::new(),
+            ride_height_r_m: Vec::new(),
+            suspension_travel_m: Vec::new(),
             lap_time_s: T::zero(),
         }
     }
