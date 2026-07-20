@@ -43,6 +43,8 @@ the sweep stays small (|K| < 6e-4 rad·s²/m), i.e. the 14-DOF collapses to esse
 single-track benchmark. A genuinely understeering passenger car sits an order of magnitude higher
 (K ~ 2–5e-3), so this is the regression guard as well as the physics claim.
 
+![Chassis 14-DOF yaw-rate gain + step-steer vs CommonRoad BMW 320i](img/chassis_yaw_gain.png)
+
 ## Yaw-rate-gain decomposition — why ≤ 3 % is recorded, not asserted
 
 The tyres are matched for an analytically neutral car (`C_αf/C_αr = b/a` ⇒ K = 0), yet the 14-DOF

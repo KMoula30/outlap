@@ -35,6 +35,8 @@ physics-driven floor from lap 2 on — **not** the mid-window seed a re-seeding 
 honest net-consumption signal is the SoC **state**, not the ledger: a pack rejects harvest at the
 window ceiling, so the *attempted*-harvest ledger can exceed deploy while the pack still net-drains.
 
+![10-lap stint SoC + per-lap ERS energy](img/ers_stint_soc.png)
+
 ## Gate #3 — parity gate #4 (fuel + ERS energy per lap, T0 vs T2)
 
 f1_2026, smooth, frozen tyres, shared `initial_soc`
@@ -57,6 +59,8 @@ burns less fuel per lap. That is a driver-competitiveness gap, not an energy-acc
 harvest agreement isolates the two. This is separate from the M5 f1_2026 T2 stint-decay caveat
 (0.16 s/lap on tyres), which is a tyre effect, not an energy effect. A wide tripwire (≤ 45 %) guards
 against a wiring regression.
+
+![Fuel + ERS energy per lap, T0 vs T2](img/ers_parity_energy.png)
 
 ## Recorded limitation — the QSS↔T2 EV-stint asymmetry
 

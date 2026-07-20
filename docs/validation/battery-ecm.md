@@ -41,6 +41,12 @@ RMS is **≤ 1 %** of the mean reference voltage (§13 battery row). The measure
 is a genuine cross-implementation check of outlap's parameterisation, Ns×Np scaling, SoC/temperature
 indexing, and terminal-voltage assembly, not a re-statement of its own closed form.
 
+![Battery ECM pulse response vs NREL thevenin](img/battery_ecm_pulse.png)
+
+The outlap exact-exponential ECM (orange, dashed) is indistinguishable from the NREL reference (blue)
+across the ±1C/±2C charge+discharge pulse train; the residual (bottom) stays within ±0.01 mV on a
+~3.6 V signal. Figure: `python/tools/plot_pr8_validation.py` (run against a release wheel).
+
 ## Notes
 
 The comparison is isothermal with an ECM constant in SoC over the small (~0.006) pulse excursion, so
