@@ -18,12 +18,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from outlap.core import (
     Track,
     min_curvature,
     solve_lap,
+    solve_lap_dataset,
     solve_transient_lap,
     transient_lap_dataset,
 )
@@ -114,4 +116,87 @@ def test_t2_stays_inside_the_t1_hull(car: str, track: Track) -> None:
     # A sanity floor on the recorded delta: T2 is slower (driver margin), never implausibly faster.
     assert lap_delta_pct > -5.0, (
         f"{car}: T2 implausibly faster than T0 ({lap_delta_pct:+.1f}%)"
+    )
+
+
+# --- Parity gate #4 (M6 PR8): fuel + ERS energy per lap, T0 vs T2 --------------------------------
+
+F1_2026 = str(_DATA / "vehicles/f1_2026")
+ENERGY_SEED = 0.6  # a shared, explicit initial SoC for the cross-tier comparison.
+
+
+def _integral(power: np.ndarray, dt: np.ndarray) -> float:
+    """Trapezoidal ∫ P dt over unequal steps, in joules → MJ."""
+    return float((0.5 * (power[:-1] + power[1:]) * dt).sum()) / 1.0e6
+
+
+def test_energy_parity_gate4(track: Track) -> None:
+    """Parity gate #4 — T0 vs T2 fuel + ERS energy per lap (f1_2026, smooth, frozen tyres, shared
+    initial_soc). PRE-AUTHORIZED assert-OR-record (D-M6-11).
+
+    The energy-manager RULES are shared between the tiers (one `outlap-powertrain` rulebook), so the
+    part that is a pure rule — the per-lap Recharge budget — agrees to ≤ 1 % and is ASSERTED. The
+    deploy and fuel per lap are RECORDED, not gated: they are dominated by the T2 driver corner margin
+    (the named residual), which runs a slower, lower-throttle line → less MGU-K deploy AND less fuel
+    burned. That is a driver-competitiveness gap, not an energy-accounting error — the harvest
+    agreement is the evidence the accounting itself is sound.
+    """
+    rl = min_curvature(track, 1.1)
+    line = rl.line()
+    t0 = solve_lap_dataset(
+        F1_2026, line, tier="t0", sim=PARITY_SIM, initial_soc=ENERGY_SEED
+    )
+    t2 = solve_lap_dataset(
+        F1_2026,
+        line,
+        tier="t2",
+        sim=PARITY_SIM,
+        initial_soc=ENERGY_SEED,
+        speed_margin=0.85,
+    )
+
+    # Fuel burned, kg. Energy = mass × LHV at the SHARED lhv, so the mass ratio IS the energy ratio.
+    fuel_init = float(t0["fuel_mass_kg"].values[0])
+    assert fuel_init == pytest.approx(80.0, abs=0.5), (
+        "f1_2026 starts on its 80 kg race fuel load"
+    )
+    fuel0 = fuel_init - float(t0["fuel_mass_kg"].values[-1])
+    fuel2 = fuel_init - float(t2.attrs["fuel_remaining_kg"])
+
+    # ERS deploy / harvest energy per lap, MJ. T0 is distance-indexed (dt = ds/v); T2 is time-indexed.
+    v0 = np.maximum(t0["v"].values, 1.0)
+    dt0 = np.diff(t0["s"].values) / v0[:-1]
+    dep0 = _integral(t0["deploy_power_w"].values, dt0)
+    har0 = _integral(t0["harvest_power_w"].values, dt0)
+    dt2 = np.diff(t2["time"].values)
+    dep2 = _integral(t2["traction_power_w"].values, dt2)
+    har2 = _integral(t2["regen_power_w"].values, dt2)
+
+    fuel_pct = 100.0 * abs(fuel2 - fuel0) / fuel0
+    dep_pct = 100.0 * abs(dep2 - dep0) / dep0
+    har_pct = 100.0 * abs(har2 - har0) / har0
+    print(
+        f"[gate4] fuel   T0={fuel0:.3f}kg T2={fuel2:.3f}kg Δ={fuel_pct:+.1f}% (recorded — driver margin)\n"
+        f"[gate4] deploy T0={dep0:.2f}MJ T2={dep2:.2f}MJ Δ={dep_pct:+.1f}% (recorded — driver margin)\n"
+        f"[gate4] harvest T0={har0:.2f}MJ T2={har2:.2f}MJ Δ={har_pct:+.2f}% (asserted ≤1% — shared budget)"
+    )
+
+    # Sanity: both tiers genuinely deploy, harvest, and burn fuel (the accounting is alive on both).
+    assert dep0 > 1.0 and dep2 > 1.0, "both tiers deploy the MGU-K"
+    assert har0 > 1.0 and har2 > 1.0, "both tiers harvest"
+    assert fuel0 > 0.0 and fuel2 > 0.0, "both tiers burn fuel"
+
+    # ASSERTED (≤1%): the per-lap Recharge budget is a shared rule → the harvest energy agrees.
+    assert har_pct <= 1.0, (
+        f"harvest energy per lap disagrees by {har_pct:.2f}% > 1% — the shared per-lap Recharge "
+        "budget rule is not being enforced identically across tiers"
+    )
+    # RECORDED (tripwire only): the deploy + fuel residuals are the driver-margin profile difference.
+    assert dep_pct < 45.0, (
+        f"deploy energy residual {dep_pct:.1f}% is larger than the driver-margin decomposition "
+        "explains — check the ERS deploy wiring, not just the driver profile"
+    )
+    assert fuel_pct < 45.0, (
+        f"fuel residual {fuel_pct:.1f}% is larger than the driver-margin decomposition explains — "
+        "check the fuel burn wiring"
     )
