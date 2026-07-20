@@ -20,7 +20,7 @@ jobs:
       # the ≤50 ms QSS-lap wall-clock medians + the dhat zero-alloc gate on the same kernels, plus
       # the T2 transient step's zero-alloc + throughput gates and the QSS↔T2 hull-containment parity.
       - run: cargo test --release -p outlap-qss --test catalunya --test alloc
-      - run: cargo test --release -p outlap-transient --test perf_alloc --test perf_throughput --test parity_report
+      - run: cargo test --release -p outlap-transient --test perf_alloc --test perf_alloc_t3 --test perf_throughput --test parity_report
       - run: cargo run -p outlap-schema --bin gen_schemas -- --check   # schemas == committed
       - run: cargo build --target wasm32-unknown-unknown -p outlap-wasm --release
       - run: cargo build --target wasm32-unknown-unknown -p outlap-raceline   # clarabel is wasm-clean
