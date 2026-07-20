@@ -111,6 +111,11 @@ def build_rhs():
     # --- road / external loads ---------------------------------------------------------------
     kappa, grade, bank, kappa_v = sp.symbols("kappa grade bank kappa_v", real=True)
     drag, dmz, steer = sp.symbols("drag dmz steer", real=True)
+    # Aero downforce per axle (N, + = DOWN), evaluated at the dynamic ride heights by the tier's aero
+    # block and applied to the SPRUNG body at the axle line (front at x=xw[0]=a_f, rear at x=xw[2]=−b_r).
+    # It reaches the tyres through the springs (F_susp rises ⇒ the tyre spring compresses), so the
+    # per-wheel F_z the contact patch sees carries the downforce without a separate contact-patch term.
+    fzaf, fzar = sp.symbols("fzaf fzar", real=True)
     zr = sp.symbols(f"zr0:{WHEELS}", real=True)
     zrd = sp.symbols(f"zrd0:{WHEELS}", real=True)
     fxw = sp.symbols(f"fxw0:{WHEELS}", real=True)
@@ -227,8 +232,11 @@ def build_rhs():
     m_pitch_susp = sum((-xw[i]) * f_susp[i] for i in range(WHEELS))  # Q_theta = ∂zc/∂θ · F
     m_roll_susp = sum(yw[i] * f_susp[i] for i in range(WHEELS))  # Q_phi = ∂zc/∂φ · F
 
-    heave = (sum(f_susp) - ms * g_n) / ms
-    pitch = (m_pitch_susp + m_pitch_elastic - m_gyro_y) / iyy  # pitch axis = −y ⇒ −m_gyro_y
+    # Aero downforce on the sprung body: a −z force per axle. Heave gen-force = −(fzaf+fzar); pitch
+    # gen-force Q_θ = Σ F·x (front x>0 ⇒ +θ̈ = dive, i.e. front downforce pushes the nose down).
+    m_pitch_aero = fzaf * xw[0] + fzar * xw[2]
+    heave = (sum(f_susp) - ms * g_n - (fzaf + fzar)) / ms
+    pitch = (m_pitch_susp + m_pitch_elastic - m_gyro_y + m_pitch_aero) / iyy  # pitch axis = −y
     roll = (m_roll_susp + m_roll_elastic + m_gyro_x) / ixx
 
     unsprung = [
@@ -252,7 +260,7 @@ def build_rhs():
         *mu, *iw, *xw, *yw, *Rw,
         *kr, *d0, *cb, *cr, *kbs, *gbs, sbs, *ktz, *ctz, *dtz0,
         karb_f, karb_r, tf, tr, anti_d, anti_s,
-        kappa, grade, bank, kappa_v, drag, dmz, steer,
+        kappa, grade, bank, kappa_v, drag, dmz, steer, fzaf, fzar,
         *zr, *zrd, *fxw, *fyw, *mzw, *tau,
     ]
     return rhs, args
@@ -300,6 +308,7 @@ def sample_inputs(rng, arg_names):
         anti_d=u(0.0, 0.6), anti_s=u(0.0, 0.6),
         kappa=u(-0.02, 0.02), grade=u(-0.08, 0.08), bank=u(-0.12, 0.12),
         kappa_v=u(-0.02, 0.02), drag=u(0.0, 6000.0), dmz=u(-500.0, 500.0), steer=u(-0.25, 0.25),
+        fzaf=u(0.0, 20000.0), fzar=u(0.0, 20000.0),  # per-axle aero downforce (N, +down)
     )
     xs = [a_f, a_f, -b_r, -b_r]
     ys = [tf_v / 2, -tf_v / 2, tr_v / 2, -tr_v / 2]
