@@ -491,6 +491,39 @@ fn a_cornering_crest_stays_finite_and_planted() {
 }
 
 #[test]
+fn t3_stays_planted_over_a_crest_without_the_floor() {
+    // The Eau-Rouge crest gate (PR7, D-M6-6): a sustained crest (κ_v = −0.006 over a 60 m corner at
+    // 30 m/s) whose ~0.55 g of `κ_v·v²` unloading is well past the T2 `CREST_UNLOADING_FLOOR_G`
+    // (0.15 g) — so the rigid T2 tier would floor it. T3 has NO crest floor (it retires with the
+    // tyre-spring strategy — the κ_v·v² transport enters the ChassisT3 vertical dynamics directly and
+    // the suspension absorbs the unloading). The lap must stay finite and never spin, on the honest
+    // 3-D physics. (A far sharper crest genuinely throws the car airborne — a real limit T3 models
+    // rather than masks.)
+    let (t1, spec) = f1_2026();
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks_t3(&t1, &spec, &mut it);
+    let mut solver = TransientSolver::new(blocks, crest_circle(60.0, -0.006, 30.0), &it, cfg());
+    let len = 2.0 * std::f64::consts::PI * 60.0;
+    let lap = solver.run(len, 60_000);
+    assert!(
+        !solver.diverged(),
+        "T3 should ride the crest on its suspension without the T2 floor"
+    );
+    for i in 0..lap.len() {
+        assert!(
+            lap.vx[i].is_finite() && lap.yaw_rate[i].is_finite(),
+            "step {i} non-finite"
+        );
+    }
+    // The suspension actually worked the crest (the platform moved), and the lap completed.
+    assert!(lap.s.last().copied().unwrap_or(0.0) >= len, "the crest lap completed");
+    assert!(
+        lap.heave_m.iter().any(|&z| z.abs() > 1e-4),
+        "the suspension travelled over the crest"
+    );
+}
+
+#[test]
 fn the_divergence_guard_stops_cleanly_on_an_unholdable_line() {
     // A 10 m-radius corner demanded at 90 m/s is a physically impossible operating point (the
     // curvature-consistent seed yaw rate alone, v·κ = 9 rad/s, is already past the spin ceiling and
