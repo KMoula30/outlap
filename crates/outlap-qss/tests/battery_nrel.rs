@@ -81,7 +81,10 @@ fn parse_golden(name: &str) -> Golden {
             v_ref.push(it.next().unwrap());
         }
     }
-    let g = |k: &str| *kv.get(k).unwrap_or_else(|| panic!("golden {name} missing param {k}"));
+    let g = |k: &str| {
+        *kv.get(k)
+            .unwrap_or_else(|| panic!("golden {name} missing param {k}"))
+    };
     Golden {
         p: Params {
             ocv: g("ocv_v"),
