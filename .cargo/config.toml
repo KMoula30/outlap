@@ -1,0 +1,7 @@
+# Disk-lite builds. Incremental compilation trades disk (a large `target/**/incremental/` cache of
+# per-CGU object fragments) for faster *rebuilds*. On a disk-tight machine — and in CI, which builds
+# clean anyway and gets zero benefit from it — that cache is pure bloat, so we turn it off here.
+# Pair this with the `[profile.dev]` debug trim in the root Cargo.toml; together they keep
+# `target/debug` small. Rebuilds recompile a changed crate in full instead of incrementally.
+[build]
+incremental = false
