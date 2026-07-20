@@ -1287,6 +1287,8 @@ mod steer_tests {
     //! The open-loop prescribed steer schedule (M6/PR8): it reproduces a step exactly at the
     //! breakpoints, tracks a finely-sampled sine to interpolation tolerance, clamps outside the grid,
     //! and is deterministic.
+    #![allow(clippy::float_cmp, clippy::cast_lossless, clippy::cast_precision_loss)]
+    // ^ the step/clamp cases assert exact breakpoint values; the loop indices cast to f64.
     use super::PrescribedSteer;
 
     #[test]
