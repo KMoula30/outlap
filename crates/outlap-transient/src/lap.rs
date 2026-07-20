@@ -35,8 +35,9 @@ use outlap_core::state::{
 use outlap_schema::sim::FzCoupling;
 
 use outlap_vehicle::{
-    preview_distance, relax_wheel, ActuationChannels, Aero, Chassis, Driver, LoadTransfer,
-    Powertrain, RoadChannels, Tire, TorqueVectoring,
+    preview_distance, relax_wheel, ActuationChannels, Aero, AeroT3, Chassis, ChassisT3, Driver,
+    LoadTransfer, Powertrain, RoadChannels, T3Load, T3RoadVertical, Tire, TorqueVectoring,
+    WheelGeometry,
 };
 
 use crate::control::{ErsGovernor, ErsStepInput, LiftSchedule, Shifter, SlowStack};
@@ -240,10 +241,336 @@ impl<T: Float> T2Blocks<T> {
     }
 }
 
+/// A per-step snapshot of the T3 suspension state for the recorded lap (empty at T2).
+#[derive(Clone, Copy, Debug)]
+pub struct SuspensionSample<T> {
+    /// Sprung heave `z`, m (+up).
+    pub heave: T,
+    /// Sprung pitch `θ`, rad (+nose-down).
+    pub pitch: T,
+    /// Sprung roll `φ`, rad (+roll right).
+    pub roll: T,
+    /// Front ride height at the current pitch/heave, m.
+    pub ride_height_f: T,
+    /// Rear ride height, m.
+    pub ride_height_r: T,
+    /// Per-corner suspension compression (travel) `δ_i`, m (+compressed).
+    pub travel: [T; WHEELS],
+}
+
+/// The tier-specific block composition the shared [`TransientSolver`] drives. Both `T2Blocks` and
+/// `T3Blocks` implement it; the solver is generic over `B` so the slow-clock / ledger / fuel /
+/// tyre-thermal / ERS machinery is written **once** and monomorphised per tier — static dispatch,
+/// concrete block structs, no `dyn`, no per-step enum match (CLAUDE.md; HANDOFF #53 seam). The T2
+/// impl is instruction-for-instruction the pre-PR7 path, so a T2 lap stays byte-identical.
+pub trait TierBlocks<T: Float>: Sized {
+    /// The tier tag (`"t2"` / `"t3"`), for provenance + the tier-gated recording.
+    const NAME: &'static str;
+    /// Fill the RK-integrated fast-slot list; return the count.
+    fn integrated_slots(out: &mut [usize]) -> usize;
+    /// The assembler block specs, in fixed registration order (schedule + ordering test).
+    fn schedule_specs(&self) -> Vec<BlockSpec>;
+    /// Run the full `sense → control → actuate → integrate` block chain for one RHS evaluation, in
+    /// schedule order, leaving the chassis + controller derivatives in `dx`.
+    fn run_chain(&self, x: &StateView<T>, bus: &mut Bus<T>, dx: &mut DerivView<T>, lane: usize);
+    /// The interned road channels.
+    fn road_channels(&self) -> RoadChannels;
+    /// The interned actuation channels.
+    fn actuation(&self) -> ActuationChannels;
+    /// The driver look-ahead preview time, s (for `publish_road`).
+    fn preview_time(&self) -> T;
+    /// The driver speed-integral anti-windup clamp, m.
+    fn integral_limit(&self) -> T;
+    /// Per-wheel geometry (rolling radii for seeding, slip arms).
+    fn wheels(&self) -> &WheelGeometry<T>;
+    /// Gravitational acceleration, m/s² (the apparent-gravity operating point).
+    fn gravity(&self) -> T;
+    /// The tyre block (relaxation targets, slip powers).
+    fn tire(&self) -> &Tire<T>;
+    /// The tyre block, mutable (thermal-grip install).
+    fn tire_mut(&mut self) -> &mut Tire<T>;
+    /// The mechanical traction ceiling force at speed `v`, N (ERS mech-power + fuel burn).
+    fn traction_force(&self, v: T) -> T;
+    /// Fan the migrated total mass + CG out to every block-resident copy (fuel slow state).
+    fn apply_mass_state(&mut self, mass_kg: f64, a_f: f64, h_cg: f64);
+    /// Whether the tier uses the algebraic load-transfer coupling (T2: Picard iteration + the
+    /// crest-unloading floor). T3 resolves `F_z` from the suspension state each eval ⇒ `false`.
+    fn uses_algebraic_coupling(&self) -> bool {
+        true
+    }
+    /// Set the algebraic load-transfer operating point (T2). No-op at T3.
+    fn set_fz_operating_point(&mut self, speed: T, g_normal: T, ax: T, ay: T) {
+        let _ = (speed, g_normal, ax, ay);
+    }
+    /// Seed tier-specific fast states at entry speed `v0` (T3 suspension equilibrium). Default no-op.
+    fn seed_state(&self, _fast: &mut [T], _v0: T) {}
+    /// A snapshot of the suspension state for the recorded lap (`None` at T2).
+    fn suspension_sample(&self, _fast: &[T]) -> Option<SuspensionSample<T>> {
+        None
+    }
+}
+
+impl<T: Float> TierBlocks<T> for T2Blocks<T> {
+    const NAME: &'static str = "t2";
+
+    fn integrated_slots(out: &mut [usize]) -> usize {
+        StateLayout::t2_integrated_slots(out)
+    }
+
+    fn schedule_specs(&self) -> Vec<BlockSpec> {
+        self.specs().to_vec()
+    }
+
+    fn run_chain(&self, x: &StateView<T>, bus: &mut Bus<T>, dx: &mut DerivView<T>, lane: usize) {
+        // sense → control → actuate → integrate. The torque-vectoring allocator runs at the tail of
+        // the actuate phase, after the powertrain (whose torques it augments) and the tyre/load blocks
+        // (whose forces/loads set the friction ellipse), matching the assembler-produced schedule.
+        self.driver.derivatives(x, bus, dx, lane);
+        self.powertrain.derivatives(x, bus, dx, lane);
+        self.load.derivatives(x, bus, dx, lane);
+        self.aero.derivatives(x, bus, dx, lane);
+        self.tire.derivatives(x, bus, dx, lane);
+        self.tv.derivatives(x, bus, dx, lane);
+        self.chassis.derivatives(x, bus, dx, lane);
+    }
+
+    fn road_channels(&self) -> RoadChannels {
+        self.road
+    }
+    fn actuation(&self) -> ActuationChannels {
+        self.actuation
+    }
+    fn preview_time(&self) -> T {
+        self.driver.preview_time
+    }
+    fn integral_limit(&self) -> T {
+        self.driver.integral_limit
+    }
+    fn wheels(&self) -> &WheelGeometry<T> {
+        &self.chassis.params.wheels
+    }
+    fn gravity(&self) -> T {
+        self.chassis.params.gravity
+    }
+    fn tire(&self) -> &Tire<T> {
+        &self.tire
+    }
+    fn tire_mut(&mut self) -> &mut Tire<T> {
+        &mut self.tire
+    }
+    fn traction_force(&self, v: T) -> T {
+        self.powertrain.traction.eval(v)
+    }
+    fn apply_mass_state(&mut self, mass_kg: f64, a_f: f64, h_cg: f64) {
+        T2Blocks::apply_mass_state(self, mass_kg, a_f, h_cg);
+    }
+    fn set_fz_operating_point(&mut self, speed: T, g_normal: T, ax: T, ay: T) {
+        self.load.set_operating_point(speed, g_normal, ax, ay);
+    }
+}
+
+/// The blocks the T3 (14-DOF) solver owns, handed over pre-built by [`assemble_t3`](outlap_vehicle::assemble_t3).
+pub struct T3Blocks<T> {
+    /// The 14-DOF chassis RHS block.
+    pub chassis: ChassisT3<T>,
+    /// The tyre block.
+    pub tire: Tire<T>,
+    /// The dynamic-ride-height aero block.
+    pub aero: AeroT3<T>,
+    /// The tyre-spring per-wheel `F_z` block (the `TyreSpring` Fz strategy).
+    pub load: T3Load<T>,
+    /// The ideal-driver block.
+    pub driver: Driver<T>,
+    /// The powertrain block.
+    pub powertrain: Powertrain<T>,
+    /// The torque-vectoring allocator block.
+    pub tv: TorqueVectoring<T>,
+    /// The interned road channels.
+    pub road: RoadChannels,
+    /// The interned per-corner road vertical excitation channels.
+    pub road_v: T3RoadVertical,
+    /// The interned actuation channels.
+    pub actuation: ActuationChannels,
+}
+
+impl From<outlap_vehicle::T3Parts<f64>> for T3Blocks<f64> {
+    fn from(p: outlap_vehicle::T3Parts<f64>) -> Self {
+        Self {
+            chassis: p.chassis,
+            tire: p.tire,
+            aero: p.aero,
+            load: p.load,
+            driver: p.driver,
+            powertrain: p.powertrain,
+            tv: p.tv,
+            road: p.road,
+            road_v: p.road_v,
+            actuation: p.actuation,
+        }
+    }
+}
+
+impl<T: Float> T3Blocks<T> {
+    /// The assembler-facing port specs, in fixed registration order (used for the [`Schedule`] and
+    /// the ordering-determinism test). The tyre-spring `F_z` block registers before the tyre (whose
+    /// load it sets), the aero before the chassis (whose sprung dynamics read its downforce).
+    fn specs(&self) -> [BlockSpec; 7] {
+        [
+            BlockSpec::new(Block::phase(&self.driver), Block::ports(&self.driver)),
+            BlockSpec::new(
+                Block::phase(&self.powertrain),
+                Block::ports(&self.powertrain),
+            ),
+            BlockSpec::new(Block::phase(&self.aero), Block::ports(&self.aero)),
+            BlockSpec::new(Block::phase(&self.load), Block::ports(&self.load)),
+            BlockSpec::new(Block::phase(&self.tire), Block::ports(&self.tire)),
+            BlockSpec::new(Block::phase(&self.tv), Block::ports(&self.tv)),
+            BlockSpec::new(Block::phase(&self.chassis), Block::ports(&self.chassis)),
+        ]
+    }
+}
+
+impl<T: Float> TierBlocks<T> for T3Blocks<T> {
+    const NAME: &'static str = "t3";
+
+    fn integrated_slots(out: &mut [usize]) -> usize {
+        StateLayout::t3_integrated_slots(out)
+    }
+
+    fn schedule_specs(&self) -> Vec<BlockSpec> {
+        self.specs().to_vec()
+    }
+
+    fn run_chain(&self, x: &StateView<T>, bus: &mut Bus<T>, dx: &mut DerivView<T>, lane: usize) {
+        self.driver.derivatives(x, bus, dx, lane);
+        self.powertrain.derivatives(x, bus, dx, lane);
+        self.aero.derivatives(x, bus, dx, lane);
+        self.load.derivatives(x, bus, dx, lane);
+        self.tire.derivatives(x, bus, dx, lane);
+        self.tv.derivatives(x, bus, dx, lane);
+        self.chassis.derivatives(x, bus, dx, lane);
+    }
+
+    fn road_channels(&self) -> RoadChannels {
+        self.road
+    }
+    fn actuation(&self) -> ActuationChannels {
+        self.actuation
+    }
+    fn preview_time(&self) -> T {
+        self.driver.preview_time
+    }
+    fn integral_limit(&self) -> T {
+        self.driver.integral_limit
+    }
+    fn wheels(&self) -> &WheelGeometry<T> {
+        &self.chassis.params.wheels
+    }
+    fn gravity(&self) -> T {
+        self.chassis.params.gravity
+    }
+    fn tire(&self) -> &Tire<T> {
+        &self.tire
+    }
+    fn tire_mut(&mut self) -> &mut Tire<T> {
+        &mut self.tire
+    }
+    fn traction_force(&self, v: T) -> T {
+        self.powertrain.traction.eval(v)
+    }
+
+    fn uses_algebraic_coupling(&self) -> bool {
+        false
+    }
+
+    fn apply_mass_state(&mut self, mass_kg: f64, a_f: f64, h_cg: f64) {
+        // CG migration in both tiers (D-M6-4c): refresh the chassis inertia mass, the wheel
+        // longitudinal positions rel the moved CG, the tyre slip-arm copy, and the sprung-mass /
+        // CG-height copies the ride block reads. The unsprung masses are invariant, so the sprung
+        // mass tracks the total; the tyre static compressions stay at their assembly reference.
+        let total_unsprung: T = self
+            .chassis
+            .susp
+            .unsprung_mass
+            .iter()
+            .fold(T::zero(), |a, &m| a + m);
+        self.chassis.params.mass = T::from(mass_kg).unwrap_or_else(T::zero);
+        self.chassis.susp.sprung_mass =
+            T::from(mass_kg).unwrap_or_else(T::zero) - total_unsprung;
+        self.chassis.susp.h_cg = T::from(h_cg).unwrap_or_else(T::zero);
+        self.chassis.susp.h_s = T::from(h_cg).unwrap_or_else(T::zero);
+        let wheelbase = self.chassis.susp.wheelbase.to_f64().unwrap_or(0.0);
+        let a_ft = T::from(a_f).unwrap_or_else(T::zero);
+        let nb_rt = T::from(-(wheelbase - a_f)).unwrap_or_else(T::zero);
+        for wheels in [&mut self.chassis.params.wheels, &mut self.tire.wheels] {
+            for i in 0..WHEELS {
+                wheels.x[i] = if wheels.front[i] { a_ft } else { nb_rt };
+            }
+        }
+        self.aero.a_f = a_ft;
+        self.aero.b_r = T::from(wheelbase - a_f).unwrap_or_else(T::zero);
+    }
+
+    fn seed_state(&self, fast: &mut [T], v0: T) {
+        // Seed the suspension near its aero-loaded static equilibrium at entry speed so the platform
+        // does not slam under the (large) downforce load at the first step. Linear estimate from the
+        // constant aero coefficients: each corner sinks by the aero load over the spring + tyre in
+        // series; the mean is heave, the front/rear difference is pitch (roll ≈ 0 by symmetry).
+        let s = &self.chassis.susp;
+        let v2 = v0 * v0;
+        let half = T::from(0.5).unwrap_or_else(T::zero);
+        let f_axle = [self.aero.qz_f * v2, self.aero.qz_r * v2];
+        let mut z_corner = [T::zero(); WHEELS];
+        for i in 0..WHEELS {
+            let axle = usize::from(!self.chassis.params.wheels.front[i]);
+            let f_corner = f_axle[axle] * half;
+            let d_tyre = f_corner / s.k_tyre[i];
+            let d_susp = f_corner / s.k_ride[i];
+            fast[chassis_zu(i) as usize] = -d_tyre;
+            z_corner[i] = -(d_tyre + d_susp);
+        }
+        let z = (z_corner[0] + z_corner[1] + z_corner[2] + z_corner[3]) * T::from(0.25).unwrap_or_else(T::zero);
+        let z_front = (z_corner[0] + z_corner[1]) * half;
+        let z_rear = (z_corner[2] + z_corner[3]) * half;
+        // z_corner_front = z − a_f·θ, z_corner_rear = z + b_r·θ ⇒ θ = (z_rear − z_front)/L.
+        let wb = s.wheelbase;
+        let theta = if wb > T::zero() {
+            (z_rear - z_front) / wb
+        } else {
+            T::zero()
+        };
+        fast[ChassisState::Heave as usize] = z;
+        fast[ChassisState::Pitch as usize] = theta;
+        fast[ChassisState::Roll as usize] = T::zero();
+    }
+
+    fn suspension_sample(&self, fast: &[T]) -> Option<SuspensionSample<T>> {
+        let s = &self.chassis.susp;
+        let p = &self.chassis.params;
+        let z = fast[ChassisState::Heave as usize];
+        let th = fast[ChassisState::Pitch as usize];
+        let ph = fast[ChassisState::Roll as usize];
+        let mut travel = [T::zero(); WHEELS];
+        for i in 0..WHEELS {
+            let zu = fast[chassis_zu(i) as usize];
+            let z_corner = z - p.wheels.x[i] * th + p.wheels.y[i] * ph;
+            travel[i] = s.static_defl[i] + zu - z_corner;
+        }
+        Some(SuspensionSample {
+            heave: z,
+            pitch: th,
+            roll: ph,
+            ride_height_f: self.aero.h_ref_f_m + (z - self.aero.a_f * th),
+            ride_height_r: self.aero.h_ref_r_m + (z + self.aero.b_r * th),
+            travel,
+        })
+    }
+}
+
 /// The T2 lap solver: fixed block set + split integrator over one lane (batch = 1; the batch
 /// dimension is reserved for the future GPU tier, HANDOFF §11.3).
-pub struct TransientSolver<T> {
-    blocks: T2Blocks<T>,
+pub struct TransientSolver<T, B = T2Blocks<T>> {
+    blocks: B,
     line: LineTable<T>,
     arena: SimArena<T>,
     cfg: SimConfig<T>,
@@ -335,27 +662,23 @@ const YAW_DIVERGENCE_CEILING: f64 = 6.0;
 /// three reference cars' `catalunya_osm` laps to flat pace (≤0.2 %). Inert on a flat track (`κ_v ≡ 0`).
 const CREST_UNLOADING_FLOOR_G: f64 = 0.15;
 
-impl<T: Float> TransientSolver<T> {
+impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
     /// Build a solver from the assembled blocks, the line table, the interner (bus width), and the
     /// numerics config, seeding the initial state from the target line at `s = 0`.
     #[must_use]
-    pub fn new(
-        blocks: T2Blocks<T>,
-        line: LineTable<T>,
-        interner: &ChannelInterner,
-        cfg: SimConfig<T>,
-    ) -> Self {
-        // The RK sweep integrates the T2 chassis DOF plus the continuous controller states (the
+    pub fn new(blocks: B, line: LineTable<T>, interner: &ChannelInterner, cfg: SimConfig<T>) -> Self {
+        // The RK sweep integrates the tier's chassis DOF plus the continuous controller states (the
         // driver speed integral); the tyre-relaxation states are advanced separately on the
-        // exact-exponential channel and are not in this set.
-        let mut integrated = vec![0usize; ChassisState::T2_DOF + ControllerState::COUNT as usize];
-        let n_int = StateLayout::t2_integrated_slots(&mut integrated);
+        // exact-exponential channel and are not in this set. Size to the full 14-DOF footprint so
+        // both tiers fit; `B::integrated_slots` selects the tier's set.
+        let mut integrated = vec![0usize; ChassisState::T3_DOF + ControllerState::COUNT as usize];
+        let n_int = B::integrated_slots(&mut integrated);
         integrated.truncate(n_int);
         let arena = SimArena::for_method(cfg.method, n_int);
         let bus = Bus::with_interner(interner, 1);
-        let schedule = assemble(&blocks.specs()).expect("acyclic T2 block set");
+        let schedule = assemble(&blocks.schedule_specs()).expect("acyclic block set");
         let slow_clock = SlowClock::new(cfg.slow_decimation.max(1));
-        let actuation = blocks.actuation;
+        let actuation = blocks.actuation();
         let mut solver = Self {
             blocks,
             line,
@@ -438,7 +761,7 @@ impl<T: Float> TransientSolver<T> {
     /// immediately so the very first step's forces already carry the seed grip/pressure.
     #[must_use]
     pub fn with_tire_thermal(mut self, stack: TireThermalStack<T>) -> Self {
-        self.blocks.tire.set_thermal_grip(stack.current_grip());
+        self.blocks.tire_mut().set_thermal_grip(stack.current_grip());
         self.tire_thermal = Some(stack);
         self
     }
@@ -483,7 +806,7 @@ impl<T: Float> TransientSolver<T> {
     /// The interned road channels (for callers writing tests directly against the bus).
     #[must_use]
     pub fn road_channels(&self) -> RoadChannels {
-        self.blocks.road
+        self.blocks.road_channels()
     }
 
     /// Seed `[s, n, ψ_rel, v_x, v_y, r, ω₁..₄]` from the target line at `s = start_s`. The yaw rate is
@@ -500,9 +823,12 @@ impl<T: Float> TransientSolver<T> {
         self.fast[ChassisState::Vy as usize] = zero;
         self.fast[ChassisState::YawRate as usize] = v0 * self.line.kappa_ref(s0);
         for i in 0..WHEELS {
-            let r = self.blocks.chassis.params.wheels.radius[i];
+            let r = self.blocks.wheels().radius[i];
             self.fast[omega_state(i) as usize] = if r > zero { v0 / r } else { zero };
         }
+        // Tier-specific seeding (T3 seeds the suspension near its aero-loaded equilibrium at entry
+        // speed so the platform does not slam under downforce at the first step). No-op at T2.
+        self.blocks.seed_state(&mut self.fast, v0);
     }
 
     #[inline]
@@ -549,7 +875,7 @@ impl<T: Float> TransientSolver<T> {
     fn set_load_operating_point(&mut self, ax: T, ay: T) {
         let s = self.get_fast(ChassisState::S);
         let vx = self.get_fast(ChassisState::Vx).max(T::zero());
-        let g = self.blocks.chassis.params.gravity;
+        let g = self.blocks.gravity();
         // One interval lookup for grade/banking/κ_v (shared grid) instead of three.
         let (grade, bank, kappa_v) = self.line.load_geometry(s);
         let g_static = g * grade.cos() * bank.cos();
@@ -559,25 +885,35 @@ impl<T: Float> TransientSolver<T> {
         let kv_term = kappa_v * vx * vx;
         let unload_floor = -T::from(CREST_UNLOADING_FLOOR_G).unwrap_or_else(T::zero) * g;
         let g_normal = g_static + kv_term.max(unload_floor);
-        self.blocks.load.set_operating_point(vx, g_normal, ax, ay);
+        self.blocks.set_fz_operating_point(vx, g_normal, ax, ay);
     }
 
     /// Resolve the load-transfer accelerations for this step and advance the relaxation states.
     fn couple_and_relax(&mut self) {
-        match self.cfg.fz_coupling {
-            FzCoupling::OneStepLag => {
-                self.set_load_operating_point(self.ax_prev, self.ay_prev);
-                self.eval_rhs();
-            }
-            FzCoupling::FixedPoint => {
-                self.set_load_operating_point(self.ax_prev, self.ay_prev);
-                self.eval_rhs();
-                for _ in 0..self.cfg.fixed_point_iters {
-                    let (ax, ay) = self.body_accel();
-                    self.set_load_operating_point(ax, ay);
+        if self.blocks.uses_algebraic_coupling() {
+            // T2 `Algebraic` strategy: the per-wheel `F_z` depends on `(a_x, a_y)`, so the load
+            // transfer is resolved per the recorded `fz_coupling` (one-step-lag or a few Picard
+            // iterations at the step start), with the crest-unloading floor.
+            match self.cfg.fz_coupling {
+                FzCoupling::OneStepLag => {
+                    self.set_load_operating_point(self.ax_prev, self.ay_prev);
                     self.eval_rhs();
                 }
+                FzCoupling::FixedPoint => {
+                    self.set_load_operating_point(self.ax_prev, self.ay_prev);
+                    self.eval_rhs();
+                    for _ in 0..self.cfg.fixed_point_iters {
+                        let (ax, ay) = self.body_accel();
+                        self.set_load_operating_point(ax, ay);
+                        self.eval_rhs();
+                    }
+                }
             }
+        } else {
+            // T3 `TyreSpring` strategy: `F_z` comes from the tyre-spring deflection (the suspension
+            // state), not the accelerations — one eval resolves the forces, no Picard loop, and the
+            // crest floor retires with the strategy (the `κ_v·v²` transport enters `ChassisT3`).
+            self.eval_rhs();
         }
         let dt = self.cfg.dt;
         let steer = self.bus.get(CoreSignal::Steer, 0);
@@ -585,7 +921,7 @@ impl<T: Float> TransientSolver<T> {
         let mut new_relax = [(T::zero(), T::zero()); WHEELS];
         for (i, slot) in new_relax.iter_mut().enumerate() {
             let fz = self.bus.get_wheel(WheelSignal::TireFz, i, 0);
-            let tg = self.blocks.tire.relax_targets(&sv, i, steer, fz);
+            let tg = self.blocks.tire().relax_targets(&sv, i, steer, fz);
             let k0 = sv.relax(RelaxState::Kappa, i);
             let a0 = sv.relax(RelaxState::Alpha, i);
             *slot = relax_wheel(k0, a0, &tg, dt);
@@ -625,7 +961,7 @@ impl<T: Float> TransientSolver<T> {
             let vx = self.fast[ChassisState::Vx as usize].max(T::zero());
             let throttle = self.bus.get(CoreSignal::Throttle, 0);
             let brake = self.bus.get(CoreSignal::Brake, 0);
-            let mech_drive_power = self.blocks.powertrain.traction.eval(vx) * vx;
+            let mech_drive_power = self.blocks.traction_force(vx) * vx;
             let inp = ErsStepInput {
                 s: self.fast[ChassisState::S as usize].to_f64().unwrap_or(0.0),
                 v: vx.to_f64().unwrap_or(0.0),
@@ -685,7 +1021,7 @@ impl<T: Float> TransientSolver<T> {
         self.fast[n_slot] = self.fast[n_slot].max(-self.cfg.n_max).min(self.cfg.n_max);
         // Backstop clamp on the speed integral (conditional integration is the primary anti-windup).
         let xi_slot = StateLayout::controller_slot(ControllerState::SpeedIntegral);
-        let xi_lim = self.blocks.driver.integral_limit;
+        let xi_lim = self.blocks.integral_limit();
         self.fast[xi_slot] = self.fast[xi_slot].max(-xi_lim).min(xi_lim);
 
         // Divergence guard: a non-finite or runaway fast state means the closed loop has diverged
@@ -700,7 +1036,9 @@ impl<T: Float> TransientSolver<T> {
         // (3) refresh one-step-lag accelerations at the new state. Re-point the load-transfer block
         // at the post-step speed first (using the lagged accel), so the recorded per-wheel F_z and
         // the seed accel are evaluated at the state we just reached, not the pre-step operating point.
-        self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        if self.blocks.uses_algebraic_coupling() {
+            self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        }
         self.eval_rhs();
         let (ax, ay) = self.body_accel();
         self.ax_prev = ax;
@@ -763,7 +1101,7 @@ impl<T: Float> TransientSolver<T> {
             return;
         }
         let sv = StateView::new(&self.fast, 1, 0);
-        let slip_power = self.blocks.tire.wheel_slip_powers(&sv, &self.bus, 0);
+        let slip_power = self.blocks.tire().wheel_slip_powers(&sv, &self.bus, 0);
         let mut fz = [T::zero(); WHEELS];
         let mut omega = [T::zero(); WHEELS];
         for i in 0..WHEELS {
@@ -782,7 +1120,7 @@ impl<T: Float> TransientSolver<T> {
         let speed = self.get_fast(ChassisState::Vx);
         let grip = self.tire_thermal.as_mut().and_then(|s| s.advance(speed));
         if let Some(grip) = grip {
-            self.blocks.tire.set_thermal_grip(grip);
+            self.blocks.tire_mut().set_thermal_grip(grip);
         }
     }
 
@@ -805,13 +1143,7 @@ impl<T: Float> TransientSolver<T> {
         // ṁ = P_mech / (η_thermal · LHV) — chemical power over the heating value (the ERS deploy is a
         // separate ELECTRICAL share from the pack, not fuel).
         let ice_mech_power = throttle
-            * self
-                .blocks
-                .powertrain
-                .traction
-                .eval(vx)
-                .to_f64()
-                .unwrap_or(0.0)
+            * self.blocks.traction_force(vx).to_f64().unwrap_or(0.0)
             * vx.to_f64().unwrap_or(0.0).max(0.0);
         let dt_f = dt.to_f64().unwrap_or(0.0);
         if let Some(fs) = self.fuel.as_mut() {
@@ -926,6 +1258,16 @@ impl<T: Float> TransientSolver<T> {
             lap.tire_damage.push(dmg);
             lap.tire_grip.push(grip);
         }
+        // T3 suspension channels (heave/pitch/roll, ride heights, per-wheel travel) — `None` at T2,
+        // so the columns stay empty and the dataset omits them (the tyre-thermal pattern).
+        if let Some(sample) = self.blocks.suspension_sample(&self.fast) {
+            lap.heave_m.push(sample.heave);
+            lap.pitch_rad.push(sample.pitch);
+            lap.roll_rad.push(sample.roll);
+            lap.ride_height_f_m.push(sample.ride_height_f);
+            lap.ride_height_r_m.push(sample.ride_height_r);
+            lap.suspension_travel_m.push(sample.travel);
+        }
     }
 
     /// Run until the arc length reaches `s_end` or `max_steps` elapse, recording every step.
@@ -934,7 +1276,9 @@ impl<T: Float> TransientSolver<T> {
         let mut lap = TransientLap::default();
         // Point the load-transfer block at the seeded state so the initial record's F_z is evaluated
         // at the entry speed (not the constructor default) before the first step runs.
-        self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        if self.blocks.uses_algebraic_coupling() {
+            self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        }
         self.eval_rhs(); // populate the bus for the initial record
         self.record(&mut lap);
         for _ in 0..max_steps {
@@ -1021,7 +1365,9 @@ impl<T: Float> TransientSolver<T> {
         let mut lap_end_idx = Vec::with_capacity(n_laps);
         let start_s = self.cfg.start_s;
         // Populate the bus for the initial record (the entry-speed F_z), like `run`.
-        self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        if self.blocks.uses_algebraic_coupling() {
+            self.set_load_operating_point(self.ax_prev, self.ay_prev);
+        }
         self.eval_rhs();
         self.record(&mut lap);
         let mut next_lap = 1usize; // the next lap-completion threshold index (1..=n_laps)
@@ -1071,7 +1417,7 @@ impl<T: Float> TransientSolver<T> {
 
     /// Access the solver's blocks (tests/diagnostics) — e.g. to read the fuel-updated mass/CG.
     #[must_use]
-    pub fn blocks(&self) -> &T2Blocks<T> {
+    pub fn blocks(&self) -> &B {
         &self.blocks
     }
 
@@ -1155,8 +1501,8 @@ struct BoundaryInputs<T> {
 /// One full RHS evaluation: clear bus, publish road + preview at `fast`'s `(s, v_x)`, run the block
 /// chain in schedule order, leaving the chassis + controller derivatives in `dfast`. Free-standing so
 /// callers can hand disjoint field borrows (the RK closure) or `self` fields (the sequential path).
-fn eval_rhs_raw<T: Float>(
-    blocks: &T2Blocks<T>,
+fn eval_rhs_raw<T: Float, B: TierBlocks<T>>(
+    blocks: &B,
     line: &LineTable<T>,
     fast: &[T],
     dfast: &mut [T],
@@ -1168,46 +1514,27 @@ fn eval_rhs_raw<T: Float>(
     bus.clear();
     publish_road(
         line,
-        &blocks.road,
+        &blocks.road_channels(),
         bus,
         s,
         vx,
-        blocks.driver.preview_time,
+        blocks.preview_time(),
         boundary.lift_cap,
     );
     // Publish the rule-based control-layer boundary values (frozen across the RK sweep): the shift
     // FSM's drive-torque scale, the battery regen ceiling, and the 2026 ERS energy manager's
     // deploy/harvest command. `bus.clear` above zeroes the whole bus every eval, so these must be
     // re-published here on EVERY RHS evaluation (see `Bus::clear`), not once per step.
-    bus.set_channel(blocks.actuation.torque_scale, 0, boundary.torque_scale);
-    bus.set_channel(blocks.actuation.regen_limit_w, 0, boundary.regen_limit_w);
-    bus.set_channel(
-        blocks.actuation.ers_deploy_force_n,
-        0,
-        boundary.ers_deploy_force_n,
-    );
-    bus.set_channel(
-        blocks.actuation.ers_deploy_power_w,
-        0,
-        boundary.ers_deploy_power_w,
-    );
-    bus.set_channel(
-        blocks.actuation.ers_harvest_power_w,
-        0,
-        boundary.ers_harvest_power_w,
-    );
+    let a = blocks.actuation();
+    bus.set_channel(a.torque_scale, 0, boundary.torque_scale);
+    bus.set_channel(a.regen_limit_w, 0, boundary.regen_limit_w);
+    bus.set_channel(a.ers_deploy_force_n, 0, boundary.ers_deploy_force_n);
+    bus.set_channel(a.ers_deploy_power_w, 0, boundary.ers_deploy_power_w);
+    bus.set_channel(a.ers_harvest_power_w, 0, boundary.ers_harvest_power_w);
     let sv = StateView::new(fast, 1, 0);
     let mut dv = DerivView::new(dfast, 1, 0);
-    // sense → control → actuate → integrate. The torque-vectoring allocator runs at the tail of the
-    // actuate phase, after the powertrain (whose torques it augments) and the tyre/load blocks (whose
-    // forces/loads set the friction ellipse), matching the assembler-produced schedule.
-    blocks.driver.derivatives(&sv, bus, &mut dv, 0);
-    blocks.powertrain.derivatives(&sv, bus, &mut dv, 0);
-    blocks.load.derivatives(&sv, bus, &mut dv, 0);
-    blocks.aero.derivatives(&sv, bus, &mut dv, 0);
-    blocks.tire.derivatives(&sv, bus, &mut dv, 0);
-    blocks.tv.derivatives(&sv, bus, &mut dv, 0);
-    blocks.chassis.derivatives(&sv, bus, &mut dv, 0);
+    // The tier's block chain (sense → control → actuate → integrate), in schedule order.
+    blocks.run_chain(&sv, bus, &mut dv, 0);
 }
 
 /// The [`ChassisState`] wheel-speed slot for wheel `i`.
@@ -1218,5 +1545,16 @@ fn omega_state(wheel: usize) -> ChassisState {
         1 => ChassisState::OmegaFr,
         2 => ChassisState::OmegaRl,
         _ => ChassisState::OmegaRr,
+    }
+}
+
+/// The [`ChassisState`] unsprung-position slot for wheel `i` (T3 suspension seeding/recording).
+#[inline]
+fn chassis_zu(wheel: usize) -> ChassisState {
+    match wheel {
+        0 => ChassisState::ZuFl,
+        1 => ChassisState::ZuFr,
+        2 => ChassisState::ZuRl,
+        _ => ChassisState::ZuRr,
     }
 }

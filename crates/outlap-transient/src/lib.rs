@@ -31,7 +31,10 @@ pub use control::{
     ErsGovernor, ErsStepInput, ErsStepOut, LiftSchedule, ShiftEvent, ShiftSchedule, Shifter,
     SlowStack, DOWNSHIFT_HYSTERESIS, SHIFT_CUT_FRACTION,
 };
-pub use lap::{FuelSlow, Provenance, SimConfig, T2Blocks, TransientSolver};
+pub use lap::{
+    FuelSlow, Provenance, SimConfig, SuspensionSample, T2Blocks, T3Blocks, TierBlocks,
+    TransientSolver,
+};
 pub use line_table::{LineSamples, LineTable, PreviewSample, RoadSample};
 pub use result::{TransientLap, Wheels};
 pub use tire_thermal::{AxleGeometry, TireThermalStack};
