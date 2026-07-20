@@ -41,9 +41,9 @@ pub(crate) mod prelude {
     pub(crate) use crate::transient_entry::*;
     pub(crate) use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
     pub(crate) use outlap_qss::{
-        solve_t0, solve_t1, tier_not_implemented, Couplings, ErsCoupling, GgvEnvelope, LapRequest,
-        LineDescriptor, MachineThermal, Pack, PackState, QssLap, SetupLog, SlowCoupling, SlowLog,
-        T0Options, T0Path, T0Vehicle, T1Vehicle, TireSlowLog, TireStateRes, TireThermalMarch,
+        solve_t0, solve_t1, Couplings, ErsCoupling, GgvEnvelope, LapRequest, LineDescriptor,
+        MachineThermal, Pack, PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options,
+        T0Path, T0Vehicle, T1Vehicle, TireSlowLog, TireStateRes, TireThermalMarch,
         TireThermalState, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
     };
     pub(crate) use outlap_raceline::{

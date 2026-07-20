@@ -279,22 +279,24 @@ pub(crate) fn prepare_qss(
     // Enum dispatch on the resolved tier (assembly-time, never in the loop). T2 is time-indexed and
     // T3 is unimplemented — both before any T0/T1 assembly work.
     let wanted = match sim_cfg.tier {
-        Tier::T2 => {
+        // The transient tiers (t2 = double-track, t3 = 14-DOF suspension) integrate in TIME, so they
+        // are served by the time-indexed transient entry points, not this arc-length QSS one.
+        transient @ (Tier::T2 | Tier::T3) => {
+            let t = if transient == Tier::T2 { "t2" } else { "t3" };
             let msg = match kind {
-                QssEntryKind::Lap => {
-                    "the transient tier (t2) produces a time-indexed lap: call \
-                     `outlap.solve_transient_lap(...)`, or `outlap.solve_lap_dataset(..., \
-                     tier=\"t2\")` for an xarray view"
-                }
-                QssEntryKind::Stint => {
-                    "the transient tier (t2) integrates in time and is time-indexed: call \
-                     `outlap.solve_transient_stint(...)` (or `outlap.solve_stint_dataset(..., \
-                     tier=\"t2\")`) for a T2 stint"
-                }
+                QssEntryKind::Lap => format!(
+                    "the transient tier ({t}) produces a time-indexed lap: call \
+                     `outlap.solve_transient_lap(..., tier=\"{t}\")`, or \
+                     `outlap.solve_lap_dataset(..., tier=\"{t}\")` for an xarray view"
+                ),
+                QssEntryKind::Stint => format!(
+                    "the transient tier ({t}) integrates in time and is time-indexed: call \
+                     `outlap.solve_transient_stint(..., tier=\"{t}\")` (or \
+                     `outlap.solve_stint_dataset(..., tier=\"{t}\")`) for a transient stint"
+                ),
             };
             return Err(PyValueError::new_err(msg));
         }
-        tier @ Tier::T3 => return Err(err(tier_not_implemented(tier))),
         wanted => wanted,
     };
 

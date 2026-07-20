@@ -353,10 +353,11 @@ def test_flat_track_mode_records_and_flattens(catalunya: Track) -> None:
     assert flat.attrs["lap_time_s"] != full.attrs["lap_time_s"]
 
 
-def test_unimplemented_tier_raises_a_typed_error(catalunya: Track) -> None:
-    # t2 landed with the transient tier (see `test_transient.py`); t3 is still M6.
-    with pytest.raises(ValueError, match="M6"):
-        solve_lap_dataset(F1_DIR, catalunya, tier="t3", sim=COARSE_SIM)
+def test_unknown_tier_raises_a_typed_error(catalunya: Track) -> None:
+    # Every tier t0..t3 is now implemented (t2/t3 via the transient tier — see `test_transient.py`
+    # and `test_t3.py`); an UNKNOWN tier is still rejected loudly at the schema boundary.
+    with pytest.raises(ValueError):
+        solve_lap_dataset(F1_DIR, catalunya, tier="t9", sim=COARSE_SIM)
 
 
 def test_unknown_sim_field_fails_loudly(catalunya: Track) -> None:
