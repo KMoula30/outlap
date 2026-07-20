@@ -218,6 +218,47 @@ fn f1_qss_stint_carries_soc_across_lap_boundaries() {
     );
 }
 
+/// The per-lap energy-manager ledger surfaced for the M6 PR8 gate #2: on every lap the pack both
+/// deploys and harvests (consumption AND regeneration are real), harvest is bounded by the 8.5 MJ/lap
+/// Recharge budget (C5.2.10), the ledger RESETS at the start/finish (per-lap, not cumulative), and the
+/// pack cycles a real slice of its usable window while the SoC itself carries across the boundary.
+#[test]
+fn f1_qss_stint_surfaces_the_per_lap_ledger() {
+    let h = hybrid("f1_2026", None);
+    let path = T0Path::from_track(&stadium_track(), 5.0);
+    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
+        .unwrap()
+        .unwrap();
+    let result = solve_stint(&plan(&h, &ers, &path), 5, StintSeeds::default()).unwrap();
+    for (k, lap) in result.laps.iter().enumerate() {
+        let e = lap
+            .slow
+            .as_ref()
+            .unwrap()
+            .ers
+            .as_ref()
+            .expect("an f1 stint lap carries an ERS ledger");
+        assert!(e.ledger_deploy_j > 0.0, "lap {} must deploy", k + 1);
+        assert!(e.ledger_harvest_j > 0.0, "lap {} must harvest", k + 1);
+        // The per-lap Recharge budget caps harvest (8.5 MJ, +1 J for the closing partial step); a
+        // cumulative (non-resetting) ledger would blow past it by lap 2.
+        assert!(
+            e.ledger_harvest_j <= 8.5e6 + 1.0,
+            "lap {} harvest {} J exceeds the per-lap budget — the ledger did not reset",
+            k + 1,
+            e.ledger_harvest_j
+        );
+        // Consumption AND regeneration both act: the pack cycles a real slice of the C5.2.9 window.
+        assert!(
+            e.soc_max - e.soc_min > 0.05,
+            "lap {} must cycle the pack window (min {}, max {})",
+            k + 1,
+            e.soc_min,
+            e.soc_max
+        );
+    }
+}
+
 /// `initial_soc` seeds the pack; the whole stint shifts with it (a lower start stays lower).
 #[test]
 fn f1_qss_stint_respects_the_initial_soc_seed() {

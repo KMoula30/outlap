@@ -124,6 +124,108 @@ def test_qss_ev_stint_soc_declines_monotonically(catalunya: Track) -> None:
     )
 
 
+# --- Gate #2 (M6 PR8): the author's acceptance check, 10 laps, BOTH tiers, shared initial_soc ------
+
+SOC_SEED = (
+    0.6  # a shared, explicit seed — never a tier default for the cross-tier gate.
+)
+
+
+@pytest.fixture(scope="module")
+def f1_10lap_qss(catalunya: Track) -> xr.Dataset:
+    return solve_stint_dataset(
+        F1,
+        catalunya,
+        n_laps=10,
+        tier="t0",
+        sim=COARSE,
+        tire_thermal=False,
+        initial_soc=SOC_SEED,
+    )
+
+
+@pytest.fixture(scope="module")
+def f1_10lap_t2(catalunya: Track) -> xr.Dataset:
+    return solve_stint_dataset(
+        F1,
+        catalunya,
+        n_laps=10,
+        tier="t2",
+        sim=COARSE,
+        tire_thermal=False,
+        initial_soc=SOC_SEED,
+        speed_margin=0.85,
+    )
+
+
+def test_stint_soc_10lap_both_tiers_consumption_and_regeneration(
+    f1_10lap_qss: xr.Dataset, f1_10lap_t2: xr.Dataset
+) -> None:
+    """M6 PR8 gate #2 — the author's named acceptance check.
+
+    A 10-lap f1_2026 stint in BOTH tiers, seeded with the SAME explicit ``initial_soc``: the pack SoC
+    changes lap-over-lap according to consumption AND regeneration, is continuous across QSS lap
+    boundaries, and is never re-seeded per lap. (f1_2026 is a hard-deploying, SoC-starved car: it
+    cycles its whole usable window every lap and charge-sustains at the floor — so "consumption AND
+    regeneration" shows as the full within-lap swing, and the carry shows as the pack sitting at the
+    physics-driven floor from lap 2 on, NOT back at the mid-window seed.) The exact charge closure is
+    the Rust companion `crates/outlap-qss/tests/stint.rs`.
+    """
+    q, t2 = f1_10lap_qss, f1_10lap_t2
+    assert q.sizes["lap"] == 10, "QSS stint ran all 10 laps"
+    assert t2.sizes["lap"] == 10, "T2 stint ran all 10 laps"
+
+    # (1) NOT re-seeded (the author's fix) + continuous across QSS boundaries: lap k+1 enters at lap
+    #     k's terminal SoC, and lap 2 is nowhere near the mid-window seed.
+    qsoc = q["state_of_charge"].values  # (lap, s)
+    assert abs(qsoc[1, 0] - SOC_SEED) > 0.05, (
+        "QSS lap 2 must carry the state, not reset to the seed"
+    )
+    assert np.allclose(qsoc[1:, 0], qsoc[:-1, -1], atol=0.05), (
+        "QSS SoC is continuous across laps"
+    )
+
+    # (2) BOTH consumption and regeneration act every lap, in BOTH tiers: the deploy/harvest ledgers
+    #     are both substantial and the within-lap SoC swing is real.
+    for ds, name in ((q, "QSS"), (t2, "T2")):
+        dep = ds["deploy_energy_mj"].values
+        har = ds["harvest_energy_mj"].values
+        assert (dep > 1.0).all(), f"{name}: the MGU-K deploys every lap"
+        assert (har > 1.0).all(), f"{name}: the pack harvests every lap"
+        swing = ds["soc_max"].values - ds["soc_min"].values
+        assert (swing > 0.1).all(), (
+            f"{name}: SoC falls (deploy) and rises (harvest) within every lap"
+        )
+
+    # (3) Decreases under NET consumption: from the seed the pack loses net charge over lap 1 —
+    #     visibly, in BOTH tiers. (The honest net-consumption signal is the SoC *state*, not the
+    #     ledger: a hard-deploying pack rejects harvest at the window ceiling, so the attempted
+    #     harvest ledger can exceed deploy while the pack still net-drains to the floor.)
+    assert qsoc[0, -1] < qsoc[0, 0] - 1e-3, (
+        "QSS lap 1 ends below its start (net consumption)"
+    )
+    assert t2["state_of_charge"].values[0] < SOC_SEED - 1e-3, (
+        "T2 lap 1 ends below the seed"
+    )
+
+    # (4) Increases during harvest: the QSS within-lap trace both falls and rises every lap.
+    d = np.diff(qsoc, axis=1)
+    assert (d.min(axis=1) < 0.0).all(), (
+        "SoC falls under deployment somewhere on every lap"
+    )
+    assert (d.max(axis=1) > 0.0).all(), (
+        "SoC rises under braking/recharge harvest on every lap"
+    )
+
+    # (5) Cross-tier agreement: both tiers cycle the same usable window (harvest toward the ceiling)
+    #     and settle to the same end-of-lap SoC (both charge-sustain at the floor).
+    assert (q["soc_max"].values > 0.8).all(), "QSS recharges toward the window ceiling"
+    assert (t2["soc_max"].values > 0.8).all(), "T2 recharges toward the window ceiling"
+    assert np.allclose(qsoc[:, -1], t2["state_of_charge"].values, atol=0.06), (
+        "both tiers settle to the same end-of-lap SoC"
+    )
+
+
 # --- The wrapper kwarg policy (PR3c) --------------------------------------------------------------
 
 
