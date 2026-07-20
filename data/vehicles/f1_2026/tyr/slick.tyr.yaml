@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # SYNTHETIC tire dataset — physically plausible, not measured. Generation: hand-authored MF6.1
 # core coefficients for a generic racing slick, for schema/round-trip testing only.
-schema: tyr/1.0
+schema: tyr/1.2
+# T3 tyre vertical spring (tyr/1.2): the per-wheel F_z the 14-DOF chassis reads comes from this
+# spring's deflection. ~250 kN/m is representative of a warm F1 slick at working pressure.
+vertical:
+  stiffness_n_per_m: 250000.0
+  damping_n_s_per_m: 500.0
 mf61:
   FNOMIN: 4000.0
   UNLOADED_RADIUS: 0.33

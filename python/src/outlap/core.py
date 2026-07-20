@@ -96,6 +96,13 @@ CHANNEL_ATTRS: dict[str, dict[str, str]] = {
     "slip_angle_rad": {"units": "rad", "long_name": "slip angle α"},
     "force_long_n": {"units": "N", "long_name": "longitudinal tyre force Fx"},
     "force_lat_n": {"units": "N", "long_name": "lateral tyre force Fy"},
+    # T3 suspension channels (tier="t3").
+    "heave_m": {"units": "m", "long_name": "sprung heave z (+up)"},
+    "pitch_rad": {"units": "rad", "long_name": "sprung pitch θ (+nose-down)"},
+    "roll_rad": {"units": "rad", "long_name": "sprung roll φ (+roll right)"},
+    "ride_height_f_m": {"units": "m", "long_name": "front ride height"},
+    "ride_height_r_m": {"units": "m", "long_name": "rear ride height"},
+    "suspension_travel_m": {"units": "m", "long_name": "suspension compression"},
     # Setup metrics.
     "understeer_gradient": {"units": "rad·s²/m", "long_name": "understeer gradient K"},
     "aero_front_share": {"units": "1", "long_name": "front axle downforce share"},
@@ -355,7 +362,7 @@ def solve_lap_dataset(
     else:
         track, raceline_ds_m = line, None
         raceline_generator, raceline_iterations = None, None
-    if tier == "t2":
+    if tier in ("t2", "t3"):
         margin_kw = {} if speed_margin is None else {"speed_margin": speed_margin}
         return transient_lap_dataset(
             solve_transient_lap(
@@ -372,12 +379,13 @@ def solve_lap_dataset(
                 tire_thermal=tire_thermal,
                 override=override,
                 us_schedule=us_schedule,
+                tier=tier,
                 **margin_kw,
             )
         )
     if speed_margin is not None:
         raise ValueError(
-            "speed_margin applies only to the transient tier (tier='t2'); the QSS tiers "
+            "speed_margin applies only to the transient tiers (tier='t2'/'t3'); the QSS tiers "
             "size their speed margin from the g-g-g-v envelope"
         )
     lap = solve_lap(
@@ -507,6 +515,21 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
             _attrs("tire_damage"),
         )
         data["tire_grip"] = (("time", "wheel"), lap.tire_grip(), _attrs("tire_grip"))
+
+    # T3 suspension channels (only when tier="t3"): sprung heave/pitch/roll, ride heights, and the
+    # per-wheel suspension travel — the live degrees of freedom the 14-DOF chassis integrates.
+    heave = lap.heave_m()
+    if heave is not None:
+        data["heave_m"] = ("time", heave, _attrs("heave_m"))
+        data["pitch_rad"] = ("time", lap.pitch_rad(), _attrs("pitch_rad"))
+        data["roll_rad"] = ("time", lap.roll_rad(), _attrs("roll_rad"))
+        data["ride_height_f_m"] = ("time", lap.ride_height_f_m(), _attrs("ride_height_f_m"))
+        data["ride_height_r_m"] = ("time", lap.ride_height_r_m(), _attrs("ride_height_r_m"))
+        data["suspension_travel_m"] = (
+            ("time", "wheel"),
+            lap.suspension_travel_m(),
+            _attrs("suspension_travel_m"),
+        )
 
     return xr.Dataset(
         data,
@@ -756,7 +779,7 @@ def solve_stint_dataset(
     else:
         track, raceline_ds_m = line, None
         raceline_generator, raceline_iterations = None, None
-    if tier == "t2":
+    if tier in ("t2", "t3"):
         margin_kw = {} if speed_margin is None else {"speed_margin": speed_margin}
         return transient_stint_dataset(
             solve_transient_stint(
@@ -775,12 +798,13 @@ def solve_stint_dataset(
                 initial_soc=initial_soc,
                 override=override,
                 us_schedule=us_schedule,
+                tier=tier,
                 **margin_kw,
             )
         )
     if speed_margin is not None:
         raise ValueError(
-            "speed_margin applies only to the transient tier (tier='t2'); the QSS tiers "
+            "speed_margin applies only to the transient tiers (tier='t2'/'t3'); the QSS tiers "
             "size their speed margin from the g-g-g-v envelope"
         )
     return stint_dataset(

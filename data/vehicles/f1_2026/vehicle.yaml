@@ -37,12 +37,28 @@ suspension:
     roll_stiffness_share: 0.58
     roll_center_height_m: 0.03
     anti_dive: 0.4
+    # T3 (14-DOF) suspension data — applied L/R-symmetrically; never estimated (a t3 assembly
+    # rejects a car that omits these). Values are representative of a 2026-style front corner.
+    unsprung_mass_kg: 12.0
+    damper_bump_n_s_per_m: 4500.0
+    damper_rebound_n_s_per_m: 9000.0
+    arb_stiffness_n_m_per_rad: 160000.0
+    bumpstop:
+      gap_m: 0.020
+      rate_n_per_m: 600000.0
   rear:
     ride_rate_n_per_m: 240000.0
     static_ride_height_m: 0.090
     roll_stiffness_share: 0.42
     roll_center_height_m: 0.06
     anti_squat: 0.3
+    unsprung_mass_kg: 13.0
+    damper_bump_n_s_per_m: 5000.0
+    damper_rebound_n_s_per_m: 10000.0
+    arb_stiffness_n_m_per_rad: 130000.0
+    bumpstop:
+      gap_m: 0.025
+      rate_n_per_m: 650000.0
 tires:
   front: tyr/slick.tyr.yaml
   rear: tyr/slick.tyr.yaml
