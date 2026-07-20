@@ -16,8 +16,8 @@ use outlap_qss::T1Vehicle;
 use outlap_schema::io::FsLoader;
 use outlap_schema::vehicle::Vehicle;
 use outlap_schema::{load_conditions, load_vehicle, LoadOptions};
-use outlap_transient::{LineSamples, LineTable, T2Blocks};
-use outlap_vehicle::{AxleRegen, RegenParams, T2Options};
+use outlap_transient::{LineSamples, LineTable, T2Blocks, T3Blocks};
+use outlap_vehicle::{AxleRegen, RegenParams, T2Options, T3Options};
 
 /// Absolute path into the repo `data/` tree.
 #[must_use]
@@ -31,7 +31,8 @@ pub fn data(rel: &str) -> PathBuf {
 pub fn assemble_car(name: &str) -> (T1Vehicle, Vehicle) {
     let vl = FsLoader::new(data(&format!("vehicles/{name}")));
     let resolved = load_vehicle("vehicle.yaml", &vl, &LoadOptions::default()).unwrap();
-    let conditions = load_conditions("conditions.yaml", &vl).unwrap();
+    // A car may not ship a `conditions.yaml` (the production loader defaults it); tolerate that.
+    let conditions = load_conditions("conditions.yaml", &vl).unwrap_or_default();
     let t1 = T1Vehicle::assemble(&resolved, &conditions, &vl, false).unwrap();
     (t1, resolved.spec)
 }
@@ -46,6 +47,35 @@ pub fn assemble(name: &str) -> T1Vehicle {
 #[must_use]
 pub fn limebeer() -> (T1Vehicle, Vehicle) {
     assemble_car("limebeer_2014_f1")
+}
+
+/// The `f1_2026` reference car (carries the T3 suspension block) + its vehicle document. The aero
+/// map sidecar is NOT installed here (the test harness does not read parquets), so its T3 aero uses
+/// the constant lumped coefficients — fine for the schedule/alloc/throughput gates.
+#[must_use]
+pub fn f1_2026() -> (T1Vehicle, Vehicle) {
+    assemble_car("f1_2026")
+}
+
+/// T3 assembly options for the test harness (shared production defaults; a 250 kN/m tyre spring).
+#[must_use]
+pub fn test_opts_t3() -> T3Options {
+    T3Options {
+        base: test_opts(),
+        ..T3Options::default()
+    }
+}
+
+/// Build the full T3 (14-DOF) block set through the shared production assembly (`assemble_t3`).
+///
+/// # Panics
+/// Panics if the vehicle omits the required T3 suspension data (use `f1_2026`).
+#[must_use]
+pub fn build_blocks_t3(t1: &T1Vehicle, spec: &Vehicle, it: &mut ChannelInterner) -> T3Blocks<f64> {
+    let mut notes = Vec::new();
+    outlap_vehicle::assemble_t3(t1, spec, it, &test_opts_t3(), &mut notes)
+        .expect("f1_2026 carries the T3 suspension data")
+        .into()
 }
 
 /// Assembly options for the test harness (the shared production defaults, with a battery assumed
