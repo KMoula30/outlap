@@ -1,0 +1,20 @@
+# outlap chassis 14-DOF handling oracle — analytic single-track from CommonRoad vehicle 2.
+# oracle: CommonRoad vehicle models (Althoff et al., TUM, BSD-3), parameters_vehicle2.
+# generator: python/tools/gen_bmw320i_golden.py — DATA only, never a runtime dep.
+# The BMW 320i ST model uses equal front/rear cornering-stiffness coefficients, so the car
+# is NEUTRAL-steer: understeer gradient K ~= 0 and yaw-rate gain r/delta = V/L (Gillespie).
+key,value
+mass_kg,1093.2952
+a_front_m,1.156196
+b_rear_m,1.422717
+wheelbase_m,2.578913
+cornering_stiffness_front_n_per_rad,129696.693
+cornering_stiffness_rear_n_per_rad,105400.266
+understeer_gradient_rad_s2_per_m,0.000000000
+step_delta_rad,0.02
+step_speed_mps,25.0
+st_step_steady_yaw_gain,9.694007
+yaw_rate_gain_at_15mps,5.816404
+yaw_rate_gain_at_20mps,7.755206
+yaw_rate_gain_at_25mps,9.694007
+yaw_rate_gain_at_30mps,11.632809
