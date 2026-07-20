@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC handling-validation car — the CommonRoad "vehicle 2" (BMW 320i) parameter set, transcribed
+# for the M6 PR8 chassis 14-DOF (T3) validation gate #4. The chassis geometry + inertia + tyre
+# cornering stiffness come from the published CommonRoad vehicle models (M. Althoff et al., TUM,
+# BSD-3 — parameters_vehicle2). The suspension (T3) values are SYNTHETIC passenger-car placeholders
+# (CommonRoad's single-track/multi-body sets do not map one-to-one onto the lumped-KC schema); they
+# are chosen so the linear-regime handling matches the single-track benchmark. NOT a measured car.
+schema: vehicle/1.8
+name: "CommonRoad vehicle 2 — BMW 320i (handling-validation car)"
+chassis:
+  mass_kg: 1093.3 # parameters_vehicle2: m
+  cg: [1.156, 0.0, 0.614] # a (CG→front axle), centred, h_s (CG height)
+  inertia: [500.0, 1650.0, 1791.6] # Ixx/Iyy synthetic (roll/pitch); Izz = I_z (yaw, published)
+  wheelbase_m: 2.579 # a + b
+  track_m: [1.54, 1.54] # BMW 320i (E90) front/rear track ≈ 1.54 m
+aero:
+  map: aero/none.parquet # no ride-height map: a modest constant passenger-car drag, no downforce
+  axes: []
+  constant:
+    cx_a_m2: 0.62 # Cd·A ≈ 0.29 × 2.13 m²
+    cz_front_a_m2: 0.0
+    cz_rear_a_m2: 0.0
+suspension:
+  model: lumped_kc
+  front:
+    ride_rate_n_per_m: 32000.0 # passenger-car front wheel rate
+    static_ride_height_m: 0.130
+    roll_stiffness_share: 0.55
+    roll_center_height_m: 0.05
+    anti_dive: 0.10
+    unsprung_mass_kg: 42.0
+    damper_bump_n_s_per_m: 2500.0
+    damper_rebound_n_s_per_m: 3500.0
+    arb_stiffness_n_m_per_rad: 45000.0
+    bumpstop:
+      gap_m: 0.055
+      rate_n_per_m: 220000.0
+  rear:
+    ride_rate_n_per_m: 36000.0
+    static_ride_height_m: 0.130
+    roll_stiffness_share: 0.45
+    roll_center_height_m: 0.09
+    anti_squat: 0.15
+    unsprung_mass_kg: 45.0
+    damper_bump_n_s_per_m: 2800.0
+    damper_rebound_n_s_per_m: 3800.0
+    arb_stiffness_n_m_per_rad: 32000.0
+    bumpstop:
+      gap_m: 0.060
+      rate_n_per_m: 240000.0
+tires:
+  front: tyr/front.tyr.yaml
+  rear: tyr/rear.tyr.yaml
+drivetrain:
+  units:
+    - source: ptm/engine.ptm.yaml
+      path:
+        - fixed_ratio: 1.0 # envelope defined at the wheel shaft
+        - diff: { type: open }
+      wheels: [RL, RR] # rear-wheel drive
+brakes:
+  balance_bar: 0.62
+  disc:
+    front: { thermal_capacity_j_per_k: 35000.0, cooling_area_m2: 0.08 }
+    rear: { thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06 }

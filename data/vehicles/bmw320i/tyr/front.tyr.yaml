@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC front tyre for the bmw320i handling-validation car (M6 PR8, gate #4). A brush tyre whose
+# linear cornering stiffness is set to the CommonRoad "vehicle 2" (BMW 320i) FRONT-axle value so the
+# T3 14-DOF chassis can be validated against the CommonRoad single-track benchmark in the linear
+# regime. The CommonRoad ST model uses C_alpha = -p_ky1 * F_z (per axle); at the static front-axle
+# load F_zf = m*g*b/L this is ~129.7 kN/rad per axle = 64.85 kN/rad per tyre (the brush tread
+# stiffness below). See python/tools/gen_bmw320i_golden.py for the derivation. NOT a measured tyre.
+schema: tyr/1.2
+mf61:
+  FNOMIN: 5000.0
+  UNLOADED_RADIUS: 0.31
+brush:
+  c_kappa_n: 110000.0
+  c_alpha_n_per_rad: 64848.0 # = -p_ky1 * F_zf / 2 (per-tyre front cornering stiffness, N/rad)
+  mu0: 1.049 # CommonRoad vehicle 2 p_dy1
+  patch_half_length_m: 0.12
+  pressure_profile: parabolic
+vertical:
+  stiffness_n_per_m: 210000.0 # passenger radial tyre carcass rate (~210 kN/m)
+thermal:
+  c_s: 8000.0
+  c_c: 22000.0
+  c_g: 1500.0
+  g_sc: 90.0
+  g_cg: 40.0
+  g_road: 250.0
+  h0: 15.0
+  h1: 5.5
+  p_t: 0.65
+  t_opt: 95.0
+  c_t: 2.2
+  k_c: 0.0015
+  t_c_ref: 80.0
+  p_cold: 138.0
+  t_cold: 20.0
+wear:
+  k_w: 0.0009
+  w_max: 8.0
+  w_c: 2.0
+  tau_d: 600.0
+  t_deg: 120.0
+  delta_t_ref: 20.0
+  beta: 2.0
+  delta_c: 0.25
+  s_w: 0.5
+  delta_d: 0.30
+provenance:
+  citation: "M. Althoff et al., CommonRoad vehicle models (TUM, BSD-3); Pacejka, Tire and Vehicle Dynamics 3rd ed. (2012), ch. 3 (brush)"
+  source: "synthetic — brush tyre matched to the CommonRoad vehicle 2 (BMW 320i) front cornering stiffness"
+  synthetic: true

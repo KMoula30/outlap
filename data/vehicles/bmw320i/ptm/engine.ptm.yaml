@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC passenger-car powertrain for the bmw320i handling-validation car (M6 PR8, gate #4),
+# expressed as a wheel-shaft peak-torque envelope tau(omega) = min(1800 N*m, P/omega), P ~= 150 kW.
+# Only used to let the driver hold a ~constant maneuver speed against drag; the handling metrics are
+# extracted at quasi-steady state, so the powertrain detail is immaterial. No energy accounting.
+schema: ptm/1.0
+kind: drive_unit
+axes:
+  speed_rpm: [0.0, 2000.0]
+  load_axis: { torque_nm: [0.0, 1800.0] }
+  torque_nm: [0.0, 1800.0]
+tables:
+  file: tables/none.parquet
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm: [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1400.0, 1600.0, 1800.0, 2000.0]
+    torque_nm: [1800.0, 1800.0, 1800.0, 1800.0, 1790.0, 1432.0, 1193.0, 1023.0, 895.0, 796.0, 716.0]
+inertia_kgm2: 0.10
+mass_kg: 130.0
+meta: { upstream_ratio_applied: false }
