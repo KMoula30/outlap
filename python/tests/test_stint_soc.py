@@ -226,6 +226,29 @@ def test_stint_soc_10lap_both_tiers_consumption_and_regeneration(
     )
 
 
+def test_pr8_result_fields_are_additive_no_battery_no_fuel(catalunya: Track) -> None:
+    """M6 PR8 bit-identity guard (§3.3): the new SoC/energy result fields are ADDITIVE — a car with
+    no battery and no fuel (limebeer) surfaces none of them, so its result surface is byte-for-byte
+    what it was before PR8."""
+    limebeer = str(_DATA / "vehicles/limebeer_2014_f1")
+    q = solve_stint_dataset(
+        limebeer, catalunya, n_laps=2, tier="t0", sim=COARSE, tire_thermal=False
+    )
+    for ch in (
+        "soc_min",
+        "soc_max",
+        "deploy_energy_mj",
+        "harvest_energy_mj",
+        "state_of_charge",
+        "fuel_mass_kg",
+    ):
+        assert ch not in q, f"a no-battery/no-fuel QSS stint must not surface {ch}"
+    t2 = solve_lap_dataset(limebeer, catalunya, tier="t2", sim=COARSE)
+    assert "fuel_remaining_kg" not in t2.attrs, (
+        "a no-fuel car has no fuel_remaining_kg scalar"
+    )
+
+
 # --- The wrapper kwarg policy (PR3c) --------------------------------------------------------------
 
 
