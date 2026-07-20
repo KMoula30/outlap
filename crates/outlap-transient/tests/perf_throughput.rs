@@ -160,3 +160,56 @@ fn t2_steps_per_second_with_tire_thermal() {
          tripwire"
     );
 }
+
+/// Throughput floor for the **T3 (14-DOF) step** (PR7). T3 gets its OWN tripwire, set at ~half the
+/// first honest T3 measurement (exactly how T2's 30k was derived from its ~62k — user-locked). The
+/// T3 RHS is heavier (24 states + suspension) but resolves `F_z` from the state in ONE eval per RK
+/// stage (no algebraic Picard coupling), so its per-step cost is comparable to T2's. T2's 30k floor
+/// is untouched.
+#[cfg(not(debug_assertions))]
+#[test]
+fn t3_steps_per_second_floor() {
+    use std::f64::consts::PI;
+    use std::time::Instant;
+
+    use common::{build_blocks_t3, f1_2026, line};
+    use outlap_core::bus::ChannelInterner;
+    use outlap_schema::sim::FzCoupling;
+    use outlap_transient::{SimConfig, TransientSolver};
+
+    // First honest T3 measurement was ~96k steps/s/core (FASTER than T2's ~62k: the T3 tyre-spring
+    // F_z resolves from the state in ONE eval per RK stage, where T2 runs 3 extra Picard evals for
+    // the algebraic coupling — the heavier 24-DOF RHS is more than paid for). The tripwire is ~half
+    // that (with margin for slower CI machines), the T2 methodology.
+    const TRIPWIRE: f64 = 40_000.0;
+    const STEPS: usize = 200_000;
+
+    let (t1, spec) = f1_2026();
+    let mut it = ChannelInterner::new();
+    let blocks = build_blocks_t3(&t1, &spec, &mut it);
+    let r = 100.0;
+    let ln = line(2.0 * PI * r, 400, true, 1.0 / r, 1.0 / r, 30.0, Some(r));
+    let cfg = SimConfig {
+        fz_coupling: FzCoupling::FixedPoint,
+        ..SimConfig::default()
+    };
+    let mut solver = TransientSolver::new(blocks, ln, &it, cfg);
+
+    for _ in 0..2_000 {
+        solver.step(); // warm
+    }
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..STEPS {
+            solver.step();
+        }
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    let steps_per_s = STEPS as f64 / best;
+    println!("T3 (14-DOF) step throughput: {steps_per_s:.0} steps/s/core (tripwire {TRIPWIRE:.0})");
+    assert!(
+        steps_per_s >= TRIPWIRE,
+        "T3 throughput {steps_per_s:.0} steps/s/core fell below the {TRIPWIRE:.0} regression tripwire"
+    );
+}

@@ -17,7 +17,7 @@
 
 mod common;
 
-use common::{build_blocks, limebeer, line};
+use common::{build_blocks, build_blocks_t3, f1_2026, limebeer, line};
 use outlap_core::block::{Block, Phase};
 use outlap_core::bus::WHEELS;
 use outlap_core::state::{ChassisState, RelaxState, StateLayout};
@@ -147,6 +147,146 @@ fn assembler_order_is_deterministic_and_phase_sorted() {
     assert!(pos(4) < pos(5), "tyre before torque-vectoring");
     assert!(pos(5) < pos(6), "torque-vectoring before chassis");
     assert!(Phase::Control < Phase::Integrate);
+}
+
+/// Run `n` steps on the given line and return the per-step body speed `v_x` trajectory.
+fn vx_trajectory<B: outlap_transient::TierBlocks<f64>>(
+    mut solver: TransientSolver<f64, B>,
+    n: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        solver.step();
+        out.push(solver.fast_state()[ChassisState::Vx as usize]);
+    }
+    out
+}
+
+#[test]
+fn t3_tracks_t2_on_a_stiffened_platform() {
+    // The headline T2↔T3 parity gate (D-M6-6), recorded as a stiffness sweep. On a flat skidpad the
+    // two tiers share the SAME constant aero (no map installed in the test harness) and the crest
+    // floor is inert, so the difference is the T3 suspension travel PLUS the two refinement terms T3
+    // adds and T2 neglects (the gyroscopic spin×yaw coupling and the κ_v·v² frame transport). The
+    // suspension part shrinks as the springs/ARBs stiffen (×k, dampers ×√k with ζ held, static
+    // compressions ÷k for the same equilibrium, tyre k_z held physical); the refinement part is
+    // stiffness-independent, so the trajectories do NOT converge to bit-identical — they track to a
+    // small, bounded residual (the refinement physics, correctly present at T3). A fine dt keeps the
+    // stiffest corner mode inside Heun stability (ω·dt < 0.5) so the sweep is numerically clean; the
+    // measured deltas are recorded and the whole band is asserted small.
+    let (t1, spec) = f1_2026();
+    let steps = 6_000;
+    let r = 80.0;
+    let mk_line = || line(2.0 * std::f64::consts::PI * r, 400, true, 1.0 / r, 1.0 / r, 42.0, Some(r));
+    // Fine step so a 30× corner mode (~5.5× the physical ~18 Hz wheel hop) stays inside Heun.
+    let fine = SimConfig {
+        dt: 0.0002,
+        ..cfg()
+    };
+
+    let mut it_t2 = outlap_core::bus::ChannelInterner::new();
+    let t2_blocks = build_blocks(&t1, &spec, &mut it_t2);
+    let t2_vx = vx_trajectory(
+        TransientSolver::new(t2_blocks, mk_line(), &it_t2, fine),
+        steps,
+    );
+
+    let mut worst = 0.0_f64;
+    for &k in &[1.0_f64, 3.0, 10.0, 30.0] {
+        let mut it = outlap_core::bus::ChannelInterner::new();
+        let mut blocks = build_blocks_t3(&t1, &spec, &mut it);
+        let s = &mut blocks.chassis.susp;
+        let ksq = k.sqrt();
+        s.arb_f *= k;
+        s.arb_r *= k;
+        for i in 0..WHEELS {
+            s.k_ride[i] *= k;
+            s.static_defl[i] /= k;
+            s.bumpstop_rate[i] *= k;
+            s.damp_bump[i] *= ksq;
+            s.damp_rebound[i] *= ksq;
+        }
+        let t3_vx = vx_trajectory(TransientSolver::new(blocks, mk_line(), &it, fine), steps);
+        let max_diff = t2_vx
+            .iter()
+            .zip(&t3_vx)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        let pct = 100.0 * max_diff / 42.0;
+        println!("T3↔T2 parity: k={k:>4.0}×  max|Δv_x| = {max_diff:.4} m/s ({pct:.2}% of v_ref)");
+        assert!(
+            t3_vx.iter().all(|v| v.is_finite()),
+            "the T3 trajectory stayed finite at k={k}× (ω·dt inside Heun stability)"
+        );
+        worst = worst.max(max_diff);
+    }
+    // The whole sweep tracks T2 to well under 1 m/s (≈2% of the 42 m/s skidpad speed) — the small
+    // bounded residual is the refinement physics, not a suspension artifact (Decision #48 recorded).
+    assert!(
+        worst < 1.0,
+        "the T3↔T2 speed residual should stay < 1 m/s across the sweep; got {worst:.3} m/s"
+    );
+}
+
+#[test]
+fn t3_assembler_order_is_deterministic_and_phase_sorted() {
+    // The T3 sibling of the schedule assertion (PR7b): the 14-DOF block chain
+    // (driver → powertrain → aero → t3-load → tyre → tv → chassis) must be a valid topological
+    // linearization derived programmatically from the block phases + data-dependency edges, not a
+    // hardcoded index vector. Same three properties as the T2 test.
+    let (t1, spec) = f1_2026();
+    let mut it = outlap_core::bus::ChannelInterner::new();
+    let blocks = build_blocks_t3(&t1, &spec, &mut it);
+    let solver = TransientSolver::new(
+        blocks,
+        line(100.0, 50, false, 0.0, 0.0, 20.0, None),
+        &it,
+        cfg(),
+    );
+    let order = solver.schedule().order().to_vec();
+    let probe = build_blocks_t3(&t1, &spec, &mut outlap_core::bus::ChannelInterner::new());
+    let phases = [
+        probe.driver.phase(),
+        probe.powertrain.phase(),
+        probe.aero.phase(),
+        probe.load.phase(),
+        probe.tire.phase(),
+        probe.tv.phase(),
+        probe.chassis.phase(),
+    ];
+    let mut sorted = order.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (0..phases.len()).collect::<Vec<_>>(),
+        "the T3 schedule is a permutation of every registered block"
+    );
+    for w in order.windows(2) {
+        assert!(
+            phases[w[0]] <= phases[w[1]],
+            "T3 phases are non-decreasing: block {} ({:?}) before {} ({:?})",
+            w[0],
+            phases[w[0]],
+            w[1],
+            phases[w[1]]
+        );
+    }
+    // Determinism: same specs → same schedule.
+    let solver2 = TransientSolver::new(
+        build_blocks_t3(&t1, &spec, &mut outlap_core::bus::ChannelInterner::new()),
+        line(100.0, 50, false, 0.0, 0.0, 20.0, None),
+        &it,
+        cfg(),
+    );
+    assert_eq!(order, solver2.schedule().order().to_vec());
+    // Producer→consumer edges: the tyre-spring F_z block (index 3) writes TireFz the tyre (4) reads;
+    // the aero (2) downforce feeds the chassis (6) sprung dynamics.
+    let pos = |b: usize| order.iter().position(|&x| x == b).unwrap();
+    assert!(pos(0) < pos(6), "driver before chassis");
+    assert!(pos(3) < pos(4), "tyre-spring Fz before tyre");
+    assert!(pos(2) < pos(6), "aero before chassis");
+    assert!(pos(4) < pos(5), "tyre before torque-vectoring");
+    assert!(pos(5) < pos(6), "torque-vectoring before chassis");
 }
 
 #[test]
