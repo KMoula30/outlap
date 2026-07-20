@@ -523,8 +523,16 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
         data["heave_m"] = ("time", heave, _attrs("heave_m"))
         data["pitch_rad"] = ("time", lap.pitch_rad(), _attrs("pitch_rad"))
         data["roll_rad"] = ("time", lap.roll_rad(), _attrs("roll_rad"))
-        data["ride_height_f_m"] = ("time", lap.ride_height_f_m(), _attrs("ride_height_f_m"))
-        data["ride_height_r_m"] = ("time", lap.ride_height_r_m(), _attrs("ride_height_r_m"))
+        data["ride_height_f_m"] = (
+            "time",
+            lap.ride_height_f_m(),
+            _attrs("ride_height_f_m"),
+        )
+        data["ride_height_r_m"] = (
+            "time",
+            lap.ride_height_r_m(),
+            _attrs("ride_height_r_m"),
+        )
         data["suspension_travel_m"] = (
             ("time", "wheel"),
             lap.suspension_travel_m(),
