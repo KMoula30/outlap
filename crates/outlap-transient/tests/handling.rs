@@ -48,7 +48,10 @@ fn cfg() -> SimConfig<f64> {
 
 /// Parse the committed oracle metrics (key,value CSV) generated from the CommonRoad ST model.
 fn oracle() -> std::collections::HashMap<String, f64> {
-    let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/bmw320i/metrics.csv"));
+    let path = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/bmw320i/metrics.csv"
+    ));
     let text = std::fs::read_to_string(path).expect("read bmw320i metrics golden");
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.starts_with("key,"))
@@ -82,7 +85,10 @@ fn skidpad_steady_yaw(v: f64, r: f64, delta: f64) -> f64 {
     let mut n = 0.0;
     for k in 0..steps {
         solver.step();
-        assert!(!solver.diverged(), "bmw320i skidpad diverged at v={v}, r={r}");
+        assert!(
+            !solver.diverged(),
+            "bmw320i skidpad diverged at v={v}, r={r}"
+        );
         if k >= steps * 3 / 4 {
             yaw_sum += solver.fast_state()[ChassisState::YawRate as usize];
             n += 1.0;
