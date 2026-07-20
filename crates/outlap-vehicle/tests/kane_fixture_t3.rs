@@ -125,6 +125,8 @@ fn chassis_t3_rhs_matches_kane_derivation_to_1e_12() {
         let mut bus = Bus::<f64>::with_interner(&interner, 1);
         bus.set(CoreSignal::Steer, 0, f(inp, "steer"));
         bus.set(CoreSignal::AeroDrag, 0, f(inp, "drag"));
+        bus.set(CoreSignal::AeroFzFront, 0, f(inp, "fzaf"));
+        bus.set(CoreSignal::AeroFzRear, 0, f(inp, "fzar"));
         bus.set(CoreSignal::YawMomentDemand, 0, f(inp, "dmz"));
         bus.set_channel(road.kappa, 0, f(inp, "kappa"));
         bus.set_channel(road.grade, 0, f(inp, "grade"));

@@ -346,6 +346,8 @@ impl<T: Float> Block<T> for ChassisT3<T> {
         let mut reads = vec![
             CoreSignal::Steer as usize,
             CoreSignal::AeroDrag as usize,
+            CoreSignal::AeroFzFront as usize,
+            CoreSignal::AeroFzRear as usize,
             CoreSignal::YawMomentDemand as usize,
             self.road.kappa.index(),
             self.road.grade.index(),
@@ -552,8 +554,17 @@ impl<T: Float> Block<T> for ChassisT3<T> {
             sum_susp = sum_susp + fs;
         }
 
-        let heave = (sum_susp - s.sprung_mass * g_n) / s.sprung_mass;
-        let pitch = (m_pitch_susp + m_pitch_elastic - m_gyro_y) / s.iyy;
+        // Aero downforce on the sprung body (evaluated at the dynamic ride heights upstream, published
+        // as the per-axle `AeroFzFront`/`AeroFzRear` channels, N, + = down). It heaves the sprung mass
+        // and pitches it about the axle line (front at x[0]=a_f, rear at x[2]=−b_r); front downforce
+        // ⇒ +pitch (nose-down). Reaching the tyres through the springs, it loads the contact patch —
+        // the §6.1 "downforce car is real" coupling. Zero on a car with no aero (bus reads 0).
+        let fz_aero_f = bus.get(CoreSignal::AeroFzFront, lane);
+        let fz_aero_r = bus.get(CoreSignal::AeroFzRear, lane);
+        let m_pitch_aero = fz_aero_f * p.wheels.x[0] + fz_aero_r * p.wheels.x[2];
+
+        let heave = (sum_susp - s.sprung_mass * g_n - (fz_aero_f + fz_aero_r)) / s.sprung_mass;
+        let pitch = (m_pitch_susp + m_pitch_elastic - m_gyro_y + m_pitch_aero) / s.iyy;
         let roll = (m_roll_susp + m_roll_elastic + m_gyro_x) / s.ixx;
 
         // position derivatives = the velocity states; velocity derivatives = the accelerations.
@@ -858,6 +869,52 @@ mod t3_tests {
         let mut dv = DerivView::new(&mut dfast, 1, 0);
         chassis.derivatives(&sv, &mut bus, &mut dv, 0);
         assert!(dfast[ChassisState::PitchRate as usize] > 0.0);
+    }
+
+    /// Aero downforce (the per-axle `AeroFz*` channels) pushes the sprung platform DOWN: a positive
+    /// downforce drives the heave acceleration negative (the §6.1 "downforce car is real" coupling —
+    /// the load reaches the tyres by compressing the springs).
+    #[test]
+    fn aero_downforce_pushes_the_platform_down() {
+        let (chassis, interner) = build::<f64>();
+        let fast = vec![0.0; fast_slot_count()];
+        // No aero ⇒ static equilibrium (zero heave accel).
+        let d0 = eval(&chassis, &interner, &fast)[ChassisState::HeaveRate as usize];
+        // With front+rear downforce the platform accelerates down.
+        let mut bus = Bus::<f64>::with_interner(&interner, 1);
+        bus.set(CoreSignal::AeroFzFront, 0, 5000.0);
+        bus.set(CoreSignal::AeroFzRear, 0, 5000.0);
+        let mut dfast = vec![0.0; fast_slot_count()];
+        let sv = StateView::new(&fast, 1, 0);
+        let mut dv = DerivView::new(&mut dfast, 1, 0);
+        chassis.derivatives(&sv, &mut bus, &mut dv, 0);
+        assert!(d0.abs() < 1e-9);
+        assert!(
+            dfast[ChassisState::HeaveRate as usize] < -1e-6,
+            "downforce must push the platform down: {}",
+            dfast[ChassisState::HeaveRate as usize]
+        );
+    }
+
+    /// Front-axle aero downforce pitches the nose DOWN (θ̈ > 0 = dive), the mechanism behind the
+    /// pitch-under-aero-load balance shift; rear downforce pitches it up.
+    #[test]
+    fn front_downforce_pitches_nose_down() {
+        let (chassis, interner) = build::<f64>();
+        let fast = vec![0.0; fast_slot_count()];
+        let mut front = Bus::<f64>::with_interner(&interner, 1);
+        front.set(CoreSignal::AeroFzFront, 0, 8000.0);
+        let mut rear = Bus::<f64>::with_interner(&interner, 1);
+        rear.set(CoreSignal::AeroFzRear, 0, 8000.0);
+        let pitch = |bus: &mut Bus<f64>| {
+            let mut dfast = vec![0.0; fast_slot_count()];
+            let sv = StateView::new(&fast, 1, 0);
+            let mut dv = DerivView::new(&mut dfast, 1, 0);
+            chassis.derivatives(&sv, bus, &mut dv, 0);
+            dfast[ChassisState::PitchRate as usize]
+        };
+        assert!(pitch(&mut front) > 1e-6, "front downforce ⇒ dive");
+        assert!(pitch(&mut rear) < -1e-6, "rear downforce ⇒ nose-up");
     }
 
     /// The gyroscopic spin×yaw coupling is live: yaw rate on spinning wheels perturbs the roll
