@@ -26,7 +26,7 @@ use num_traits::Float;
 
 use outlap_core::block::{Block, Phase, Ports};
 use outlap_core::bus::{Bus, CoreSignal, WheelSignal, WHEELS};
-use outlap_core::interp::MonotoneCubic;
+use outlap_core::interp::{InterpError, MonotoneCubic, PiecewiseLinear};
 use outlap_core::state::{ChassisState, ControllerState, DerivView, StateView};
 
 use crate::params::{ActuationChannels, RoadChannels};
@@ -79,7 +79,55 @@ pub fn preview_distance<T: Float>(vx: T, preview_time: T) -> T {
 /// here and the RK sweep integrates it. The point-mass QSS profile spends the whole grip envelope
 /// longitudinally; a transient rear-drive car needs a grip margin on a real track until PR6's active
 /// yaw moment lands.
-#[derive(Clone, Copy, Debug)]
+/// The source of the driver's steering command (§8.3 `u(s)`, M6/PR8).
+///
+/// `ClosedLoop` is the default MacAdam-preview + curvature-FF + yaw-stabilisation law. `Prescribed`
+/// replaces ONLY the lateral output with an open-loop steer schedule δ(s) (rad) — the longitudinal
+/// speed loop is untouched — so an open-loop skidpad / step-steer / swept-sine maneuver drives a
+/// true prescribed steer angle for the T3 handling-validation gates. A control input, not car
+/// identity (D-M6-9): never a schema field.
+#[derive(Clone, Debug, Default)]
+pub enum SteerSource<T> {
+    /// The closed-loop path law (default).
+    #[default]
+    ClosedLoop,
+    /// An open-loop steer schedule δ(s), rad, over arc length `s` (m).
+    Prescribed(PrescribedSteer<T>),
+}
+
+/// A prescribed open-loop steer schedule δ(s), rad, over arc length `s` (m). Evaluated with the exact
+/// piecewise-linear interpolant (clamped at the ends, zero-alloc): accurate at every breakpoint for a
+/// step and, on a finely-sampled grid, for a sine — without the peak-flattening a [`MonotoneCubic`]
+/// would impose on a non-monotone schedule. At (approximately) constant maneuver speed `s = v·t`, so a
+/// spatial schedule realises the desired δ(t) with spatial frequency `k = 2πf/v`.
+#[derive(Clone, Debug)]
+pub struct PrescribedSteer<T> {
+    delta_of_s: PiecewiseLinear<T>,
+}
+
+impl<T: Float> PrescribedSteer<T> {
+    /// Build from a strictly increasing arc-length grid `s_m` (m) and steer angles `delta_rad` (rad).
+    ///
+    /// # Errors
+    /// Returns [`InterpError`] when the grid is invalid (see [`PiecewiseLinear::new`]).
+    pub fn new(s_m: Vec<T>, delta_rad: Vec<T>) -> Result<Self, InterpError> {
+        Ok(Self {
+            delta_of_s: PiecewiseLinear::new(s_m, delta_rad)?,
+        })
+    }
+
+    /// The prescribed steer angle at arc length `s` (m), rad, clamped to the schedule ends.
+    #[must_use]
+    pub fn eval(&self, s: T) -> T {
+        self.delta_of_s.eval(s)
+    }
+}
+
+/// The ideal-driver control block: MacAdam-style preview steer + curvature feed-forward + yaw-rate
+/// stabilisation on the lateral axis, and a preview-feed-forward PI speed loop on the longitudinal
+/// axis, tracking the QSS reference profile. The steering source is selectable
+/// ([`SteerSource`]) — the default closed-loop law, or an open-loop prescribed δ(s) for maneuvers.
+#[derive(Clone, Debug)]
 pub struct Driver<T> {
     /// Wheelbase `L`, m (curvature feed-forward arm).
     pub wheelbase: T,
@@ -122,6 +170,9 @@ pub struct Driver<T> {
     pub integral_limit: T,
     /// Interned road channels (reads the current + preview target-line channels).
     pub road: RoadChannels,
+    /// The steering command source (default [`SteerSource::ClosedLoop`]); `Prescribed` overrides the
+    /// lateral output with an open-loop δ(s) schedule for the M6/PR8 handling maneuvers.
+    pub steer_source: SteerSource<T>,
 }
 
 impl<T: Float> Block<T> for Driver<T> {
@@ -190,7 +241,16 @@ impl<T: Float> Block<T> for Driver<T> {
         let d_fb = grip * self.preview_gain * e_lat - self.heading_gain * psi
             + yaw_gain * (r_target - r)
             - self.sideslip_damping * beta;
-        let steer = (d_ff + d_fb).max(-self.max_steer).min(self.max_steer);
+        // The closed-loop law drives steer by default; a prescribed schedule (M6/PR8) overrides ONLY
+        // the lateral output with an open-loop δ(s). The `ClosedLoop` arm is the same expression as
+        // the pre-PR8 driver, unmoved — byte-identical on the default path.
+        let steer = match &self.steer_source {
+            SteerSource::ClosedLoop => (d_ff + d_fb).max(-self.max_steer).min(self.max_steer),
+            SteerSource::Prescribed(schedule) => {
+                let s = x.chassis(ChassisState::S);
+                schedule.eval(s).max(-self.max_steer).min(self.max_steer)
+            }
+        };
         bus.set(CoreSignal::Steer, lane, steer);
 
         // --- Speed: preview feed-forward + PI, cut back as the car slides (grip). ---
@@ -1218,6 +1278,55 @@ mod regen_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod steer_tests {
+    //! The open-loop prescribed steer schedule (M6/PR8): it reproduces a step exactly at the
+    //! breakpoints, tracks a finely-sampled sine to interpolation tolerance, clamps outside the grid,
+    //! and is deterministic.
+    use super::PrescribedSteer;
+
+    #[test]
+    fn reproduces_a_step_exactly_at_the_breakpoints() {
+        // A δ step from 0 to 0.05 rad at s = 50 m (the step-steer command).
+        let sched =
+            PrescribedSteer::new(vec![0.0, 49.999, 50.0, 200.0], vec![0.0, 0.0, 0.05, 0.05])
+                .unwrap();
+        assert_eq!(sched.eval(0.0), 0.0);
+        assert_eq!(sched.eval(40.0), 0.0);
+        assert_eq!(sched.eval(50.0), 0.05);
+        assert_eq!(sched.eval(120.0), 0.05);
+        // Clamps to the endpoint values outside the grid.
+        assert_eq!(sched.eval(-10.0), 0.0);
+        assert_eq!(sched.eval(1_000.0), 0.05);
+    }
+
+    #[test]
+    fn tracks_a_finely_sampled_sine_to_interpolation_tolerance() {
+        // δ(s) = A·sin(k·s): on a fine grid the exact piecewise-linear interpolant recovers the sine
+        // to well under a per-cent of the amplitude — enough for the linear-regime frequency response.
+        let (amp, k) = (0.03, 0.05);
+        let n = 4001;
+        let s: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
+        let d: Vec<f64> = s.iter().map(|&si| amp * (k * si).sin()).collect();
+        let sched = PrescribedSteer::new(s, d).unwrap();
+        let mut worst = 0.0_f64;
+        for j in 0..2000 {
+            let si = 0.05 + j as f64 * 0.2; // off-grid query points
+            let err = (sched.eval(si) - amp * (k * si).sin()).abs();
+            worst = worst.max(err);
+        }
+        assert!(worst < 1.0e-3 * amp, "sine interp error {worst} too large");
+    }
+
+    #[test]
+    fn is_deterministic() {
+        let sched = PrescribedSteer::new(vec![0.0, 100.0, 200.0], vec![0.0, 0.04, -0.04]).unwrap();
+        for _ in 0..3 {
+            assert_eq!(sched.eval(73.21), sched.eval(73.21));
         }
     }
 }
