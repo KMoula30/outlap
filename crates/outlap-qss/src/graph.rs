@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use outlap_schema::refs::UnitId;
 use outlap_schema::vehicle::{Coupler, DriveUnit, Drivetrain, Wheel};
 use outlap_schema::Vehicle;
 
@@ -21,7 +22,7 @@ pub(crate) fn governed_unit_ids(spec: &Vehicle) -> HashSet<&str> {
     spec.policy
         .iter()
         .flat_map(|p| p.governs.iter())
-        .map(|u| u.as_str())
+        .map(UnitId::as_str)
         .collect()
 }
 

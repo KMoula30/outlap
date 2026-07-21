@@ -19,9 +19,7 @@
 use outlap_powertrain::{
     DecideInput, DeployPolicy, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger,
 };
-use outlap_schema::vehicle::{
-    Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper,
-};
+use outlap_schema::vehicle::{Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper};
 
 const DT: f64 = 0.02;
 /// Usable-window energy for the toy SoC integrator, J (D-M6-3: 4 MJ over [0.2, 0.9]).

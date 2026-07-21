@@ -6,9 +6,7 @@
 #![allow(clippy::doc_markdown, clippy::cast_precision_loss)] // fixture names; 53-bit RNG mantissa
 
 use outlap_schema::io::FsLoader;
-use outlap_schema::vehicle::{
-    Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper,
-};
+use outlap_schema::vehicle::{Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper};
 use outlap_schema::{load_vehicle, LoadOptions};
 
 /// The f1_es governed pack's usable SoC window (the rulebook's `recharge_target` default source).
