@@ -97,21 +97,38 @@ pub mod schema_name {
     pub const SIM: &str = "sim";
 }
 
-/// The MAJOR version this build of the loader accepts for every schema (loaders accept same-major).
+/// The MAJOR version this build of the loader accepts for documents that have never had a breaking
+/// change. Used as the default-constructor major for every non-`vehicle` document (the `vehicle`
+/// schema is on its own MAJOR — see [`current_major`]).
 pub const SCHEMA_MAJOR: u16 = 1;
+
+/// The MAJOR version this build of the loader accepts for a given document kind.
+///
+/// Formerly a single global [`SCHEMA_MAJOR`] shared by every schema; that conflated unrelated
+/// documents — the D-M6-13 ERS/drivetrain restructure reshapes ONLY the `vehicle` document
+/// (`ers:`/singleton `battery:` → `policy:`/`batteries:` map + first-class drivetrain graph), a
+/// genuinely breaking change, while `ptm`/`tyr`/`battery`/`emotor`/`sim`/`track`/`conditions` keep
+/// their `1.x` shape. A per-document major lets `vehicle` advance to `2` without dragging every
+/// sidecar with it.
+pub fn current_major(name: &str) -> u16 {
+    match name {
+        schema_name::VEHICLE => 2,
+        _ => SCHEMA_MAJOR,
+    }
+}
 
 /// The highest MINOR this build fully understands for each document kind, replacing the former
 /// single global counter (which conflated unrelated documents: a `tyr` bump inflated the `vehicle`
 /// minor). Additive/forward-compatible within a MAJOR; an unknown key in a file that declares a
 /// newer MINOR than this table is flagged as possibly-newer-schema.
 ///
-/// Per-document history — `vehicle`: 1.2 suspension `static_ride_height_m` (§7.4), 1.5 optional
-/// `driver` section (§7.7), 1.6 rule-based control layer (torque-vectoring `max_yaw_moment_nm`
-/// cap §8.0 + brakes `regen_blend` §7.6), 1.7 optional ERS
-/// `elec_mech_factor` + `recovery` recharge-phase fields (§8.3, M6/PR1), 1.8 optional `fuel`
-/// block (§8.1 mass/CG/flow-limit, M6/PR5) + drivetrain `shift_maps` (§8.3 named up-shift maps,
-/// M6/PR5), 1.9 optional T3 suspension fields (per-axle `unsprung_mass_kg`, bump/rebound dampers,
-/// absolute `arb_stiffness_n_m_per_rad`, `bumpstop`, §7.5/§6.1 14-DOF, M6/PR6); `ptm`: 1.1 optional
+/// Per-document history — `vehicle`: **2.0** is the D-M6-13 ERS/drivetrain-restructure baseline
+/// (MAJOR, no back-compat, no `outlap migrate`): the singleton `ers:` block and singleton
+/// `battery:` are replaced by an optional generic `policy:` overlay + an id-keyed `batteries:` map,
+/// and `drivetrain` gains a first-class graph (unit `id`/`output`, top-level `couplers`) with the
+/// MGU-K promoted to a `units[]` entry. All prior `vehicle` minors (1.2 ride height, 1.5 driver,
+/// 1.6 control layer, 1.7 ERS recharge fields, 1.8 fuel + shift maps, 1.9 T3 suspension) fold into
+/// this reset baseline. `ptm`: 1.1 optional
 /// Vdc axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block, 1.2 optional
 /// structured `vertical` block (tyre `k_z`/`c_z` for the T3 per-wheel `F_z`, §7.5, M6/PR6);
 /// `battery`: 1.1 `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` +
@@ -134,7 +151,8 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// rulebook consumes it — any further semantics change is MAJOR.
 pub fn current_minor(name: &str) -> u16 {
     match name {
-        schema_name::VEHICLE => 9,
+        // Reset to the fresh 2.0 baseline (see `current_major`); the vehicle document is on MAJOR 2.
+        schema_name::VEHICLE => 0,
         schema_name::PTM | schema_name::BATTERY | schema_name::TYR => 2,
         schema_name::SIM => 1,
         // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.
