@@ -2,7 +2,7 @@
 # Test topology: a lumped PDT drive-unit (ptm/pdt_synth_du.ptm.yaml, ratio already applied at the
 # output shaft) -> open diff -> RL+RR. Used by the T1 powertrain tests (map install, PDT round-trip,
 # energy closure, traction ceiling). SYNTHETIC — never derived from PDT data (firewall).
-schema: vehicle/1.0
+schema: vehicle/2.0
 name: "PDT drive-unit RWD (test)"
 chassis:
   mass_kg: 420.0
@@ -33,6 +33,7 @@ tires:
 drivetrain:
   units:
     - source: ptm/pdt_synth_du.ptm.yaml
+      id: du
       path:
         - diff: { type: open }
       wheels: [RL, RR]
