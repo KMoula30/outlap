@@ -356,9 +356,15 @@ pub(crate) fn prepare_qss(
     let ers_policy = us_schedule.map_or(outlap_qss::ers::ErsPolicy::RuleBased, |u| {
         outlap_qss::ers::ErsPolicy::Schedule(u)
     });
+    // The governed pack's usable SoC window feeds the manager rulebook's recharge-target default
+    // (the pack is the single source of truth, D-M6-13); [0,1] when no pack (the coupling is inert).
+    let pack_window = stack
+        .as_ref()
+        .map_or([0.0, 1.0], |(_, pack, _)| pack.soc_window());
     let ers_coupling = build_ers_coupling(
         &resolved,
         &t0v,
+        pack_window,
         stack.is_some(),
         sim_cfg.allow_degraded,
         ers_policy,
@@ -508,13 +514,14 @@ pub(crate) fn solve_lap(
 pub(crate) fn build_ers_coupling(
     resolved: &ResolvedVehicle,
     t0v: &T0Vehicle,
+    pack_soc_window: [f64; 2],
     pack_present: bool,
     allow_degraded: bool,
     policy: outlap_qss::ers::ErsPolicy<f64>,
     override_active: bool,
     notes: &mut Vec<String>,
 ) -> PyResult<Option<ErsCoupling>> {
-    if resolved.spec.ers.is_none() {
+    if resolved.spec.policy.is_none() {
         return Ok(None);
     }
     if !pack_present {
@@ -533,8 +540,14 @@ pub(crate) fn build_ers_coupling(
         );
         return Ok(None);
     }
-    let coupling =
-        ErsCoupling::assemble(&resolved.spec, t0v, policy, override_active).map_err(err)?;
+    let coupling = ErsCoupling::assemble(
+        &resolved.spec,
+        t0v,
+        pack_soc_window,
+        policy,
+        override_active,
+    )
+    .map_err(err)?;
     Ok(coupling)
 }
 

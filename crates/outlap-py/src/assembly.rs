@@ -197,6 +197,29 @@ pub(crate) fn install_sidecars(
 /// car declares no battery, or when its stack files are not present (a note says which — nothing
 /// silent); a present-but-broken file is a real error. Shared by the QSS slow coupling and the T2
 /// slow-state stack, so both see the same charge-acceptance model.
+/// Resolve the relevant pack from the id-keyed `batteries` map — the same rule
+/// `outlap_qss::plan_slow_stack` uses: the policy-governed machine's pack, else the first electric
+/// unit's pack, else the sole map entry. A single-pack car has exactly one entry (D-M6-13).
+pub(crate) fn primary_pack(
+    spec: &outlap_schema::Vehicle,
+) -> Option<&outlap_schema::vehicle::Battery> {
+    let governed = spec
+        .policy
+        .as_ref()
+        .and_then(|p| p.governs.first())
+        .and_then(|id| spec.drivetrain.units.iter().find(|u| u.id == *id))
+        .and_then(|u| u.battery.as_ref());
+    let first = spec
+        .drivetrain
+        .units
+        .iter()
+        .find_map(|u| u.battery.as_ref());
+    governed
+        .or(first)
+        .and_then(|id| spec.batteries.get(id))
+        .or_else(|| spec.batteries.values().next())
+}
+
 pub(crate) fn load_pack(
     resolved: &ResolvedVehicle,
     vl: &FsLoader,
@@ -204,8 +227,8 @@ pub(crate) fn load_pack(
 ) -> PyResult<Option<(Pack, PackState)>> {
     use outlap_schema::sidecar::read_gridded_table;
 
-    let Some(batt) = &resolved.spec.battery else {
-        return Ok(None); // no battery block ⇒ single-voltage evaluation (PR6 coupling rule)
+    let Some(batt) = primary_pack(&resolved.spec) else {
+        return Ok(None); // no batteries entry ⇒ single-voltage evaluation (PR6 coupling rule)
     };
     let params_path = batt.params.as_str();
     let doc = match outlap_schema::load::load_battery(params_path, vl) {
@@ -279,7 +302,7 @@ pub(crate) fn build_slow_stack(
                 soc * 100.0
             ));
         }
-    } else if resolved.spec.ers.is_some() {
+    } else if resolved.spec.policy.is_some() {
         pack_state.soc = 0.5 * (lo + hi);
         notes.push(format!(
             "QSS pack seeded at {:.0}% state of charge, the middle of its usable window \

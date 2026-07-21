@@ -353,10 +353,11 @@ fn powertrain_block(
         max_brake_torque: opts.max_brake_torque_nm,
         brake_front_bias: t1.brake_front_bias,
         regen,
-        // A car with an `ers:` block is governed by the rule-based energy manager (a schema-derived
-        // FACT, not an estimate — PR4i): the boundary controller schedules the MGU-K deploy and owns
-        // the pack electrical accounting.
-        ers_governed: spec.ers.is_some(),
+        // A car with a `policy:` overlay is governed by the rule-based energy manager (a
+        // schema-derived FACT, not an estimate — PR4i): the boundary controller schedules the
+        // governed machine's deploy and owns the pack electrical accounting. A plain EV (electric
+        // units but no policy) stays ungoverned → byte-identical to v0.3.0 (D-M6-13).
+        ers_governed: spec.policy.is_some(),
         actuation,
     }
 }
