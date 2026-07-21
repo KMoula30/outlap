@@ -38,12 +38,12 @@ fn flat_ptm(torque: f64) -> String {
 /// Build a 1000 kg, single-fixed-ratio (4:1) EV with the given constant aero and drive unit.
 fn vehicle(cx: f64, cz: f64, ptm: &str) -> T0Vehicle {
     let veh = format!(
-        "schema: vehicle/1.0\nname: t\n\
+        "schema: vehicle/2.0\nname: t\n\
          chassis: {{mass_kg: 1000.0, cg: [1.4, 0.0, 0.3], inertia: [100.0, 400.0, 450.0], wheelbase_m: 2.8, track_m: [1.6, 1.6]}}\n\
          aero: {{map: a.parquet, axes: [], constant: {{cx_a_m2: {cx}, cz_front_a_m2: 0.0, cz_rear_a_m2: {cz}}}}}\n\
          suspension: {{model: lumped_kc, front: {{ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}, rear: {{ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}}}\n\
          tires: {{front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}}\n\
-         drivetrain: {{units: [{{source: ptm/u.ptm.yaml, path: [{{fixed_ratio: 4.0}}], wheels: [RL, RR]}}]}}\n\
+         drivetrain: {{units: [{{id: u0, source: ptm/u.ptm.yaml, path: [{{fixed_ratio: 4.0}}], wheels: [RL, RR]}}]}}\n\
          brakes: {{balance_bar: 0.6, disc: {{front: {{thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}}, rear: {{thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}}}}}}\n"
     );
     let loader = MemLoader::new()

@@ -149,8 +149,9 @@ fn ev(regen: bool, soc0: f64) -> Ev {
     // The 800 V pack.
     let batt_path = resolved
         .spec
-        .battery
-        .as_ref()
+        .batteries
+        .values()
+        .next()
         .unwrap()
         .params
         .as_str()
