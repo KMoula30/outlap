@@ -79,12 +79,31 @@ fn drive_unit_behind_gearbox_is_a_topology_error() {
 
 #[test]
 fn bad_soc_window_is_a_semantic_error() {
+    // The bad window now lives on the referenced pack document (D-M6-13 single source of truth).
     let err = load_err("bad/bad_soc/vehicle.yaml");
     match err {
         SchemaError::Semantic { message, .. } => {
             assert!(message.contains("soc_window"), "message: {message}");
         }
         other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+/// A pre-2.0 (`ers:` / singular `battery:`) layout hard-fails with the curated legacy diagnostic
+/// (there is no `outlap migrate`) — the D-M6-13 legacy sniff.
+#[test]
+fn a_legacy_ers_layout_is_rejected() {
+    let err = load_err("bad/legacy_ers/vehicle.yaml");
+    match err {
+        SchemaError::LegacyDrivetrainFormat { message, help, .. } => {
+            assert!(message.contains("ers"), "names the legacy key: {message}");
+            let help = help.expect("a pointer to the new layout");
+            assert!(
+                help.contains("policy") && help.contains("batteries"),
+                "help points at the new shape: {help}"
+            );
+        }
+        other => panic!("expected LegacyDrivetrainFormat, got {other:?}"),
     }
 }
 
@@ -190,7 +209,7 @@ fn unknown_key_in_newer_minor_hints_at_schema_version() {
 fn type_mismatch_reports_path_and_span() {
     // mass_kg is a string where a number is required.
     let yaml = "\
-schema: vehicle/1.0
+schema: vehicle/2.0
 name: bad types
 chassis:
   mass_kg: \"heavy\"
@@ -220,21 +239,29 @@ fn same_major_minor_is_accepted_but_new_major_is_rejected() {
              inertia: [1.0,1.0,1.0]\n  wheelbase_m: 2.5\n  track_m: [1.5,1.5]\n"
         )
     };
-    // A newer MINOR under the same MAJOR is accepted (it then fails later for missing fields,
-    // NOT with a version error).
-    let l = MemLoader::new().with("v.yaml", base("vehicle/1.9"));
+    // A newer MINOR under the same MAJOR (vehicle is on MAJOR 2 now) is accepted (it then fails
+    // later for missing fields, NOT with a version error).
+    let l = MemLoader::new().with("v.yaml", base("vehicle/2.9"));
     let err = load_vehicle("v.yaml", &l, &LoadOptions::default()).unwrap_err();
     assert!(
         !matches!(err, SchemaError::SchemaVersionMismatch { .. }),
-        "1.9 should pass the gate"
+        "2.9 should pass the gate"
     );
 
-    // A new MAJOR is rejected at the version gate.
-    let l = MemLoader::new().with("v.yaml", base("vehicle/2.0"));
+    // The old MAJOR (1.x) is rejected at the version gate (D-M6-13 bumped vehicle to 2).
+    let l = MemLoader::new().with("v.yaml", base("vehicle/1.9"));
     let err = load_vehicle("v.yaml", &l, &LoadOptions::default()).unwrap_err();
     assert!(
         matches!(err, SchemaError::SchemaVersionMismatch { .. }),
-        "2.0 must be rejected"
+        "1.9 must be rejected"
+    );
+
+    // A future MAJOR is rejected too.
+    let l = MemLoader::new().with("v.yaml", base("vehicle/3.0"));
+    let err = load_vehicle("v.yaml", &l, &LoadOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, SchemaError::SchemaVersionMismatch { .. }),
+        "3.0 must be rejected"
     );
 
     // Wrong document kind is rejected.
@@ -352,9 +379,9 @@ fn a_rising_taper_power_frac_is_rejected() {
         .spec;
     let mut broken = base;
     broken
-        .ers
+        .policy
         .as_mut()
-        .expect("f1_2026 has ers")
+        .expect("f1_2026 has policy")
         .deployment
         .taper_vs_speed
         .power_frac = vec![0.5, 1.0, 0.0];
@@ -376,7 +403,7 @@ fn a_recharge_target_outside_the_soc_window_is_rejected() {
         .expect("fixture resolves")
         .spec;
     let mut broken = base;
-    broken.ers.as_mut().unwrap().recovery.recharge_target_soc = Some(0.95); // window is [0.2, 0.9]
+    broken.policy.as_mut().unwrap().recovery.recharge_target_soc = Some(0.95); // window is [0.2, 0.9]
     let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
         .expect_err("a target outside the window must be rejected");
     assert!(
@@ -395,9 +422,9 @@ fn per_lap_deploy_budget_is_not_estimated() {
     assert!(
         resolved
             .spec
-            .ers
+            .policy
             .as_ref()
-            .expect("f1_2026 has ers")
+            .expect("f1_2026 has policy")
             .deployment
             .per_lap_deploy_mj
             .is_none(),
@@ -423,18 +450,18 @@ fn the_new_ers_recovery_fields_load() {
         .spec;
     let mut spec = base;
     {
-        let ers = spec.ers.as_mut().unwrap();
-        ers.elec_mech_factor = Some(0.97);
-        ers.recovery.recharge_target_soc = Some(0.55);
-        ers.recovery.ramp_initial_step_kw = Some(150.0);
-        ers.recovery.ramp_rate_kw_per_s = Some(50.0);
-        ers.recovery.ramp_total_kw = Some(700.0);
+        let policy = spec.policy.as_mut().unwrap();
+        policy.elec_mech_factor = Some(0.97);
+        policy.recovery.recharge_target_soc = Some(0.55);
+        policy.recovery.ramp_initial_step_kw = Some(150.0);
+        policy.recovery.ramp_rate_kw_per_s = Some(50.0);
+        policy.recovery.ramp_total_kw = Some(700.0);
     }
     let resolved = resolve_vehicle(&spec, &Overrides::default(), &l, &LoadOptions::default())
         .expect("the new optional fields validate");
-    let ers = resolved.spec.ers.expect("ers present");
-    assert_eq!(ers.recovery.recharge_target_soc, Some(0.55));
-    assert_eq!(ers.elec_mech_factor, Some(0.97));
+    let policy = resolved.spec.policy.expect("policy present");
+    assert_eq!(policy.recovery.recharge_target_soc, Some(0.55));
+    assert_eq!(policy.elec_mech_factor, Some(0.97));
 }
 
 // --- M6 PR2: the ers↔battery integrity contract ----------------------------------------------
@@ -468,7 +495,7 @@ fn an_ers_vehicle_with_a_missing_battery_file_is_gated() {
         .expect_err("missing battery on an ers car must be a hard error");
     let msg = format!("{err}");
     assert!(
-        msg.contains("not found") && msg.contains("energy store"),
+        msg.contains("not found") && msg.contains("pack"),
         "the message explains the contract: {msg}"
     );
 
@@ -485,49 +512,52 @@ fn an_ers_vehicle_with_a_missing_battery_file_is_gated() {
             .report
             .degraded
             .iter()
-            .any(|e| e.pointer.contains("battery")),
+            .any(|e| e.pointer.contains("batteries")),
         "the degradation is recorded, nothing silent"
     );
 }
 
-/// An `ers:` block without any `battery:` reference at all is the same contract violation.
+/// A `policy:` overlay governing a unit whose `battery:` pack has no `batteries:` entry is a
+/// contract violation — the governed pack must exist (caught at the semantic id resolution).
 #[test]
 fn an_ers_vehicle_without_a_battery_block_is_gated() {
     let stripped = GT_VEHICLE.replace(
-        "battery:\n  model: rc_pairs\n  params: battery/gt_es.yaml\n",
+        "batteries:\n  gt_es:\n    model: rc_pairs\n    params: battery/gt_es.yaml\n",
         "",
     );
-    assert!(!stripped.contains("battery:"), "block stripped");
+    assert!(!stripped.contains("batteries:"), "block stripped");
     let l = gt_loader(&stripped, Some(GT_BATTERY));
     let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
-        .expect_err("ers without a battery block must be a hard error");
+        .expect_err("a governed unit with no batteries map must be a hard error");
     assert!(
-        format!("{err}").contains("`battery:`"),
-        "the fix is named: {err}"
+        format!("{err}").contains("battery"),
+        "the missing pack is named: {err}"
     );
-    let resolved = load_vehicle(
+    // An unresolved in-document `battery:` id is a semantic contract error, not a degradable
+    // missing file — `allow_degraded` does not paper over it (the id simply doesn't resolve).
+    let err = load_vehicle(
         "vehicle.yaml",
         &l,
         &LoadOptions {
             allow_degraded: true,
         },
     )
-    .expect("allow_degraded keeps the car solvable");
-    assert!(!resolved.report.degraded.is_empty());
+    .expect_err("an unresolved battery id stays a hard error");
+    assert!(format!("{err}").contains("battery"));
 }
 
-/// `ers.es.capacity_mj` is the FIA C5.2.9 on-track swing limit; it must FIT WITHIN the battery's
+/// `policy.regulatory_window_mj` is the FIA C5.2.9 on-track swing limit; it must FIT WITHIN the battery's
 /// physical usable-window energy `(window span) × e_pack_wh` — a swing that draws more than the
 /// store physically holds is a vehicle-level declaration error.
 #[test]
 fn an_ers_swing_limit_over_the_physical_window_is_rejected() {
-    let bad = GT_VEHICLE.replace("capacity_mj: 2.0", "capacity_mj: 2.5");
+    let bad = GT_VEHICLE.replace("regulatory_window_mj: 2.0", "regulatory_window_mj: 2.5");
     let l = gt_loader(&bad, Some(GT_BATTERY));
     let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
         .expect_err("a swing limit above the physical window must be rejected");
     let msg = format!("{err}");
     assert!(
-        msg.contains("capacity_mj") && msg.contains("e_pack_wh"),
+        msg.contains("regulatory_window_mj") && msg.contains("e_pack_wh"),
         "both sides of the disagreement are named: {msg}"
     );
 }
@@ -537,25 +567,15 @@ fn an_ers_swing_limit_over_the_physical_window_is_rejected() {
 /// old `= window` heuristic would have rejected this.
 #[test]
 fn a_swing_limit_below_the_physical_window_is_accepted() {
-    let smaller = GT_VEHICLE.replace("capacity_mj: 2.0", "capacity_mj: 1.5");
+    let smaller = GT_VEHICLE.replace("regulatory_window_mj: 2.0", "regulatory_window_mj: 1.5");
     let l = gt_loader(&smaller, Some(GT_BATTERY));
     let resolved = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
         .expect("a reg swing limit below the physical window is valid (independent of it)");
-    assert!((resolved.spec.ers.as_ref().unwrap().es.capacity_mj - 1.5).abs() < 1e-9);
+    assert!((resolved.spec.policy.as_ref().unwrap().regulatory_window_mj - 1.5).abs() < 1e-9);
 }
 
-/// The two `soc_window` declarations are ONE physical window and must agree exactly.
-#[test]
-fn an_ers_battery_soc_window_mismatch_is_rejected() {
-    let bad = GT_VEHICLE.replace("soc_window: [0.3, 0.85]", "soc_window: [0.2, 0.85]");
-    let l = gt_loader(&bad, Some(GT_BATTERY));
-    let err = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
-        .expect_err("a soc_window mismatch must be rejected");
-    assert!(
-        format!("{err}").contains("soc_window"),
-        "the window disagreement is named: {err}"
-    );
-}
+// (The pre-2.0 ers.es↔battery `soc_window` reconciliation test is gone: under D-M6-13 the pack
+// document is the SINGLE source of truth, so there is no duplicate window to disagree.)
 
 /// A NON-ers vehicle whose battery file is absent stays CLEAN (no `degraded` entry without
 /// `allow_degraded`) — the electro coupling is simply inert and the binding notes it. A
@@ -564,13 +584,13 @@ fn an_ers_battery_soc_window_mismatch_is_rejected() {
 fn a_non_ers_vehicle_with_a_missing_battery_stays_clean() {
     // Strip the `ers:` block from the gt_hybrid fixture → a plain battery car (no manager),
     // and point the battery at a missing file. It must load clean (no degraded entry).
-    let no_ers = strip_ers_block(GT_VEHICLE)
+    let no_policy = strip_policy_block(GT_VEHICLE)
         .replace("params: battery/gt_es.yaml", "params: battery/missing.yaml");
-    assert!(!no_ers.contains("ers:"), "ers block stripped");
-    let l = gt_loader(&no_ers, None); // no battery doc supplied ⇒ NotFound
+    assert!(!no_policy.contains("policy:"), "policy block stripped");
+    let l = gt_loader(&no_policy, None); // no battery doc supplied ⇒ NotFound
     let resolved = load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
         .expect("a non-ers car with an absent battery still resolves");
-    assert!(resolved.spec.ers.is_none(), "control: no ers block");
+    assert!(resolved.spec.policy.is_none(), "control: no policy block");
     assert!(
         resolved.report.degraded.is_empty(),
         "a non-ers car with a missing battery must NOT record a degradation without \
@@ -581,11 +601,11 @@ fn a_non_ers_vehicle_with_a_missing_battery_stays_clean() {
 
 /// Remove the top-level `ers:` block (up to the next top-level `battery:` key) from a vehicle
 /// YAML string — a test helper for the no-manager battery cases.
-fn strip_ers_block(vehicle: &str) -> String {
+fn strip_policy_block(vehicle: &str) -> String {
     let mut out = String::new();
     let mut skipping = false;
     for line in vehicle.lines() {
-        if line.starts_with("ers:") {
+        if line.starts_with("policy:") {
             skipping = true;
             continue;
         }
