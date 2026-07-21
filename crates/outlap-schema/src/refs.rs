@@ -66,6 +66,29 @@ ref_newtype! {
     /// Reference to a `centerline.csv` track sidecar.
     CenterlineRef
 }
+ref_newtype! {
+    /// In-document identifier of a `drivetrain.units[]` entry.
+    ///
+    /// Unlike the `*Ref` newtypes above this is **not** a file path: it is an intra-document symbol
+    /// resolved against the set of unit ids declared in the same vehicle document (no `SourceLoader`,
+    /// no IO). Targeted by `policy.governs` and the sidecar-install order.
+    UnitId
+}
+ref_newtype! {
+    /// In-document identifier of a shared drivetrain node (e.g. `crank`, `gearbox_out`).
+    ///
+    /// An intra-document symbol (not a file path). A node is declared *implicitly* by being
+    /// referenced as a source's `output:` or a coupler's `from`/`to`; there is no separate node
+    /// registry. Node ids are disjoint from unit ids.
+    NodeId
+}
+ref_newtype! {
+    /// In-document identifier of a `batteries` map entry.
+    ///
+    /// An intra-document symbol (not a file path — the file path is the distinct [`BatteryRef`]).
+    /// Targeted by `DriveUnit.battery`; resolved against the `batteries` map keys.
+    BatteryId
+}
 
 /// The `x-*` extension bag: vendor/experimental keys that are carried through but not interpreted.
 ///

@@ -26,7 +26,7 @@ use crate::ptm::Ptm;
 use crate::tree::{self, SpanIndex, Tree};
 use crate::tyr::Tyr;
 use crate::vehicle::Vehicle;
-use crate::{schema_name, SCHEMA_MAJOR};
+use crate::schema_name;
 
 pub use merge::Overrides;
 pub use provenance::{Origin, ProvenanceMap};
@@ -384,12 +384,13 @@ fn version_gate(
             ));
         }
     };
+    let expected_major = crate::current_major(expected_name);
     let version: crate::version::SchemaVersion = raw.parse().map_err(|_| {
         SchemaError::version(
             sources,
             span,
             format!("malformed schema version `{raw}`"),
-            Some(format!("expected `{expected_name}/{SCHEMA_MAJOR}.<MINOR>`")),
+            Some(format!("expected `{expected_name}/{expected_major}.<MINOR>`")),
         )
     })?;
     if version.name != expected_name {
@@ -401,16 +402,16 @@ fn version_gate(
                 version.name
             ),
             Some(format!(
-                "change `schema:` to `{expected_name}/{SCHEMA_MAJOR}.0`"
+                "change `schema:` to `{expected_name}/{expected_major}.0`"
             )),
         ));
     }
-    if version.major != SCHEMA_MAJOR {
+    if version.major != expected_major {
         return Err(SchemaError::version(
             sources,
             span,
             format!(
-                "incompatible major version: file is `{}.x` but this loader is `{expected_name}/{SCHEMA_MAJOR}.x`",
+                "incompatible major version: file is `{}.x` but this loader is `{expected_name}/{expected_major}.x`",
                 version.major
             ),
             Some("run `outlap migrate` to update the file".into()),
