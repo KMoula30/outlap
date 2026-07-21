@@ -2,7 +2,7 @@
 # Reference topology: F1 2026 hybrid (ICE + MGU-K on the same shaft -> gearbox -> rear diff -> RL+RR).
 # NOTE: ERS/energy figures are approximate 2026-regulation values for testing — verify against the
 # published FIA 2026 Technical Regulations before shipping this as reference data.
-schema: vehicle/1.8
+schema: vehicle/2.0
 name: "Reference F1 2026 hybrid"
 chassis:
   # DRY mass = car + driver, no fuel (the 2026 ≤768 kg minimum-mass convention); the race fuel
@@ -63,24 +63,38 @@ tires:
   front: tyr/slick.tyr.yaml
   rear: tyr/slick.tyr.yaml
 drivetrain:
+  # D-M6-13 graph shape: the ICE and the MGU-K both output onto the shared `crank` node; the
+  # gearbox + diff live on top-level `couplers` from the crank down to the rear wheels. The ICE's
+  # flattened chain (crank -> gearbox_out -> [RL, RR]) reproduces the old private `[gearbox, diff]`
+  # path exactly, so the reduction is byte-identical. The MGU-K is governed by `policy` (below) and
+  # force-added, so it is excluded from the mechanical ceilings.
   units:
-    - source: ptm/ice_v6.ptm.yaml
-      path:
-        - gearbox:
-            # 8-speed; final drive sized so 8th tops out at the 15 000 rpm limiter at ~340 km/h
-            # (0.86 x 6.4 = 5.50 total; v_top = omega_max*r_wheel/5.50 = 94.2 m/s), matching the
-            # ERS deployment taper that ends at 345 km/h. The shift ladder then spans
-            # ~100/133/163/196/229/266/300 km/h - the full 1->8 sweep on a GP circuit.
-            ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
-            final_drive: 6.4
-            shift_time_s: 0.02
-        - diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
+    - id: ice
+      source: ptm/ice_v6.ptm.yaml
+      output: crank
+    - id: mguk
+      source: ptm/mgu_k.ptm.yaml
+      battery: f1_es
+      output: crank
+  couplers:
+    - gearbox:
+        # 8-speed; final drive sized so 8th tops out at the 15 000 rpm limiter at ~340 km/h
+        # (0.86 x 6.4 = 5.50 total; v_top = omega_max*r_wheel/5.50 = 94.2 m/s), matching the
+        # ERS deployment taper that ends at 345 km/h. The shift ladder then spans
+        # ~100/133/163/196/229/266/300 km/h - the full 1->8 sweep on a GP circuit.
+        ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
+        final_drive: 6.4
+        shift_time_s: 0.02
+      from: crank
+      to: gearbox_out
+    - diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
+      from: gearbox_out
       wheels: [RL, RR]
-ers:
-  mgu_k: ptm/mgu_k.ptm.yaml
-  es:
-    capacity_mj: 4.0
-    soc_window: [0.2, 0.9]
+policy:
+  # The energy-management overlay governs the MGU-K unit. `regulatory_window_mj` is the FIA C5.2.9
+  # on-track swing limit (4 MJ); the physical pack window lives on `battery/f1_es.yaml`.
+  governs: [mguk]
+  regulatory_window_mj: 4.0
   deployment:
     power_limit_kw: 350.0
     taper_vs_speed:
@@ -97,9 +111,10 @@ ers:
     braking_power_limit_kw: 350.0
     per_lap_harvest_mj: 8.5
     recharge_phases: true
-battery:
-  model: rc_pairs
-  params: battery/f1_es.yaml
+batteries:
+  f1_es:
+    model: rc_pairs
+    params: battery/f1_es.yaml
 brakes:
   balance_bar: 0.58
   disc:
