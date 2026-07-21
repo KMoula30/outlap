@@ -9,7 +9,7 @@ mod common;
 
 use common::{f1_policy, TestRng, F1_PACK_WINDOW};
 use outlap_powertrain::{
-    DecideInput, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger, DeployPolicy, UsSchedule,
+    DecideInput, DeployPolicy, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger, UsSchedule,
 };
 
 #[global_allocator]

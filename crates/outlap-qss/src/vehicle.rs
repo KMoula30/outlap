@@ -117,6 +117,9 @@ struct T0Ers {
 
 impl T0Vehicle {
     /// Assemble a [`T0Vehicle`] from a resolved vehicle, session conditions, and a source loader.
+    // One linear assembly procedure (tyres → aero → mechanical units → ERS force-adder); the
+    // D-M6-13 graph flatten + governed-unit de-dup pushed it a few lines past the pedantic cap.
+    #[allow(clippy::too_many_lines)]
     pub fn assemble(
         vehicle: &ResolvedVehicle,
         conditions: &Conditions,

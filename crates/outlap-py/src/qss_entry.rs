@@ -511,6 +511,7 @@ pub(crate) fn solve_lap(
 /// not be BUILT — a missing/broken ECM sidecar. That is the same missing-energy-store contract
 /// violation, so it is a hard error too unless `allow_degraded` (the ONLY fallback path, which
 /// then marks the run and runs the budget-free curve).
+#[allow(clippy::too_many_arguments)] // cold binding-edge assembly; the pack window joins the set (D-M6-13)
 pub(crate) fn build_ers_coupling(
     resolved: &ResolvedVehicle,
     t0v: &T0Vehicle,
