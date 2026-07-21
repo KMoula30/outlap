@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! The ERS rulebook — the FIA 2026 energy-recovery regulations as pure data + queries.
 //!
-//! Built once from the loaded `ers:` vehicle-schema block. All regulatory caps and budgets live
+//! Built once from the loaded `policy:` overlay block. All regulatory caps and budgets live
 //! on the ELECTRICAL side — the CU-K DC bus, where C5.2.7 (±350 kW both directions) and C5.2.10
 //! (the per-lap Recharge budget) are written — with ONE conversion seam to the mechanical crank
 //! side: the fixed electrical→mechanical factor of C5.2.14 (deploy) and its inverse per C5.2.21
@@ -29,7 +29,7 @@
 
 use num_traits::Float;
 use outlap_core::{InterpError, MonotoneCubic, PiecewiseLinear};
-use outlap_schema::vehicle::Ers;
+use outlap_schema::vehicle::Policy;
 
 /// km/h → m/s.
 const KPH_TO_MPS: f64 = 1.0 / 3.6;
@@ -104,17 +104,20 @@ fn c<T: Float>(x: f64) -> T {
 }
 
 impl<T: Float> ErsRulebook<T> {
-    /// Build the rulebook from a resolved `ers:` schema block plus (optionally) the MGU-K `.ptm`
-    /// torque envelope `(ω rad/s, τ Nm)` — SI, already converted from RPM at the loading boundary.
+    /// Build the rulebook from a resolved `policy:` overlay block, the governed pack's usable SoC
+    /// window `[lo, hi]` (from the referenced battery document — the single source of truth), and
+    /// (optionally) the governed unit's `.ptm` torque envelope `(ω rad/s, τ Nm)` — SI, already
+    /// converted from RPM at the loading boundary.
     ///
     /// # Errors
     /// [`RulebookError`] if a taper table is malformed or its power fraction rises with speed.
     pub fn from_schema(
-        ers: &Ers,
-        mgu_k_torque: Option<(&[f64], &[f64])>,
+        policy: &Policy,
+        pack_soc_window: [f64; 2],
+        governed_unit_torque: Option<(&[f64], &[f64])>,
     ) -> Result<Self, RulebookError> {
-        let deploy_taper = build_taper::<T>(&ers.deployment.taper_vs_speed, "deployment")?;
-        let override_env = ers
+        let deploy_taper = build_taper::<T>(&policy.deployment.taper_vs_speed, "deployment")?;
+        let override_env = policy
             .override_mode
             .as_ref()
             .map(|om| {
@@ -124,42 +127,42 @@ impl<T: Float> ErsRulebook<T> {
                 ))
             })
             .transpose()?;
-        let torque_env = mgu_k_torque.map(|(omega, torque)| {
+        let torque_env = governed_unit_torque.map(|(omega, torque)| {
             let xs: Vec<T> = omega.iter().map(|&w| c(w)).collect();
             let ys: Vec<T> = torque.iter().map(|&t| c(t)).collect();
             MonotoneCubic::new(xs, ys).map_err(RulebookError::from)
         });
         let torque_env = torque_env.transpose()?;
 
-        let [_soc_lo, soc_hi] = ers.es.soc_window;
+        let [_soc_lo, soc_hi] = pack_soc_window;
         Ok(Self {
-            p_deploy_cap_w: c(ers.deployment.power_limit_kw * 1e3),
+            p_deploy_cap_w: c(policy.deployment.power_limit_kw * 1e3),
             deploy_taper,
             override_env,
-            per_lap_deploy_j: ers.deployment.per_lap_deploy_mj.map(|mj| c(mj * 1e6)),
-            p_harvest_cap_w: c(ers.recovery.braking_power_limit_kw * 1e3),
-            per_lap_harvest_j: c(ers.recovery.per_lap_harvest_mj * 1e6),
-            override_extra_harvest_j: c(ers
+            per_lap_deploy_j: policy.deployment.per_lap_deploy_mj.map(|mj| c(mj * 1e6)),
+            p_harvest_cap_w: c(policy.recovery.braking_power_limit_kw * 1e3),
+            per_lap_harvest_j: c(policy.recovery.per_lap_harvest_mj * 1e6),
+            override_extra_harvest_j: c(policy
                 .override_mode
                 .as_ref()
                 .and_then(|om| om.extra_energy_per_lap_mj)
                 .unwrap_or(0.0)
                 * 1e6),
-            elec_mech_factor: c(ers.elec_mech_factor.unwrap_or(DEFAULT_ELEC_MECH_FACTOR)),
-            recharge_phases: ers.recovery.recharge_phases,
-            recharge_target_soc: ers
+            elec_mech_factor: c(policy.elec_mech_factor.unwrap_or(DEFAULT_ELEC_MECH_FACTOR)),
+            recharge_phases: policy.recovery.recharge_phases,
+            recharge_target_soc: policy
                 .recovery
                 .recharge_target_soc
                 .map_or_else(|| c::<T>(soc_hi), c),
-            ramp_initial_step_w: ers
+            ramp_initial_step_w: policy
                 .recovery
                 .ramp_initial_step_kw
                 .map_or(c(DEFAULT_RAMP_INITIAL_STEP_W), |kw| c(kw * 1e3)),
-            ramp_rate_w_per_s: ers
+            ramp_rate_w_per_s: policy
                 .recovery
                 .ramp_rate_kw_per_s
                 .map_or(c(DEFAULT_RAMP_RATE_W_PER_S), |kw| c(kw * 1e3)),
-            ramp_total_w: ers
+            ramp_total_w: policy
                 .recovery
                 .ramp_total_kw
                 .map_or(c(DEFAULT_RAMP_TOTAL_W), |kw| c(kw * 1e3)),

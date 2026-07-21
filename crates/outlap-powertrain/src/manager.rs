@@ -106,7 +106,7 @@ pub struct DecideInput<T> {
 
 /// The deployment policy (D-M6-9).
 #[derive(Clone, Debug)]
-pub enum Policy<T> {
+pub enum DeployPolicy<T> {
     /// The rule-based v1 default: greedy feed-forward deploy + automated recharge paths.
     RuleBased,
     /// A data-driven `u(s)` schedule (the stage-2 strategy surface, executed as data).
@@ -117,12 +117,12 @@ pub enum Policy<T> {
 #[derive(Clone, Debug)]
 pub struct EnergyManager<T> {
     rulebook: ErsRulebook<T>,
-    policy: Policy<T>,
+    policy: DeployPolicy<T>,
 }
 
 impl<T: Float> EnergyManager<T> {
     /// Build a manager from a rulebook and a policy.
-    pub fn new(rulebook: ErsRulebook<T>, policy: Policy<T>) -> Self {
+    pub fn new(rulebook: ErsRulebook<T>, policy: DeployPolicy<T>) -> Self {
         Self { rulebook, policy }
     }
 
@@ -136,8 +136,8 @@ impl<T: Float> EnergyManager<T> {
     /// a per-lap budget.
     pub fn decide(&self, inp: &DecideInput<T>, ledger: &LapEnergyLedger<T>) -> ErsCommand<T> {
         match &self.policy {
-            Policy::RuleBased => self.rule_based(inp, ledger),
-            Policy::Schedule(schedule) => self.scheduled(schedule, inp, ledger),
+            DeployPolicy::RuleBased => self.rule_based(inp, ledger),
+            DeployPolicy::Schedule(schedule) => self.scheduled(schedule, inp, ledger),
         }
     }
 

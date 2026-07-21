@@ -27,9 +27,10 @@
 //!   the start line.
 //! * [`EnergyManager`] — a pure `decide(inputs, ledger) → ErsCommand` control-phase policy
 //!   (§6.2b: sense → control → actuate → integrate; mode changes are step-boundary events,
-//!   §11.2). The policy is an enum (D-M6-9): [`Policy::RuleBased`] (greedy feed-forward deploy,
-//!   D-M6-8, plus the automated Recharge paths) or [`Policy::Schedule`] (a data-driven
-//!   `u(s)` control vector, the stage-2 strategy surface).
+//!   §11.2). The policy is an enum (D-M6-9): [`DeployPolicy::RuleBased`] (greedy feed-forward
+//!   deploy, D-M6-8, plus the automated Recharge paths) or [`DeployPolicy::Schedule`] (a
+//!   data-driven `u(s)` control vector, the stage-2 strategy surface). Named `DeployPolicy` to
+//!   avoid colliding with the schema's `vehicle::Policy` overlay (D-M6-13).
 //!
 //! Everything is generic over `f32`/`f64`, allocation-free after construction, and wasm-clean
 //! (no filesystem, threads, or clock).
@@ -49,6 +50,6 @@ mod rulebook;
 mod schedule;
 
 pub use ledger::LapEnergyLedger;
-pub use manager::{DecideInput, EnergyManager, ErsCommand, ErsMode, Policy};
+pub use manager::{DecideInput, DeployPolicy, EnergyManager, ErsCommand, ErsMode};
 pub use rulebook::{ErsRulebook, RulebookError};
 pub use schedule::{ScheduleError, UsSchedule};
