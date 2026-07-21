@@ -9,7 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::refs::{EmotorRef, MapRef, PtmRef};
+use crate::refs::{BatteryId, EmotorRef, MapRef, NodeId, PtmRef, UnitId};
 
 /// The drivetrain: one or more drive units plus the control layer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -17,6 +17,11 @@ use crate::refs::{EmotorRef, MapRef, PtmRef};
 pub struct Drivetrain {
     /// Torque sources and the coupler paths from each to its wheels.
     pub units: Vec<DriveUnit>,
+    /// Shared couplers on the drivetrain graph: elements that join a named node (a source's
+    /// `output`) to another node or to wheels (§8.0, D-M6-13). Absent ⇒ every unit drives its own
+    /// private `wheels` chain (the `wheels:` sugar) ⇒ byte-identical to the pre-2.0 layout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub couplers: Vec<CouplerEdge>,
     /// Static splits and torque-vectoring control (defaulted).
     #[serde(default)]
     pub control: DriveControl,
@@ -52,18 +57,61 @@ pub enum ShiftMapKind {
     Factor(f64),
 }
 
-/// A single torque source and the ordered coupler path from it to the wheels it drives.
+/// A single torque source and the coupler path from it to its terminus.
+///
+/// The terminus is **exactly one of** (semantic XOR, checked at load): a non-empty `wheels` list
+/// (the private-chain sugar — the source drives those wheels straight through its `path`), **or**
+/// an `output` node id (the source joins a shared drivetrain node, and top-level
+/// [`Drivetrain::couplers`] carry the torque onward).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DriveUnit {
+    /// Unique in-document id for this source (§8.0, D-M6-13). Targeted by `policy.governs` and the
+    /// `.ptm` sidecar-install order; disjoint from node ids.
+    pub id: UnitId,
     /// The `.ptm` map for this source (ICE, electric machine, or lumped drive unit).
     pub source: PtmRef,
+    /// Optional id of the `batteries` map entry this source draws from / harvests into (electric
+    /// machines only). Absent for the ICE and for purely-mechanical units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery: Option<BatteryId>,
     /// Optional `.emotor` thermal model — electric machines only (§9.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal: Option<EmotorRef>,
-    /// Ordered couplers from the source shaft toward the wheels.
+    /// The source's private series reduction toward its terminus (present only for an actual
+    /// step-up/down). Empty when the source outputs directly onto a shared node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<Coupler>,
-    /// The wheels this unit ultimately drives.
+    /// The wheels this unit ultimately drives (the private-chain terminus). Empty when the source
+    /// joins a shared node via `output` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wheels: Vec<Wheel>,
+    /// The shared node this source outputs onto (the shared-graph terminus). Mutually exclusive
+    /// with a non-empty `wheels`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<NodeId>,
+}
+
+/// A coupler on the shared drivetrain graph: a [`Coupler`] joining a source node (`from`) to
+/// another node (`to`) or terminating at `wheels` (§8.0, D-M6-13).
+///
+/// The downstream terminus is **exactly one of** `{to, wheels}` (semantic XOR, checked at load),
+/// mirroring [`DriveUnit`]'s terminus rule. Reuses the [`Coupler`]/[`Gearbox`]/[`Diff`] shapes
+/// verbatim via `#[serde(flatten)]`, so the wire form is e.g.
+/// `{gearbox: {…}, from: crank, to: gearbox_out}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct CouplerEdge {
+    /// The coupler element (gearbox / diff / fixed ratio), flattened onto this edge.
+    #[serde(flatten)]
+    pub coupler: Coupler,
+    /// The upstream node this coupler takes torque from.
+    pub from: NodeId,
+    /// The downstream node this coupler feeds (mutually exclusive with a non-empty `wheels`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<NodeId>,
+    /// The wheels this coupler terminates at (mutually exclusive with `to`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wheels: Vec<Wheel>,
 }
 
