@@ -334,12 +334,12 @@ fn gearbox_map_efficiency_assembles_for_t1() {
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [1000.0, 8000.0], torque_nm: [280.0, 300.0]}}\n\
         inertia_kgm2: 0.1\nmass_kg: 120.0\n";
-    let veh = "schema: vehicle/1.0\nname: t\n\
+    let veh = "schema: vehicle/2.0\nname: t\n\
         chassis: {mass_kg: 1200.0, cg: [1.2, 0.0, 0.4], inertia: [120.0, 500.0, 550.0], wheelbase_m: 2.6, track_m: [1.5, 1.5]}\n\
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
         suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
         tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
-        drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.2, 1.1], final_drive: 3.5, shift_time_s: 0.2, efficiency: {map: gb.parquet}}}, {diff: {type: open}}], wheels: [FL, FR]}]}\n\
+        drivetrain: {units: [{id: u0, source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.2, 1.1], final_drive: 3.5, shift_time_s: 0.2, efficiency: {map: gb.parquet}}}, {diff: {type: open}}], wheels: [FL, FR]}]}\n\
         brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
     let loader = MemLoader::new()
         .with("vehicle.yaml", veh)
@@ -459,12 +459,12 @@ fn a_declared_regen_envelope_is_used_verbatim() {
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}, max_regen_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [120.0, 120.0]}}\n\
         inertia_kgm2: 0.1\nmass_kg: 80.0\n";
-    let veh = "schema: vehicle/1.0\nname: t\n\
+    let veh = "schema: vehicle/2.0\nname: t\n\
         chassis: {mass_kg: 1200.0, cg: [1.2, 0.0, 0.4], inertia: [120.0, 500.0, 550.0], wheelbase_m: 2.6, track_m: [1.5, 1.5]}\n\
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
         suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
         tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
-        drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{fixed_ratio: 1.0}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
+        drivetrain: {units: [{id: u1, source: ptm/u.ptm.yaml, path: [{fixed_ratio: 1.0}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
         brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
     let loader = MemLoader::new()
         .with("vehicle.yaml", veh)
@@ -503,12 +503,12 @@ fn geared_unit_exposes_ascending_upshift_speeds() {
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 6000.0, 12000.0], torque_nm: [300.0, 300.0, 150.0]}}\n\
         inertia_kgm2: 0.1\nmass_kg: 80.0\n";
-    let veh = "schema: vehicle/1.0\nname: t\n\
+    let veh = "schema: vehicle/2.0\nname: t\n\
         chassis: {mass_kg: 1200.0, cg: [1.2, 0.0, 0.4], inertia: [120.0, 500.0, 550.0], wheelbase_m: 2.6, track_m: [1.5, 1.5]}\n\
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
         suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
         tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
-        drivetrain: {units: [{source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.5, 1.4], final_drive: 3.0, shift_time_s: 0.05, efficiency: 0.97}}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
+        drivetrain: {units: [{id: u2, source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.5, 1.4], final_drive: 3.0, shift_time_s: 0.05, efficiency: 0.97}}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
         brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
     let loader = MemLoader::new()
         .with("vehicle.yaml", veh)

@@ -214,9 +214,19 @@ impl T1Vehicle {
         let (qx, qz_f, qz_r) = constant_aero(spec, rho, allow_degraded, &mut notes)?;
 
         // --- Driven wheels (which wheels can produce drive slip) ---
+        // Built from the graph-flattened terminal wheels of the MECHANICAL sources (a
+        // policy-governed machine's deploy is force-added, not part of the T1 traction envelope, so
+        // it is excluded — matching the pre-2.0 layout where the MGU-K was not a drivetrain unit).
+        // A `wheels:`-sugar unit flattens to exactly its own `wheels`, so its driven set is
+        // byte-identical (D-M6-13).
+        let governed = crate::graph::governed_unit_ids(spec);
         let mut driven = [false; 4];
         for unit in &spec.drivetrain.units {
-            for w in &unit.wheels {
+            if governed.contains(unit.id.as_str()) {
+                continue;
+            }
+            let (_, wheels) = crate::graph::flatten_chain(&spec.drivetrain, unit);
+            for w in &wheels {
                 driven[wheel_index(*w)] = true;
             }
         }

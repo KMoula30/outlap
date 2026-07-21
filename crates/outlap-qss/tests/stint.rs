@@ -13,7 +13,7 @@
 #![allow(clippy::float_cmp)]
 
 use outlap_core::GriddedTable;
-use outlap_powertrain::Policy;
+use outlap_powertrain::DeployPolicy;
 use outlap_qss::path::T0Path;
 use outlap_qss::{
     solve_stint, ErsCoupling, GgvEnvelope, LapRequest, LineDescriptor, Pack, PackState,
@@ -116,7 +116,7 @@ fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
         ..T0Options::default()
     };
     let t0 = T0Vehicle::assemble(&resolved, &Conditions::default(), &loader, &t0_opts).unwrap();
-    let batt_path = resolved.spec.battery.as_ref().unwrap().params.as_str();
+    let batt_path = resolved.spec.batteries.values().next().unwrap().params.as_str();
     let doc = load_battery(batt_path, &loader).unwrap();
     let sidecar = format!("battery/{}", doc.ecm.tables.file.as_str());
     let ecm_bytes = loader.load_bytes(&sidecar).unwrap();
@@ -169,7 +169,7 @@ fn plan<'a>(h: &'a Hybrid, ers: &'a ErsCoupling, path: &'a T0Path) -> StintPlan<
 fn f1_qss_stint_carries_soc_across_lap_boundaries() {
     let h = hybrid("f1_2026", None);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
+    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, false)
         .unwrap()
         .unwrap();
     let n_laps = 5;
@@ -226,7 +226,7 @@ fn f1_qss_stint_carries_soc_across_lap_boundaries() {
 fn f1_qss_stint_surfaces_the_per_lap_ledger() {
     let h = hybrid("f1_2026", None);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
+    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, false)
         .unwrap()
         .unwrap();
     let result = solve_stint(&plan(&h, &ers, &path), 5, StintSeeds::default()).unwrap();
@@ -265,10 +265,10 @@ fn f1_qss_stint_respects_the_initial_soc_seed() {
     let path = T0Path::from_track(&stadium_track(), 5.0);
     let high = hybrid("f1_2026", Some(0.85));
     let low = hybrid("f1_2026", Some(0.45));
-    let ers_h = ErsCoupling::assemble(&high.resolved.spec, &high.t0, Policy::RuleBased, false)
+    let ers_h = ErsCoupling::assemble(&high.resolved.spec, &high.t0, high.pack.soc_window(), DeployPolicy::RuleBased, false)
         .unwrap()
         .unwrap();
-    let ers_l = ErsCoupling::assemble(&low.resolved.spec, &low.t0, Policy::RuleBased, false)
+    let ers_l = ErsCoupling::assemble(&low.resolved.spec, &low.t0, low.pack.soc_window(), DeployPolicy::RuleBased, false)
         .unwrap()
         .unwrap();
     let r_hi = solve_stint(&plan(&high, &ers_h, &path), 3, StintSeeds::default()).unwrap();
@@ -282,7 +282,7 @@ fn f1_qss_stint_respects_the_initial_soc_seed() {
 fn f1_qss_stint_is_deterministic() {
     let h = hybrid("f1_2026", None);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
+    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, false)
         .unwrap()
         .unwrap();
     let a = solve_stint(&plan(&h, &ers, &path), 4, StintSeeds::default()).unwrap();

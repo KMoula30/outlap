@@ -69,7 +69,7 @@ meta: {upstream_ratio_applied: false}
 ";
 
 const EV_VEHICLE: &str = "\
-schema: vehicle/1.0
+schema: vehicle/2.0
 name: minimal ev
 chassis: {mass_kg: 1000.0, cg: [1.4, 0.0, 0.3], inertia: [100.0, 400.0, 450.0], wheelbase_m: 2.8, track_m: [1.6, 1.6]}
 aero:
@@ -83,7 +83,8 @@ suspension:
 tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}
 drivetrain:
   units:
-    - source: ptm/flat.ptm.yaml
+    - id: du0
+      source: ptm/flat.ptm.yaml
       path: [{fixed_ratio: 8.0}]
       wheels: [RL, RR]
 brakes:
