@@ -77,17 +77,19 @@ drivetrain:
       battery: f1_es
       output: crank
   couplers:
-    - gearbox:
-        # 8-speed; final drive sized so 8th tops out at the 15 000 rpm limiter at ~340 km/h
-        # (0.86 x 6.4 = 5.50 total; v_top = omega_max*r_wheel/5.50 = 94.2 m/s), matching the
-        # ERS deployment taper that ends at 345 km/h. The shift ladder then spans
-        # ~100/133/163/196/229/266/300 km/h - the full 1->8 sweep on a GP circuit.
-        ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
-        final_drive: 6.4
-        shift_time_s: 0.02
+    - coupler:
+        gearbox:
+            # 8-speed; final drive sized so 8th tops out at the 15 000 rpm limiter at ~340 km/h
+            # (0.86 x 6.4 = 5.50 total; v_top = omega_max*r_wheel/5.50 = 94.2 m/s), matching the
+            # ERS deployment taper that ends at 345 km/h. The shift ladder then spans
+            # ~100/133/163/196/229/266/300 km/h - the full 1->8 sweep on a GP circuit.
+            ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
+            final_drive: 6.4
+            shift_time_s: 0.02
       from: crank
       to: gearbox_out
-    - diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
+    - coupler:
+        diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
       from: gearbox_out
       wheels: [RL, RR]
 policy:

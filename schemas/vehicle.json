@@ -1,23 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Vehicle",
-  "description": "A complete vehicle description.\n\n`extends` and `extensions` are the two contract-level affordances: inheritance is a single\n`extends:` parent chain (resolved to `None` in the loaded model), and `x-*` vendor keys are\ngathered into `extensions`. Whole optional subsystems (`ers`, `battery`) are `Option`; see the\ncrate docs for the required-vs-optional rule.",
+  "description": "A complete vehicle description.\n\n`extends` and `extensions` are the two contract-level affordances: inheritance is a single\n`extends:` parent chain (resolved to `None` in the loaded model), and `x-*` vendor keys are\ngathered into `extensions`. Optional subsystems (`policy`, `fuel`) are `Option` and packs are an\nid-keyed map (`batteries`); see the crate docs for the required-vs-optional rule.",
   "type": "object",
   "properties": {
     "aero": {
       "description": "Aerodynamics (map reference + optional constant degenerate coefficients).",
       "$ref": "#/$defs/Aero"
     },
-    "battery": {
-      "description": "Battery equivalent-circuit model reference, if the car has one.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Battery"
-        },
-        {
-          "type": "null"
-        }
-      ]
+    "batteries": {
+      "description": "Battery equivalent-circuit packs, keyed by in-document id and referenced by\n`drivetrain.units[].battery`. A single-pack car is a length-1 map (§8.4, D-M6-13).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Battery"
+      }
     },
     "brakes": {
       "description": "Brakes (balance, discs, ABS, regen blending).",
@@ -41,17 +37,6 @@
     "drivetrain": {
       "description": "Drivetrain topology graph (sources → couplers → wheels) plus the control layer.",
       "$ref": "#/$defs/Drivetrain"
-    },
-    "ers": {
-      "description": "Energy-recovery system (MGU-K + energy store), if the car has one.",
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Ers"
-        },
-        {
-          "type": "null"
-        }
-      ]
     },
     "extends": {
       "description": "Optional single preset this document inherits from (resolved away in the loaded model).",
@@ -82,6 +67,17 @@
     "name": {
       "description": "Human-readable car name.",
       "type": "string"
+    },
+    "policy": {
+      "description": "Optional energy-management policy overlay governing one or more electric drive units\n(deploy taper, override, harvest/recharge budgets). Absent ⇒ electric units run as plain\nforce-adders with no manager (a pure EV) (§8.3, D-M6-13).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Policy"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "schema": {
       "description": "Schema version, e.g. `vehicle/1.0`.",
@@ -336,6 +332,10 @@
         "params"
       ]
     },
+    "BatteryId": {
+      "description": "In-document identifier of a `batteries` map entry.\n\nAn intra-document symbol (not a file path — the file path is the distinct [`BatteryRef`]).\nTargeted by `DriveUnit.battery`; resolved against the `batteries` map keys.",
+      "type": "string"
+    },
     "BatteryModel": {
       "description": "Battery model family.",
       "oneOf": [
@@ -534,6 +534,42 @@
         }
       ]
     },
+    "CouplerEdge": {
+      "description": "A coupler on the shared drivetrain graph: a [`Coupler`] joining a source node (`from`) to\nanother node (`to`) or terminating at `wheels` (§8.0, D-M6-13).\n\nThe downstream terminus is **exactly one of** `{to, wheels}` (semantic XOR, checked at load),\nmirroring [`DriveUnit`]'s terminus rule. Reuses the [`Coupler`]/[`Gearbox`]/[`Diff`] shapes\nverbatim under a `coupler:` key (the same enum-tagged form `units[].path` uses), so the wire\nform is `{coupler: {gearbox: {…}}, from: crank, to: gearbox_out}`.",
+      "type": "object",
+      "properties": {
+        "coupler": {
+          "description": "The coupler element (gearbox / diff / fixed ratio) carried on this edge.",
+          "$ref": "#/$defs/Coupler"
+        },
+        "from": {
+          "description": "The upstream node this coupler takes torque from.",
+          "$ref": "#/$defs/NodeId"
+        },
+        "to": {
+          "description": "The downstream node this coupler feeds (mutually exclusive with a non-empty `wheels`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wheels": {
+          "description": "The wheels this coupler terminates at (mutually exclusive with `to`).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Wheel"
+          }
+        }
+      },
+      "required": [
+        "coupler",
+        "from"
+      ]
+    },
     "Deployment": {
       "description": "Deployment (discharge) rules.",
       "type": "object",
@@ -640,11 +676,37 @@
       }
     },
     "DriveUnit": {
-      "description": "A single torque source and the ordered coupler path from it to the wheels it drives.",
+      "description": "A single torque source and the coupler path from it to its terminus.\n\nThe terminus is **exactly one of** (semantic XOR, checked at load): a non-empty `wheels` list\n(the private-chain sugar — the source drives those wheels straight through its `path`), **or**\nan `output` node id (the source joins a shared drivetrain node, and top-level\n[`Drivetrain::couplers`] carry the torque onward).",
       "type": "object",
       "properties": {
+        "battery": {
+          "description": "Optional id of the `batteries` map entry this source draws from / harvests into (electric\nmachines only). Absent for the ICE and for purely-mechanical units.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BatteryId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "Unique in-document id for this source (§8.0, D-M6-13). Targeted by `policy.governs` and the\n`.ptm` sidecar-install order; disjoint from node ids.",
+          "$ref": "#/$defs/UnitId"
+        },
+        "output": {
+          "description": "The shared node this source outputs onto (the shared-graph terminus). Mutually exclusive\nwith a non-empty `wheels`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "path": {
-          "description": "Ordered couplers from the source shaft toward the wheels.",
+          "description": "The source's private series reduction toward its terminus (present only for an actual\nstep-up/down). Empty when the source outputs directly onto a shared node.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Coupler"
@@ -666,7 +728,7 @@
           ]
         },
         "wheels": {
-          "description": "The wheels this unit ultimately drives.",
+          "description": "The wheels this unit ultimately drives (the private-chain terminus). Empty when the source\njoins a shared node via `output` instead.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Wheel"
@@ -674,9 +736,8 @@
         }
       },
       "required": [
-        "source",
-        "path",
-        "wheels"
+        "id",
+        "source"
       ]
     },
     "Driver": {
@@ -804,6 +865,13 @@
             }
           }
         },
+        "couplers": {
+          "description": "Shared couplers on the drivetrain graph: elements that join a named node (a source's\n`output`) to another node or to wheels (§8.0, D-M6-13). Absent ⇒ every unit drives its own\nprivate `wheels` chain (the `wheels:` sugar) ⇒ byte-identical to the pre-2.0 layout.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CouplerEdge"
+          }
+        },
         "shift_maps": {
           "description": "Optional named up-shift maps selectable per station by a `u(s)` `shift_map_id` schedule\n(§8.3, D-M6-9). The DERIVED schedule (from the gear force curves) is the implicit default\nmap (id 0); a `shift_maps` entry with `name == \"default\"` overrides that default. Absent ⇒\nonly the derived default exists ⇒ byte-identical to pre-1.8.",
           "type": "array",
@@ -849,78 +917,6 @@
     "EmotorRef": {
       "description": "Reference to an `.emotor` electric-machine thermal file.",
       "type": "string"
-    },
-    "EnergyStore": {
-      "description": "Energy-store sizing and usable state-of-charge window.",
-      "type": "object",
-      "properties": {
-        "capacity_mj": {
-          "description": "Usable-window energy, MJ — the energy spanned by `soc_window` on the pack, not the pack's\ntotal capacity (the FIA 2026 C5.2.9 limit is a max−min SoC *window* of 4 MJ on track; the\nregulations set no total capacity).",
-          "type": "number",
-          "format": "double"
-        },
-        "soc_window": {
-          "description": "Usable SOC window `[min, max]`, each in 0..1, ascending.",
-          "type": "array",
-          "items": {
-            "type": "number",
-            "format": "double"
-          },
-          "maxItems": 2,
-          "minItems": 2
-        }
-      },
-      "required": [
-        "capacity_mj",
-        "soc_window"
-      ]
-    },
-    "Ers": {
-      "description": "Energy-recovery system.",
-      "type": "object",
-      "properties": {
-        "deployment": {
-          "description": "Deployment rules.",
-          "$ref": "#/$defs/Deployment"
-        },
-        "elec_mech_factor": {
-          "description": "Fixed electrical→mechanical conversion factor between the CU-K DC bus (where the\nregulatory power caps and energy ledgers live) and the crank (FIA 2026 C5.2.14; the\nharvest direction uses its inverse per C5.2.21). Default 0.97.",
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "es": {
-          "description": "Energy store sizing/window (battery physics lives in the battery block).",
-          "$ref": "#/$defs/EnergyStore"
-        },
-        "mgu_k": {
-          "description": "The MGU-K machine (`.ptm`, bidirectional torque/speed/efficiency).",
-          "$ref": "#/$defs/PtmRef"
-        },
-        "override_mode": {
-          "description": "Optional manual override mode (2026 regs).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OverrideMode"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "recovery": {
-          "description": "Recovery rules.",
-          "$ref": "#/$defs/Recovery"
-        }
-      },
-      "required": [
-        "mgu_k",
-        "es",
-        "deployment",
-        "recovery"
-      ]
     },
     "Extensions": {
       "description": "The `x-*` extension bag: vendor/experimental keys that are carried through but not interpreted.\n\nOnly keys beginning `x-` may appear here; the unknown-key walk (stage 4) routes `x-*` keys into\nthis bag with a warning and rejects any other unknown key as a hard error (§9 versioning rule).",
@@ -1040,6 +1036,10 @@
       "description": "Reference to a numeric sidecar map table (parquet/CSV), e.g. an aero or K&C map.",
       "type": "string"
     },
+    "NodeId": {
+      "description": "In-document identifier of a shared drivetrain node (e.g. `crank`, `gearbox_out`).\n\nAn intra-document symbol (not a file path). A node is declared *implicitly* by being\nreferenced as a source's `output:` or a coupler's `from`/`to`; there is no separate node\nregistry. Node ids are disjoint from unit ids.",
+      "type": "string"
+    },
     "OverrideMode": {
       "description": "Manual override mode: a separate deployment envelope with extra per-lap energy.\n\nA distinct type (not [`Deployment`]) because it carries `extra_energy_per_lap_mj` and an\n`activation` policy that base deployment lacks.",
       "type": "object",
@@ -1070,6 +1070,57 @@
       "required": [
         "power_limit_kw",
         "taper_vs_speed"
+      ]
+    },
+    "Policy": {
+      "description": "Energy-management policy overlay: the rules governing one or more electric drive units.",
+      "type": "object",
+      "properties": {
+        "deployment": {
+          "description": "Deployment rules.",
+          "$ref": "#/$defs/Deployment"
+        },
+        "elec_mech_factor": {
+          "description": "Fixed electrical→mechanical conversion factor between the CU-K DC bus (where the\nregulatory power caps and energy ledgers live) and the crank (FIA 2026 C5.2.14; the\nharvest direction uses its inverse per C5.2.21). Default 0.97.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "governs": {
+          "description": "The `drivetrain.units[]` ids this policy governs (the machines it deploys/harvests through).\nEach id must resolve to a declared unit; the governed units are excluded from the mechanical\ntraction/regen ceilings and driven by the manager's force-adder instead.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnitId"
+          }
+        },
+        "override_mode": {
+          "description": "Optional manual override mode (2026 regs).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OverrideMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "description": "Recovery rules.",
+          "$ref": "#/$defs/Recovery"
+        },
+        "regulatory_window_mj": {
+          "description": "The regulatory usable-window energy, MJ — the max−min SoC swing allowed on track (FIA 2026\nC5.2.9 caps it at 4 MJ). This is a *swing limit*, not a pack capacity; the physical pack\nwindow lives on the governed unit's referenced battery document (`soc_window`).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "governs",
+        "regulatory_window_mj",
+        "deployment",
+        "recovery"
       ]
     },
     "PresetRef": {
@@ -1124,7 +1175,7 @@
           "default": false
         },
         "recharge_target_soc": {
-          "description": "Target pack SoC the automated Recharge paths steer toward (the 2026 ECU's selectable\n\"Recharge target\"). Must lie inside `es.soc_window`. Default: mid-window.",
+          "description": "Target pack SoC the automated Recharge paths steer toward (the 2026 ECU's selectable\n\"Recharge target\"). Must lie inside the governed pack's `soc_window`. Default: mid-window.",
           "type": [
             "number",
             "null"
@@ -1363,6 +1414,10 @@
     },
     "TyrRef": {
       "description": "Reference to a `.tyr` tire file.",
+      "type": "string"
+    },
+    "UnitId": {
+      "description": "In-document identifier of a `drivetrain.units[]` entry.\n\nUnlike the `*Ref` newtypes above this is **not** a file path: it is an intra-document symbol\nresolved against the set of unit ids declared in the same vehicle document (no `SourceLoader`,\nno IO). Targeted by `policy.governs` and the sidecar-install order.",
       "type": "string"
     },
     "Wheel": {
