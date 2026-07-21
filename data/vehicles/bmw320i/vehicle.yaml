@@ -5,7 +5,7 @@
 # BSD-3 — parameters_vehicle2). The suspension (T3) values are SYNTHETIC passenger-car placeholders
 # (CommonRoad's single-track/multi-body sets do not map one-to-one onto the lumped-KC schema); they
 # are chosen so the linear-regime handling matches the single-track benchmark. NOT a measured car.
-schema: vehicle/1.8
+schema: vehicle/2.0
 name: "CommonRoad vehicle 2 — BMW 320i (handling-validation car)"
 chassis:
   mass_kg: 1093.3 # parameters_vehicle2: m
@@ -54,6 +54,7 @@ tires:
 drivetrain:
   units:
     - source: ptm/engine.ptm.yaml
+      id: ice
       path:
         - fixed_ratio: 1.0 # envelope defined at the wheel shaft
         - diff: { type: open }

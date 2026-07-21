@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # Reference topology: 1-DU RWD EV (DU -> open diff -> RL+RR).
-schema: vehicle/1.0
+schema: vehicle/2.0
 name: "Reference EV — 1-DU RWD"
 chassis:
   mass_kg: 1650.0
@@ -27,13 +27,16 @@ tires:
 drivetrain:
   units:
     - source: ptm/rear_drive_unit.ptm.yaml
+      id: rear
+      battery: pack_400v
       thermal: emotor/rear.emotor.yaml
       path:
         - diff: { type: open }
       wheels: [RL, RR]
-battery:
-  model: rc_pairs
-  params: battery/pack_400v.yaml
+batteries:
+  pack_400v:
+    model: rc_pairs
+    params: battery/pack_400v.yaml
 brakes:
   balance_bar: 0.62
   abs: true

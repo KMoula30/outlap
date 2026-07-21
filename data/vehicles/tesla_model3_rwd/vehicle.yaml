@@ -6,7 +6,7 @@
 # a documented ESTIMATE — see README.md for per-parameter provenance. The committed powertrain
 # (drive units + pack) is SYNTHETIC (python/tools/gen_model3_powertrain.py); the real PDT-derived
 # maps stay local and untracked (M3 user decision #7).
-schema: vehicle/1.6
+schema: vehicle/2.0
 name: "Tesla Model 3 RWD (HV variant)"
 chassis:
   mass_kg: 1765.0
@@ -41,13 +41,16 @@ drivetrain:
     # The MEDIUM sizing (≈203 kW) is the committed default; swap with a what-if override,
     # e.g. overrides={"drivetrain.units.0.source": "ptm/du_large.ptm.yaml"} (notebook 07).
     - source: ptm/du_medium.ptm.yaml
+      id: rear
+      battery: pack_800v
       thermal: emotor/rear_du.emotor.yaml
       path:
         - diff: { type: open }
       wheels: [RL, RR]
-battery:
-  model: rc_pairs
-  params: battery/pack_800v.battery.yaml
+batteries:
+  pack_800v:
+    model: rc_pairs
+    params: battery/pack_800v.battery.yaml
 brakes:
   balance_bar: 0.62
   abs: true
