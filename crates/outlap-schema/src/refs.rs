@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 macro_rules! ref_newtype {
     ($(#[$m:meta])* $name:ident) => {
         $(#[$m])*
-        #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+        #[derive(
+            Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+        )]
         #[serde(transparent)]
         pub struct $name(pub String);
 

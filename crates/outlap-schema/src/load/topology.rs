@@ -151,7 +151,7 @@ pub fn check(
     }
 
     // --- Cycle detection over node→node edges (fresh 3-color DFS; not merge.rs's extends walk) ---
-    detect_cycles(dt, &out_edges, &at, sources, file)?;
+    detect_cycles(dt, &out_edges, at, sources, file)?;
 
     // --- Flatten each source's chain + reachability ---------------------------------------------
     let mut wheel_units: BTreeMap<Wheel, Vec<usize>> = BTreeMap::new();
@@ -293,7 +293,7 @@ fn flatten_chain<'a>(
                 if !visited.insert(node) {
                     continue;
                 }
-                for &ci in out_edges.get(node).map(Vec::as_slice).unwrap_or(&[]) {
+                for &ci in out_edges.get(node).map_or(&[][..], Vec::as_slice) {
                     let edge = &couplers[ci];
                     chain.push(&edge.coupler);
                     wheels.extend_from_slice(&edge.wheels);
@@ -351,7 +351,7 @@ fn detect_cycles(
         let mut stack: Vec<(&str, usize)> = vec![(root, 0)];
         color.insert(root, Color::Gray);
         while let Some(&mut (node, ref mut idx)) = stack.last_mut() {
-            let edges = out_edges.get(node).map(Vec::as_slice).unwrap_or(&[]);
+            let edges = out_edges.get(node).map_or(&[][..], Vec::as_slice);
             if *idx < edges.len() {
                 let ci = edges[*idx];
                 *idx += 1;

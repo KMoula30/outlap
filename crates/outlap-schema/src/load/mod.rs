@@ -208,15 +208,10 @@ fn load_referenced(
             load_typed::<Tyr>(tyr_ref.as_str(), schema_name::TYR, loader, sources)?;
         semantic::check_tyr(&tyr, &index, sources, id, &mut report.warnings)?;
     }
-    // ERS machine.
-    if let Some(ers) = &spec.ers {
-        let (ptm, id, index, _) =
-            load_typed::<Ptm>(ers.mgu_k.as_str(), schema_name::PTM, loader, sources)?;
-        semantic::check_ptm(&ptm, &index, sources, id)?;
-    }
-    // Battery document (+ the ers↔battery integrity contract, M6 PR2). The energy manager
-    // schedules the pack, so an `ers:`-bearing vehicle without a loadable battery is a hard
-    // error unless `allow_degraded` (Decision #40 — recorded, and the results are marked).
+    // Battery documents (+ the policy↔pack integrity contract, D-M6-13). The MGU-K is now a
+    // `drivetrain.units[]` entry, so its `.ptm` loads through the drive-units loop below like any
+    // other source — there is no longer a separate `ers.mgu_k` leg. A policy-governed unit's pack
+    // must be loadable (the energy manager schedules it) — a hard error unless `allow_degraded`.
     load_battery_referenced(spec, loader, sources, report, index, root_id, options)?;
     // Drive units: source .ptm (+ optional thermal .emotor).
     let mut unit_sources = Vec::with_capacity(spec.drivetrain.units.len());
@@ -237,16 +232,16 @@ fn load_referenced(
     Ok(unit_sources)
 }
 
-/// The battery leg of [`load_referenced`]: validate a referenced `battery/1.x` document and run
-/// the ers↔battery integrity contract (M6 PR2 / D-M6-3):
+/// The battery leg of [`load_referenced`]: validate each referenced `battery/1.x` pack in the
+/// id-keyed `batteries` map and run the policy↔pack integrity contract (D-M6-13):
 ///
-/// * A vehicle with an `ers:` block needs a LOADABLE battery document — the energy manager
-///   schedules the pack. A missing `battery:` block or an absent params file is a hard error,
-///   unless `allow_degraded` downgrades it to a recorded degradation (the results are marked).
-/// * When both sides exist, `ers.es` must agree with the battery file:
-///   the two `soc_window`s must match, and `es.capacity_mj` (the USABLE-window energy, FIA
-///   C5.2.9) must equal `(window span) × capacity.e_pack_wh` within 1% relative — the pack ECM
-///   is the model of record, the ers block the declared window.
+/// * A `policy:` overlay governs an electric unit that draws from a pack — that pack must be
+///   LOADABLE (the energy manager schedules it). A missing pack is a hard error unless
+///   `allow_degraded` downgrades it to a recorded degradation (results are marked). A pack that no
+///   policy governs (a plain EV, or an ICE-only car) is simply inert when absent — no error.
+/// * When the governed pack loads, the policy's `regulatory_window_mj` (the FIA C5.2.9 swing limit)
+///   must fit within `(soc window span) × capacity.e_pack_wh`, and any `recharge_target_soc` must
+///   lie inside the pack's `soc_window` — the pack ECM is the single source of truth for the window.
 fn load_battery_referenced(
     spec: &Vehicle,
     loader: &dyn SourceLoader,
@@ -256,72 +251,121 @@ fn load_battery_referenced(
     root_id: SourceId,
     options: &LoadOptions,
 ) -> Result<()> {
+    use std::collections::BTreeSet;
     let span_at = |ptr: &str| resolve_span(index, ptr, root_id);
-    let Some(batt) = &spec.battery else {
-        if spec.ers.is_some() {
+
+    // Battery ids that a policy governs (load-bearing for the manager) = the packs referenced by
+    // the governed units. An in-document symbol resolution (governs id → unit → unit.battery id).
+    let governed_pack_ids: BTreeSet<&str> = spec
+        .policy
+        .iter()
+        .flat_map(|p| p.governs.iter())
+        .filter_map(|gid| {
+            spec.drivetrain
+                .units
+                .iter()
+                .find(|u| u.id == *gid)
+                .and_then(|u| u.battery.as_ref())
+                .map(crate::refs::BatteryId::as_str)
+        })
+        .collect();
+
+    if spec.batteries.is_empty() {
+        // No packs at all. A policy that governs a unit still needs somewhere to bank.
+        if spec.policy.is_some() && !governed_pack_ids.is_empty() {
             if !options.allow_degraded {
                 return Err(SchemaError::semantic(
                     sources,
-                    span_at("/ers"),
-                    "an `ers:` energy store needs a `battery:` document to bank into — the \
-                     energy manager schedules the pack",
+                    span_at("/policy"),
+                    "a `policy:` overlay governs an electric unit but the vehicle declares no \
+                     `batteries:` — the energy manager needs a pack to bank into",
                     Some(
-                        "add a `battery: {model, params}` block referencing a battery/1.x \
-                         document, or set `allow_degraded: true` in sim.yaml to run with an \
-                         inert (budget-free, harvest-less) ERS"
+                        "add a `batteries: {<id>: {model, params}}` entry the governed unit's \
+                         `battery:` names, or set `allow_degraded: true` in sim.yaml to run with an \
+                         inert (budget-free, harvest-less) manager"
                             .to_owned(),
                     ),
                 ));
             }
             report.degraded.push(ReportEntry::new(
-                "/ers",
-                "ers present without a `battery:` block — the energy manager is inert \
+                "/policy",
+                "policy present without any `batteries:` — the energy manager is inert \
                  (budget-free deployment, no harvest)",
             ));
         }
         return Ok(());
-    };
-    let batt_parts = load_typed::<crate::battery::BatteryDoc>(
-        batt.params.as_str(),
-        schema_name::BATTERY,
-        loader,
-        sources,
-    );
-    let (doc, bid, bindex, _) = match batt_parts {
-        Ok(parts) => parts,
-        Err(SchemaError::Io(crate::io::SourceError::NotFound { path })) => {
-            // A NON-ers car's missing battery is not a contract violation — the electro coupling
-            // is simply inert and the binding notes it. Leave the report CLEAN (a `degraded`
-            // entry is the mark of an opted-into `allow_degraded` run, never a silent side effect).
-            if spec.ers.is_none() {
-                return Ok(());
-            }
-            if !options.allow_degraded {
-                return Err(SchemaError::semantic(
-                    sources,
-                    span_at("/battery/params"),
+    }
+
+    // The pack the policy's window/recharge checks anchor on = the pack the FIRST governed unit
+    // references (Layer-1 single-governed-pack default; multi-pack policy netting is a follow-up).
+    let anchor_pack_id: Option<&str> = spec.policy.as_ref().and_then(|p| {
+        p.governs.first().and_then(|gid| {
+            spec.drivetrain
+                .units
+                .iter()
+                .find(|u| u.id == *gid)
+                .and_then(|u| u.battery.as_ref())
+                .map(crate::refs::BatteryId::as_str)
+        })
+    });
+
+    for (bid, batt) in &spec.batteries {
+        let ptr = format!("/batteries/{}/params", bid.as_str());
+        let parts = load_typed::<crate::battery::BatteryDoc>(
+            batt.params.as_str(),
+            schema_name::BATTERY,
+            loader,
+            sources,
+        );
+        let (doc, doc_id, bindex, _) = match parts {
+            Ok(parts) => parts,
+            Err(SchemaError::Io(crate::io::SourceError::NotFound { path })) => {
+                // A pack no policy governs is inert when absent — leave the report CLEAN.
+                if !governed_pack_ids.contains(bid.as_str()) {
+                    continue;
+                }
+                if !options.allow_degraded {
+                    return Err(SchemaError::semantic(
+                        sources,
+                        span_at(&ptr),
+                        format!(
+                            "battery document `{path}` (pack `{}`) not found — a policy-governed \
+                             pack must be on disk (the energy manager schedules it)",
+                            bid.as_str()
+                        ),
+                        Some(
+                            "author the referenced battery/1.x document (+ its ECM parquet \
+                             sidecar), or set `allow_degraded: true` in sim.yaml to run with an \
+                             inert manager"
+                                .to_owned(),
+                        ),
+                    ));
+                }
+                report.degraded.push(ReportEntry::new(
+                    ptr,
                     format!(
-                        "battery document `{path}` not found — an `ers:`-bearing vehicle needs \
-                         its energy store on disk (the energy manager schedules the pack)"
-                    ),
-                    Some(
-                        "author the referenced battery/1.x document (+ its ECM parquet sidecar), \
-                         or set `allow_degraded: true` in sim.yaml to run with an inert ERS"
-                            .to_owned(),
+                        "battery document `{path}` (pack `{}`) not present — electro slow stack inert",
+                        bid.as_str()
                     ),
                 ));
+                continue;
             }
-            report.degraded.push(ReportEntry::new(
-                "/battery/params",
-                format!("battery document `{path}` not present — electro slow stack inert"),
-            ));
-            return Ok(());
+            Err(e) => return Err(e),
+        };
+        semantic::check_battery(&doc, &bindex, sources, doc_id)?;
+        // Policy↔pack cross-check on the anchor pack only.
+        if let (Some(policy), Some(anchor)) = (&spec.policy, anchor_pack_id) {
+            if anchor == bid.as_str() {
+                semantic::check_policy_pack(
+                    policy,
+                    &doc,
+                    batt.params.as_str(),
+                    index,
+                    sources,
+                    root_id,
+                )?;
+            }
         }
-        Err(e) => return Err(e),
-    };
-    semantic::check_battery(&doc, &bindex, sources, bid)?;
-    if let Some(ers) = &spec.ers {
-        semantic::check_ers_battery(ers, &doc, batt.params.as_str(), index, sources, root_id)?;
     }
     Ok(())
 }

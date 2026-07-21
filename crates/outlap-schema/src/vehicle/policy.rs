@@ -1,22 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Energy-recovery system (§8.3) — MGU-K only (MGU-H removed per the 2026 F1 regulations).
+//! Energy-management policy overlay (§8.3, D-M6-13) — the generic rulebook that governs one or more
+//! electric `drivetrain.units[]`.
 //!
-//! Non-F1 hybrids are the same block with different data (an LMDh single rear-axle MGU, a road
-//! PHEV's P2 machine, or a pure EV where the MGU-K *is* the powertrain).
+//! Formerly the singleton `ers:` block that both *described* the MGU-K machine and *ruled* it. Under
+//! the D-M6-13 restructure the machine is a first-class `drivetrain.units[]` entry (with its own
+//! `.ptm` source and `battery` id); this overlay carries only the *rules* — the deploy taper, the
+//! optional override envelope, the harvest/recharge budgets, the regulatory swing window — and names
+//! the unit ids it `governs`. Absent ⇒ the electric units run purely as force-adders with no manager
+//! (a plain EV). Non-F1 hybrids are the same overlay with different data.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::refs::PtmRef;
+use crate::refs::UnitId;
 
-/// Energy-recovery system.
+/// Energy-management policy overlay: the rules governing one or more electric drive units.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub struct Ers {
-    /// The MGU-K machine (`.ptm`, bidirectional torque/speed/efficiency).
-    pub mgu_k: PtmRef,
-    /// Energy store sizing/window (battery physics lives in the battery block).
-    pub es: EnergyStore,
+pub struct Policy {
+    /// The `drivetrain.units[]` ids this policy governs (the machines it deploys/harvests through).
+    /// Each id must resolve to a declared unit; the governed units are excluded from the mechanical
+    /// traction/regen ceilings and driven by the manager's force-adder instead.
+    pub governs: Vec<UnitId>,
+    /// The regulatory usable-window energy, MJ — the max−min SoC swing allowed on track (FIA 2026
+    /// C5.2.9 caps it at 4 MJ). This is a *swing limit*, not a pack capacity; the physical pack
+    /// window lives on the governed unit's referenced battery document (`soc_window`).
+    pub regulatory_window_mj: f64,
     /// Deployment rules.
     pub deployment: Deployment,
     /// Optional manual override mode (2026 regs).
@@ -29,18 +38,6 @@ pub struct Ers {
     /// harvest direction uses its inverse per C5.2.21). Default 0.97.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elec_mech_factor: Option<f64>,
-}
-
-/// Energy-store sizing and usable state-of-charge window.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct EnergyStore {
-    /// Usable-window energy, MJ — the energy spanned by `soc_window` on the pack, not the pack's
-    /// total capacity (the FIA 2026 C5.2.9 limit is a max−min SoC *window* of 4 MJ on track; the
-    /// regulations set no total capacity).
-    pub capacity_mj: f64,
-    /// Usable SOC window `[min, max]`, each in 0..1, ascending.
-    pub soc_window: [f64; 2],
 }
 
 /// A power-vs-speed taper table (paired equal-length arrays; monotone non-increasing power).
@@ -119,7 +116,7 @@ pub struct Recovery {
     #[serde(default)]
     pub recharge_phases: bool,
     /// Target pack SoC the automated Recharge paths steer toward (the 2026 ECU's selectable
-    /// "Recharge target"). Must lie inside `es.soc_window`. Default: mid-window.
+    /// "Recharge target"). Must lie inside the governed pack's `soc_window`. Default: mid-window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recharge_target_soc: Option<f64>,
     /// Recharge-phase ramp: maximum initial power-demand step, kW (FIA 2026 C5.12.4 "power
