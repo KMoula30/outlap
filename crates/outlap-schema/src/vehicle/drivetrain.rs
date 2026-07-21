@@ -97,13 +97,12 @@ pub struct DriveUnit {
 ///
 /// The downstream terminus is **exactly one of** `{to, wheels}` (semantic XOR, checked at load),
 /// mirroring [`DriveUnit`]'s terminus rule. Reuses the [`Coupler`]/[`Gearbox`]/[`Diff`] shapes
-/// verbatim via `#[serde(flatten)]`, so the wire form is e.g.
-/// `{gearbox: {…}, from: crank, to: gearbox_out}`.
+/// verbatim under a `coupler:` key (the same enum-tagged form `units[].path` uses), so the wire
+/// form is `{coupler: {gearbox: {…}}, from: crank, to: gearbox_out}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct CouplerEdge {
-    /// The coupler element (gearbox / diff / fixed ratio), flattened onto this edge.
-    #[serde(flatten)]
+    /// The coupler element (gearbox / diff / fixed ratio) carried on this edge.
     pub coupler: Coupler,
     /// The upstream node this coupler takes torque from.
     pub from: NodeId,

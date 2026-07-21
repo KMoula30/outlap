@@ -49,13 +49,15 @@ drivetrain:
       battery: f1_es
       output: crank
   couplers:
-    - gearbox:
-        ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
-        final_drive: 3.1
-        shift_time_s: 0.02
+    - coupler:
+        gearbox:
+            ratios: [2.9, 2.2, 1.8, 1.5, 1.28, 1.1, 0.98, 0.86]
+            final_drive: 3.1
+            shift_time_s: 0.02
       from: crank
       to: gearbox_out
-    - diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
+    - coupler:
+        diff: { type: lsd, preload_nm: 90.0, ramp: [45.0, 70.0] }
       from: gearbox_out
       wheels: [RL, RR]
 policy:
