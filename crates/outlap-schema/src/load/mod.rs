@@ -23,10 +23,10 @@ use crate::emotor::Emotor;
 use crate::error::{Result, SchemaError};
 use crate::io::SourceLoader;
 use crate::ptm::Ptm;
+use crate::schema_name;
 use crate::tree::{self, SpanIndex, Tree};
 use crate::tyr::Tyr;
 use crate::vehicle::Vehicle;
-use crate::schema_name;
 
 pub use merge::Overrides;
 pub use provenance::{Origin, ProvenanceMap};
@@ -77,6 +77,12 @@ pub fn load_vehicle_with(
     let root_id = sources.add(root, content);
     let root_tree =
         tree::parse(root_id, &sources).map_err(|e| merge::parse_to_error(e, &sources))?;
+    // Stage 1.5: legacy pre-2.0 layout sniff (D-M6-13). A top-level `ers:` or singular `battery:`
+    // key is the old ERS/drivetrain shape (the new fields are plural `batteries:` + `policy:`).
+    // Detect BEFORE `version_gate` so one interception yields one curated diagnostic — an old-major
+    // legacy file would otherwise hit `SchemaVersionMismatch`, and a `2.0`-declared legacy file
+    // would hit `UnknownField` on `ers`. There is no `outlap migrate`; the layout is hand-rewritten.
+    legacy_drivetrain_sniff(&root_tree, &sources)?;
     // Stage 2: version gate (root must be a vehicle of this major).
     let version = version_gate(&root_tree, schema_name::VEHICLE, root_id, &sources)?;
     // Stage 3: resolve extends chain + merge + overrides + provenance.
@@ -397,6 +403,35 @@ fn load_typed<T: DeserializeOwned + schemars::JsonSchema>(
     Ok((typed, id, index, value))
 }
 
+/// Stage 1.5 — reject a pre-2.0 (`ers:` / singular `battery:`) vehicle layout with a curated
+/// pointer to the D-M6-13 `drivetrain.units[]` + `policy:`/`batteries:` shape. Runs before the
+/// version gate so the single interception wins over the generic version/unknown-field errors.
+fn legacy_drivetrain_sniff(root_tree: &Tree, sources: &Sources) -> Result<()> {
+    for key in ["ers", "battery"] {
+        if let Some(entry) = root_tree.get(key) {
+            let what = if key == "ers" {
+                "`ers:` is the pre-2.0 singleton ERS block"
+            } else {
+                "a singular `battery:` block is the pre-2.0 single-pack layout"
+            };
+            return Err(SchemaError::legacy_drivetrain(
+                sources,
+                entry.span(),
+                format!("{what} — no longer supported (vehicle schema is now 2.0, D-M6-13)"),
+                Some(
+                    "the MGU-K is now a `drivetrain.units[]` entry (with `id`, `source`, `battery`); \
+                     rules move to an optional top-level `policy:` overlay (`governs`, \
+                     `regulatory_window_mj`, `deployment`/`override_mode`/`recovery`); packs move \
+                     to an id-keyed `batteries:` map. There is no `outlap migrate` — rewrite the \
+                     file to `vehicle/2.0`."
+                        .to_owned(),
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Stage 2 — read the `schema:` version from a parsed tree and check name + major. Returns the
 /// parsed version so callers can use its MINOR (e.g. to flag unknown keys as possibly-newer-schema).
 fn version_gate(
@@ -434,7 +469,9 @@ fn version_gate(
             sources,
             span,
             format!("malformed schema version `{raw}`"),
-            Some(format!("expected `{expected_name}/{expected_major}.<MINOR>`")),
+            Some(format!(
+                "expected `{expected_name}/{expected_major}.<MINOR>`"
+            )),
         )
     })?;
     if version.name != expected_name {
@@ -458,7 +495,10 @@ fn version_gate(
                 "incompatible major version: file is `{}.x` but this loader is `{expected_name}/{expected_major}.x`",
                 version.major
             ),
-            Some("run `outlap migrate` to update the file".into()),
+            Some(format!(
+                "there is no `outlap migrate`; hand-rewrite the file to `{expected_name}/{expected_major}.0` \
+                 (see the schema docs for the current shape)"
+            )),
         ));
     }
     Ok(version)
