@@ -134,6 +134,25 @@ pub enum SchemaError {
         #[label(collection)]
         labels: Vec<LabeledSpan>,
     },
+
+    /// A pre-2.0 (`ers:` / singleton `battery:`) drivetrain layout on a `vehicle` document
+    /// (D-M6-13). There is no `outlap migrate`: the ERS/drivetrain restructure is a hand-rewrite,
+    /// so a legacy file hard-fails with a curated pointer to the new layout.
+    #[error("{message}")]
+    #[diagnostic(code(outlap::schema::legacy_drivetrain))]
+    LegacyDrivetrainFormat {
+        /// Human-readable message.
+        message: String,
+        /// The file the error is in (the vehicle document).
+        #[source_code]
+        src: NamedSource<String>,
+        /// Location of the offending legacy key (`ers:` / singular `battery:`).
+        #[label("legacy ERS/drivetrain layout")]
+        span: SourceSpan,
+        /// Pointer to the new `drivetrain.units[]` + `policy:`/`batteries:` layout.
+        #[help]
+        help: Option<String>,
+    },
 }
 
 impl SchemaError {
@@ -236,6 +255,21 @@ impl SchemaError {
             message: message.into(),
             src: named,
             labels,
+        }
+    }
+
+    /// Construct a [`SchemaError::LegacyDrivetrainFormat`].
+    pub fn legacy_drivetrain(
+        sources: &Sources,
+        span: SrcSpan,
+        message: impl Into<String>,
+        help: Option<String>,
+    ) -> Self {
+        Self::LegacyDrivetrainFormat {
+            message: message.into(),
+            src: Self::named(sources, span),
+            span: span.to_miette(),
+            help,
         }
     }
 }
