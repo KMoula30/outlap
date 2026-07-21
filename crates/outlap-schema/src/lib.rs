@@ -151,11 +151,10 @@ pub fn current_major(name: &str) -> u16 {
 /// rulebook consumes it — any further semantics change is MAJOR.
 pub fn current_minor(name: &str) -> u16 {
     match name {
-        // Reset to the fresh 2.0 baseline (see `current_major`); the vehicle document is on MAJOR 2.
-        schema_name::VEHICLE => 0,
         schema_name::PTM | schema_name::BATTERY | schema_name::TYR => 2,
         schema_name::SIM => 1,
-        // emotor, track, conditions (and anything unknown) have had no additive change since 1.0.
+        // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/track/conditions
+        // (and anything unknown) have had no additive change since their `.0`.
         _ => 0,
     }
 }

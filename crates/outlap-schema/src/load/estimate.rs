@@ -33,14 +33,14 @@ pub fn estimate(spec: &mut Vehicle, prov: &mut ProvenanceMap, estimated: &mut Ve
     // `per_lap_deploy_mj` is deliberately NOT estimated: the 2026 F1 regulations impose no per-lap
     // deployment budget (C5.2 — absence verified), so an absent value means "unbounded", and any
     // back-filled number would become a phantom cap the moment budgets are enforced (M6/PR1).
-    if let Some(ers) = &mut spec.ers {
-        if let Some(om) = &mut ers.override_mode {
+    if let Some(policy) = &mut spec.policy {
+        if let Some(om) = &mut policy.override_mode {
             if om.extra_energy_per_lap_mj.is_none() {
                 om.extra_energy_per_lap_mj = Some(0.0);
                 record(
                     prov,
                     estimated,
-                    "/ers/override_mode/extra_energy_per_lap_mj",
+                    "/policy/override_mode/extra_energy_per_lap_mj",
                     "override_extra_energy_zero",
                     "assumed 0 MJ extra override energy".into(),
                 );

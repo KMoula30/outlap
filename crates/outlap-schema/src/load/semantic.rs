@@ -7,8 +7,8 @@ use crate::error::{Result, SchemaError};
 use crate::load::report::ReportEntry;
 use crate::tree::SpanIndex;
 use crate::{
-    conditions::Conditions, emotor::Emotor, ptm::Ptm, sim::RacelineGenerator, sim::Sim,
-    track::TrackDoc, tyr, vehicle::Vehicle,
+    conditions::Conditions, emotor::Emotor, ptm::Ptm, refs::BatteryId, sim::RacelineGenerator,
+    sim::Sim, track::TrackDoc, tyr, vehicle::Vehicle,
 };
 
 /// Aero map axis names this loader recognizes (unknown names are a semantic error with a hint).
@@ -178,120 +178,11 @@ pub fn check_vehicle(
         check_driver(driver, &s, sources)?;
     }
 
-    // ERS (range-check the FULL block — the consumer lands the checks, M6/PR1).
-    if let Some(ers) = &spec.ers {
-        check_soc_window(ers.es.soc_window, "/ers/es/soc_window", &s, sources)?;
-        positive(
-            ers.es.capacity_mj,
-            "capacity_mj",
-            "/ers/es/capacity_mj",
-            &s,
-            sources,
-        )?;
-        positive(
-            ers.deployment.power_limit_kw,
-            "power_limit_kw",
-            "/ers/deployment/power_limit_kw",
-            &s,
-            sources,
-        )?;
-        check_taper(
-            &ers.deployment.taper_vs_speed,
-            "/ers/deployment/taper_vs_speed",
-            &s,
-            sources,
-        )?;
-        if let Some(b) = ers.deployment.per_lap_deploy_mj {
-            positive(
-                b,
-                "per_lap_deploy_mj",
-                "/ers/deployment/per_lap_deploy_mj",
-                &s,
-                sources,
-            )?;
-        }
-        if let Some(om) = &ers.override_mode {
-            positive(
-                om.power_limit_kw,
-                "power_limit_kw",
-                "/ers/override_mode/power_limit_kw",
-                &s,
-                sources,
-            )?;
-            check_taper(
-                &om.taper_vs_speed,
-                "/ers/override_mode/taper_vs_speed",
-                &s,
-                sources,
-            )?;
-            if let Some(e) = om.extra_energy_per_lap_mj {
-                non_negative(
-                    e,
-                    "extra_energy_per_lap_mj",
-                    "/ers/override_mode/extra_energy_per_lap_mj",
-                    &s,
-                    sources,
-                )?;
-            }
-        }
-        positive(
-            ers.recovery.braking_power_limit_kw,
-            "braking_power_limit_kw",
-            "/ers/recovery/braking_power_limit_kw",
-            &s,
-            sources,
-        )?;
-        non_negative(
-            ers.recovery.per_lap_harvest_mj,
-            "per_lap_harvest_mj",
-            "/ers/recovery/per_lap_harvest_mj",
-            &s,
-            sources,
-        )?;
-        if let Some(t) = ers.recovery.recharge_target_soc {
-            let [lo, hi] = ers.es.soc_window;
-            if !(lo..=hi).contains(&t) {
-                return Err(SchemaError::semantic(
-                    sources,
-                    s.at("/ers/recovery/recharge_target_soc"),
-                    format!(
-                        "`recharge_target_soc` must lie inside `es.soc_window` [{lo}, {hi}], got {t}"
-                    ),
-                    None,
-                ));
-            }
-        }
-        for (v, label, ptr) in [
-            (
-                ers.recovery.ramp_initial_step_kw,
-                "ramp_initial_step_kw",
-                "/ers/recovery/ramp_initial_step_kw",
-            ),
-            (
-                ers.recovery.ramp_rate_kw_per_s,
-                "ramp_rate_kw_per_s",
-                "/ers/recovery/ramp_rate_kw_per_s",
-            ),
-            (
-                ers.recovery.ramp_total_kw,
-                "ramp_total_kw",
-                "/ers/recovery/ramp_total_kw",
-            ),
-        ] {
-            if let Some(v) = v {
-                positive(v, label, ptr, &s, sources)?;
-            }
-        }
-        if let Some(f) = ers.elec_mech_factor {
-            if !(f > 0.0 && f <= 1.0 && f.is_finite()) {
-                return Err(SchemaError::semantic(
-                    sources,
-                    s.at("/ers/elec_mech_factor"),
-                    "`elec_mech_factor` must lie in (0, 1]",
-                    None,
-                ));
-            }
-        }
+    // Policy overlay (range-check the FULL block — the consumer lands the checks, D-M6-13). The
+    // pack-anchored checks (recharge_target inside the governed pack's soc_window, regulatory
+    // window ≤ physical pack energy) run at load time when the battery document is available.
+    if let Some(policy) = &spec.policy {
+        check_policy(policy, &s, sources)?;
     }
 
     // Fuel (optional; range-check the FULL block — the consumer lands the checks, M6/PR5, §8.1).
@@ -299,6 +190,122 @@ pub fn check_vehicle(
         check_fuel(fuel, &s, sources)?;
     }
 
+    Ok(())
+}
+
+/// Range-check the policy overlay's scalar fields (D-M6-13). Pack-anchored checks (recharge target
+/// inside the governed pack's `soc_window`; regulatory window fits the physical pack) run at load
+/// time in [`check_policy_pack`] once the battery document is loaded. `governs`/id resolution is in
+/// [`check_drivetrain`].
+fn check_policy(policy: &crate::vehicle::Policy, s: &Spans, sources: &Sources) -> Result<()> {
+    positive(
+        policy.regulatory_window_mj,
+        "regulatory_window_mj",
+        "/policy/regulatory_window_mj",
+        s,
+        sources,
+    )?;
+    positive(
+        policy.deployment.power_limit_kw,
+        "power_limit_kw",
+        "/policy/deployment/power_limit_kw",
+        s,
+        sources,
+    )?;
+    check_taper(
+        &policy.deployment.taper_vs_speed,
+        "/policy/deployment/taper_vs_speed",
+        s,
+        sources,
+    )?;
+    if let Some(b) = policy.deployment.per_lap_deploy_mj {
+        positive(
+            b,
+            "per_lap_deploy_mj",
+            "/policy/deployment/per_lap_deploy_mj",
+            s,
+            sources,
+        )?;
+    }
+    if let Some(om) = &policy.override_mode {
+        positive(
+            om.power_limit_kw,
+            "power_limit_kw",
+            "/policy/override_mode/power_limit_kw",
+            s,
+            sources,
+        )?;
+        check_taper(
+            &om.taper_vs_speed,
+            "/policy/override_mode/taper_vs_speed",
+            s,
+            sources,
+        )?;
+        if let Some(e) = om.extra_energy_per_lap_mj {
+            non_negative(
+                e,
+                "extra_energy_per_lap_mj",
+                "/policy/override_mode/extra_energy_per_lap_mj",
+                s,
+                sources,
+            )?;
+        }
+    }
+    positive(
+        policy.recovery.braking_power_limit_kw,
+        "braking_power_limit_kw",
+        "/policy/recovery/braking_power_limit_kw",
+        s,
+        sources,
+    )?;
+    non_negative(
+        policy.recovery.per_lap_harvest_mj,
+        "per_lap_harvest_mj",
+        "/policy/recovery/per_lap_harvest_mj",
+        s,
+        sources,
+    )?;
+    if let Some(t) = policy.recovery.recharge_target_soc {
+        // The pack-window containment is re-anchored at load time; here only the [0,1] SoC range.
+        unit_interval(
+            t,
+            "recharge_target_soc",
+            "/policy/recovery/recharge_target_soc",
+            s,
+            sources,
+        )?;
+    }
+    for (v, label, ptr) in [
+        (
+            policy.recovery.ramp_initial_step_kw,
+            "ramp_initial_step_kw",
+            "/policy/recovery/ramp_initial_step_kw",
+        ),
+        (
+            policy.recovery.ramp_rate_kw_per_s,
+            "ramp_rate_kw_per_s",
+            "/policy/recovery/ramp_rate_kw_per_s",
+        ),
+        (
+            policy.recovery.ramp_total_kw,
+            "ramp_total_kw",
+            "/policy/recovery/ramp_total_kw",
+        ),
+    ] {
+        if let Some(v) = v {
+            positive(v, label, ptr, s, sources)?;
+        }
+    }
+    if let Some(f) = policy.elec_mech_factor {
+        if !(f > 0.0 && f <= 1.0 && f.is_finite()) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/policy/elec_mech_factor"),
+                "`elec_mech_factor` must lie in (0, 1]",
+                None,
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -436,33 +443,45 @@ fn check_driver(driver: &crate::vehicle::Driver, s: &Spans, sources: &Sources) -
 
 fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> {
     use crate::vehicle::{Coupler, DiffKind};
+    // Differential preload/ramp sanity on BOTH private unit paths and top-level graph couplers.
+    let check_diff = |diff: &crate::vehicle::Diff, base: &str| -> Result<()> {
+        let needs_preload = matches!(diff.kind, DiffKind::Lsd | DiffKind::Locked);
+        if needs_preload && diff.preload_nm.is_none() {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(base),
+                format!(
+                    "a `{}` differential requires `preload_nm`",
+                    serde_plain_kind(diff.kind)
+                ),
+                Some("add `preload_nm: <N·m>` to this diff".into()),
+            ));
+        }
+        if diff.ramp.is_some() && !matches!(diff.kind, DiffKind::Lsd) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(&format!("{base}/ramp")),
+                "`ramp` only applies to an `lsd` differential",
+                None,
+            ));
+        }
+        Ok(())
+    };
     for (ui, unit) in spec.drivetrain.units.iter().enumerate() {
         for (pi, coupler) in unit.path.iter().enumerate() {
-            let base = format!("/drivetrain/units/{ui}/path/{pi}/diff");
             if let Coupler::Diff(diff) = coupler {
-                let needs_preload = matches!(diff.kind, DiffKind::Lsd | DiffKind::Locked);
-                if needs_preload && diff.preload_nm.is_none() {
-                    return Err(SchemaError::semantic(
-                        sources,
-                        s.at(&base),
-                        format!(
-                            "a `{}` differential requires `preload_nm`",
-                            serde_plain_kind(diff.kind)
-                        ),
-                        Some("add `preload_nm: <N·m>` to this diff".into()),
-                    ));
-                }
-                if diff.ramp.is_some() && !matches!(diff.kind, DiffKind::Lsd) {
-                    return Err(SchemaError::semantic(
-                        sources,
-                        s.at(&format!("{base}/ramp")),
-                        "`ramp` only applies to an `lsd` differential",
-                        None,
-                    ));
-                }
+                check_diff(diff, &format!("/drivetrain/units/{ui}/path/{pi}/diff"))?;
             }
         }
     }
+    for (ci, edge) in spec.drivetrain.couplers.iter().enumerate() {
+        if let Coupler::Diff(diff) = &edge.coupler {
+            check_diff(diff, &format!("/drivetrain/couplers/{ci}/diff"))?;
+        }
+    }
+
+    check_drivetrain_ids(spec, s, sources)?;
+
     // Torque-vectoring gains (range-check whatever is given; the topology check covers reachability).
     let tv = &spec.drivetrain.control.torque_vectoring;
     if !tv.k_yaw.is_finite() || tv.k_yaw < 0.0 {
@@ -486,6 +505,91 @@ fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
     Ok(())
 }
 
+/// Validate the in-document symbol tables (D-M6-13): unit ids unique; node ids (from `output`,
+/// coupler `from`/`to`) disjoint from unit ids; every `policy.governs` id resolves to a unit; every
+/// `unit.battery` id resolves to a `batteries` map key. All are intra-document checks (no IO);
+/// unresolved ids get a did-you-mean over the candidate keys.
+fn check_drivetrain_ids(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> {
+    use crate::diagnostics::suggest;
+    let dt = &spec.drivetrain;
+
+    // Unit ids: unique.
+    let mut unit_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (ui, unit) in dt.units.iter().enumerate() {
+        if !unit_ids.insert(unit.id.as_str()) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(&format!("/drivetrain/units/{ui}/id")),
+                format!("duplicate drive-unit id `{}`", unit.id),
+                Some("each `drivetrain.units[].id` must be unique".into()),
+            ));
+        }
+    }
+
+    // Node ids (implicitly declared by output / coupler from,to) must be disjoint from unit ids.
+    let mut node_refs: Vec<(&str, String)> = Vec::new();
+    for (ui, unit) in dt.units.iter().enumerate() {
+        if let Some(n) = &unit.output {
+            node_refs.push((n.as_str(), format!("/drivetrain/units/{ui}/output")));
+        }
+    }
+    for (ci, edge) in dt.couplers.iter().enumerate() {
+        node_refs.push((edge.from.as_str(), format!("/drivetrain/couplers/{ci}/from")));
+        if let Some(n) = &edge.to {
+            node_refs.push((n.as_str(), format!("/drivetrain/couplers/{ci}/to")));
+        }
+    }
+    for (node, ptr) in &node_refs {
+        if unit_ids.contains(node) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(ptr),
+                format!("node id `{node}` collides with a drive-unit id"),
+                Some("node ids and unit ids share one namespace and must be disjoint".into()),
+            ));
+        }
+    }
+
+    // policy.governs → declared unit ids.
+    if let Some(policy) = &spec.policy {
+        for (gi, id) in policy.governs.iter().enumerate() {
+            if !unit_ids.contains(id.as_str()) {
+                let hint = suggest(id.as_str(), unit_ids.iter().copied()).map_or_else(
+                    || "`policy.governs` must name a declared drive unit".into(),
+                    |c| format!("did you mean `{c}`?"),
+                );
+                return Err(SchemaError::semantic(
+                    sources,
+                    s.at(&format!("/policy/governs/{gi}")),
+                    format!("`policy.governs` references unknown drive-unit id `{id}`"),
+                    Some(hint),
+                ));
+            }
+        }
+    }
+
+    // unit.battery → batteries map keys.
+    let battery_keys: std::collections::HashSet<&str> =
+        spec.batteries.keys().map(BatteryId::as_str).collect();
+    for (ui, unit) in dt.units.iter().enumerate() {
+        if let Some(id) = &unit.battery {
+            if !battery_keys.contains(id.as_str()) {
+                let hint = suggest(id.as_str(), battery_keys.iter().copied()).map_or_else(
+                    || "add a matching entry to the `batteries` map".into(),
+                    |c| format!("did you mean `{c}`?"),
+                );
+                return Err(SchemaError::semantic(
+                    sources,
+                    s.at(&format!("/drivetrain/units/{ui}/battery")),
+                    format!("drive unit `{}` references unknown battery id `{id}`", unit.id),
+                    Some(hint),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Range-check the named `shift_maps` (§8.3, D-M6-9): names unique (mirror [`check_emotor`]),
 /// `factor` positive+finite, and explicit up-shift speeds strictly increasing, positive, finite,
 /// and one fewer than the gear count of the up-shift unit (the runtime picks the unit with the
@@ -495,12 +599,16 @@ fn check_shift_maps(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
     if spec.drivetrain.shift_maps.is_empty() {
         return Ok(());
     }
-    // The gear count the up-shift schedule addresses = the max gearbox ratio count across units.
-    let max_gears = spec
+    // The gear count the up-shift schedule addresses = the max gearbox ratio count across all
+    // gearboxes, whether on a unit's private path or a top-level graph coupler.
+    let unit_gearboxes = spec
         .drivetrain
         .units
         .iter()
-        .flat_map(|u| u.path.iter())
+        .flat_map(|u| u.path.iter());
+    let coupler_gearboxes = spec.drivetrain.couplers.iter().map(|e| &e.coupler);
+    let max_gears = unit_gearboxes
+        .chain(coupler_gearboxes)
         .filter_map(|c| match c {
             Coupler::Gearbox(g) => Some(g.ratios.len()),
             _ => None,
@@ -586,27 +694,6 @@ fn serde_plain_kind(kind: crate::vehicle::DiffKind) -> &'static str {
         DiffKind::Lsd => "lsd",
         DiffKind::Solid => "solid",
     }
-}
-
-fn check_soc_window(window: [f64; 2], ptr: &str, s: &Spans, sources: &Sources) -> Result<()> {
-    let [lo, hi] = window;
-    if !(0.0..=1.0).contains(&lo) || !(0.0..=1.0).contains(&hi) {
-        return Err(SchemaError::semantic(
-            sources,
-            s.at(ptr),
-            "`soc_window` bounds must lie in [0, 1]",
-            None,
-        ));
-    }
-    if lo >= hi {
-        return Err(SchemaError::semantic(
-            sources,
-            s.at(ptr),
-            "`soc_window` must be ascending (`[min, max]` with min < max)",
-            None,
-        ));
-    }
-    Ok(())
 }
 
 fn check_taper(
@@ -918,20 +1005,24 @@ pub fn check_battery(
     Ok(())
 }
 
-/// Relative tolerance for the ers↔battery usable-window energy agreement (M6 PR2 / D-M6-3). The
-/// pack ECM document is the model of record; `ers.es.capacity_mj` is the DECLARED usable-window
-/// energy (FIA C5.2.9) and must reproduce `(soc window span) × e_pack_wh` to this tolerance.
-const ERS_BATTERY_CAPACITY_RTOL: f64 = 0.01;
+/// Relative tolerance for the policy regulatory-window vs physical-pack-energy fit (D-M6-13). The
+/// pack ECM document is the single source of truth for the physical `soc_window`; the policy's
+/// `regulatory_window_mj` (FIA C5.2.9 swing limit) must FIT WITHIN `(soc window span) × e_pack_wh`.
+const POLICY_WINDOW_RTOL: f64 = 0.01;
 
-/// Cross-document integrity: the vehicle's `ers.es` energy store must agree with its referenced
-/// battery document (M6 PR2 / D-M6-3). Anchored on the VEHICLE file's spans — the mismatch is a
-/// vehicle-level declaration error; the battery file's values ride in the message.
+/// Cross-document integrity between a `policy` overlay and the physical pack of the unit it governs
+/// (D-M6-13). Anchored on the VEHICLE file's spans; the battery file's values ride in the message.
+///
+/// The pack `soc_window` is now the SINGLE source of truth (there is no longer a duplicate
+/// `ers.es.soc_window` to reconcile). Two checks remain:
+/// * the regulatory swing window fits the pack's physical usable-window energy, and
+/// * the optional `recharge_target_soc` lies inside the pack's `soc_window`.
 ///
 /// # Errors
-/// [`SchemaError::Semantic`] when the two `soc_window`s differ, or when `es.capacity_mj` does
-/// not equal the battery's usable-window energy within [`ERS_BATTERY_CAPACITY_RTOL`].
-pub fn check_ers_battery(
-    ers: &crate::vehicle::Ers,
+/// [`SchemaError::Semantic`] when `regulatory_window_mj` exceeds the pack's usable-window energy
+/// within [`POLICY_WINDOW_RTOL`], or when `recharge_target_soc` falls outside the pack window.
+pub fn check_policy_pack(
+    policy: &crate::vehicle::Policy,
     battery: &crate::battery::BatteryDoc,
     battery_path: &str,
     index: &SpanIndex,
@@ -939,50 +1030,45 @@ pub fn check_ers_battery(
     file: crate::diagnostics::SourceId,
 ) -> Result<()> {
     let s = Spans { index, file };
-    let [e_lo, e_hi] = ers.es.soc_window;
     let [b_lo, b_hi] = battery.soc_window;
-    if (e_lo - b_lo).abs() > 1e-9 || (e_hi - b_hi).abs() > 1e-9 {
-        return Err(SchemaError::semantic(
-            sources,
-            s.at("/ers/es/soc_window"),
-            format!(
-                "`ers.es.soc_window` [{e_lo}, {e_hi}] disagrees with the battery document's \
-                 soc_window [{b_lo}, {b_hi}] (`{battery_path}`)"
-            ),
-            Some(
-                "the ers energy store IS the referenced battery — the two windows must be one \
-                 declaration"
-                    .to_owned(),
-            ),
-        ));
-    }
-    // The regulatory C5.2.9 on-track swing limit (`ers.es.capacity_mj`) must FIT WITHIN the pack's
-    // physical usable-window energy `(window span) × e_pack_wh`: you cannot be allowed to swing more
-    // energy than the store physically holds. The two are otherwise INDEPENDENT — the reg limit is
-    // a regulation, the window is a battery property — so a physically larger window is permitted
-    // (the swing is then clipped at `capacity_mj`, below the physical edge). `e_pack_wh` is
-    // load-bearing from M6 PR2 on (its first consumer — the field-semantics policy freezes its
-    // meaning here).
+    // The regulatory C5.2.9 on-track swing limit must FIT WITHIN the pack's physical usable-window
+    // energy `(window span) × e_pack_wh`: you cannot be allowed to swing more energy than the store
+    // physically holds. A physically larger window is permitted (the swing is then clipped below the
+    // physical edge). `e_pack_wh` is load-bearing (the field-semantics policy freezes its meaning).
     let window_mj = (b_hi - b_lo) * battery.capacity.e_pack_wh * 3600.0e-6;
-    let declared = ers.es.capacity_mj;
-    if declared > window_mj * (1.0 + ERS_BATTERY_CAPACITY_RTOL) {
+    let declared = policy.regulatory_window_mj;
+    if declared > window_mj * (1.0 + POLICY_WINDOW_RTOL) {
         return Err(SchemaError::semantic(
             sources,
-            s.at("/ers/es/capacity_mj"),
+            s.at("/policy/regulatory_window_mj"),
             format!(
-                "`ers.es.capacity_mj` = {declared} MJ (the FIA C5.2.9 on-track swing limit) \
-                 exceeds what the battery physically holds: (soc window {b_lo}..{b_hi}) × \
+                "`policy.regulatory_window_mj` = {declared} MJ (the FIA C5.2.9 on-track swing \
+                 limit) exceeds what the battery physically holds: (soc window {b_lo}..{b_hi}) × \
                  e_pack_wh {} Wh = {window_mj:.4} MJ (`{battery_path}`) — the swing cannot draw \
                  more energy than the usable window",
                 battery.capacity.e_pack_wh
             ),
             Some(format!(
-                "lower `capacity_mj` to at most the usable-window energy ({window_mj:.4} MJ), or \
-                 size the pack larger — a {declared} MJ swing over [{b_lo}, {b_hi}] needs a \
+                "lower `regulatory_window_mj` to at most the usable-window energy ({window_mj:.4} \
+                 MJ), or size the pack larger — a {declared} MJ swing over [{b_lo}, {b_hi}] needs a \
                  {:.4} MJ total pack",
                 declared / (b_hi - b_lo).max(f64::MIN_POSITIVE)
             )),
         ));
+    }
+    // The recharge target (if set) must lie inside the governed pack's physical soc_window.
+    if let Some(t) = policy.recovery.recharge_target_soc {
+        if !(b_lo..=b_hi).contains(&t) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/policy/recovery/recharge_target_soc"),
+                format!(
+                    "`recharge_target_soc` must lie inside the governed pack's soc_window \
+                     [{b_lo}, {b_hi}] (`{battery_path}`), got {t}"
+                ),
+                None,
+            ));
+        }
     }
     Ok(())
 }
