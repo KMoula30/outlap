@@ -6,24 +6,26 @@
 //! binding then performs exactly the IO the plan names: load the battery document + ECM sidecar,
 //! and — when a thermal pairing exists — the `.emotor` network + its unit's `.ptm`.
 //!
-//! Rules (M6 PR2 — the `.emotor` requirement is RELAXED so an `ers:` car's pack marches without
-//! a machine-thermal network):
+//! Rules (D-M6-13 — packs are an id-keyed `batteries:` map; the `.emotor` requirement stays RELAXED
+//! so a policy-governed car's pack marches without a machine-thermal network):
 //!
-//! 1. No `battery:` block ⇒ no stack (single-voltage evaluation).
-//! 2. A battery ⇒ the pack marches. The FIRST drive unit declaring a `thermal:` `.emotor` ref
-//!    carries the machine slow state; extra declarations are dropped WITH a note (nothing
-//!    silent). No thermal unit ⇒ the pack marches alone (`thermal: None`).
+//! 1. No `batteries:` entry ⇒ no stack (single-voltage evaluation).
+//! 2. A pack ⇒ it marches. The RELEVANT pack is the one the policy-governed machine references
+//!    (or, absent a policy, the first electric unit's pack, or the sole map entry) — a single-pack
+//!    car has exactly one entry, so this is byte-identical to the pre-2.0 singleton. The FIRST
+//!    drive unit declaring a `thermal:` `.emotor` ref carries the machine slow state; extra
+//!    declarations are dropped WITH a note. No thermal unit ⇒ the pack marches alone.
 
 use outlap_schema::Vehicle;
 
 /// The typed slow-stack plan for one vehicle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlowStackPlan {
-    /// No `battery:` block — no electro slow stack (single-voltage evaluation).
+    /// No `batteries:` entry — no electro slow stack (single-voltage evaluation).
     NoBattery,
     /// A pack marches; optionally paired with ONE machine-thermal network.
     Pack {
-        /// The `battery.params` document reference (vehicle-root-relative logical path).
+        /// The resolved pack's `battery.params` document reference (vehicle-root-relative path).
         battery_path: String,
         /// The machine-thermal pairing, when a drive unit declares one.
         thermal: Option<ThermalPairing>,
@@ -47,7 +49,25 @@ pub struct ThermalPairing {
 /// Decide the slow-stack plan for a resolved vehicle. Pure — no IO.
 #[must_use]
 pub fn plan_slow_stack(spec: &Vehicle) -> SlowStackPlan {
-    let Some(batt) = &spec.battery else {
+    // Resolve the relevant pack from the id-keyed `batteries` map: the pack the policy-governed
+    // machine references, else the first electric (battery-bearing) unit's pack, else the sole map
+    // entry. A single-pack car has exactly one entry, so this is the pre-2.0 singleton.
+    let governed_pack_id = spec
+        .policy
+        .as_ref()
+        .and_then(|p| p.governs.first())
+        .and_then(|id| spec.drivetrain.units.iter().find(|u| u.id == *id))
+        .and_then(|u| u.battery.as_ref());
+    let first_unit_pack_id = spec
+        .drivetrain
+        .units
+        .iter()
+        .find_map(|u| u.battery.as_ref());
+    let batt = governed_pack_id
+        .or(first_unit_pack_id)
+        .and_then(|id| spec.batteries.get(id))
+        .or_else(|| spec.batteries.values().next());
+    let Some(batt) = batt else {
         return SlowStackPlan::NoBattery;
     };
     let mut notes = Vec::new();

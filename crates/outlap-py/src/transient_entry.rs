@@ -1117,9 +1117,11 @@ pub(crate) fn prepare_transient(
     let ers = {
         let n_stations = us_schedule.as_ref().map_or(0, UsSchedule::len);
         let policy = us_schedule.map_or(ErsPolicy::RuleBased, ErsPolicy::Schedule);
+        let pack_window = pack.as_ref().map_or([0.0, 1.0], |(p, _)| p.soc_window());
         match crate::qss_entry::build_ers_coupling(
             &resolved,
             &t0v,
+            pack_window,
             pack.is_some(),
             sim_cfg.allow_degraded,
             policy,

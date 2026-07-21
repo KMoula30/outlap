@@ -35,6 +35,7 @@
 pub mod error;
 pub mod ers;
 pub mod fuel;
+pub(crate) mod graph;
 pub mod margin;
 pub mod path;
 pub mod qss;
