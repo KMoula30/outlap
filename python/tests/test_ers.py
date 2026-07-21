@@ -100,4 +100,5 @@ def test_vehicle_report_describes_a_degraded_ers_car(tmp_path: Path) -> None:
     rep = vehicle_report(veh)
     degraded: list[tuple[str, str]] = rep["degraded"]  # type: ignore[assignment]
     assert degraded, "the missing energy store must surface as a degradation"
-    assert any("battery" in ptr for ptr, _ in degraded)
+    # The degraded pointer is the id-keyed pack path `/batteries/<id>/params` (D-M6-13).
+    assert any("batteries" in ptr for ptr, _ in degraded)
