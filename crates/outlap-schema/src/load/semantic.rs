@@ -534,7 +534,10 @@ fn check_drivetrain_ids(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<
         }
     }
     for (ci, edge) in dt.couplers.iter().enumerate() {
-        node_refs.push((edge.from.as_str(), format!("/drivetrain/couplers/{ci}/from")));
+        node_refs.push((
+            edge.from.as_str(),
+            format!("/drivetrain/couplers/{ci}/from"),
+        ));
         if let Some(n) = &edge.to {
             node_refs.push((n.as_str(), format!("/drivetrain/couplers/{ci}/to")));
         }
@@ -581,7 +584,10 @@ fn check_drivetrain_ids(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<
                 return Err(SchemaError::semantic(
                     sources,
                     s.at(&format!("/drivetrain/units/{ui}/battery")),
-                    format!("drive unit `{}` references unknown battery id `{id}`", unit.id),
+                    format!(
+                        "drive unit `{}` references unknown battery id `{id}`",
+                        unit.id
+                    ),
                     Some(hint),
                 ));
             }
@@ -601,11 +607,7 @@ fn check_shift_maps(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
     }
     // The gear count the up-shift schedule addresses = the max gearbox ratio count across all
     // gearboxes, whether on a unit's private path or a top-level graph coupler.
-    let unit_gearboxes = spec
-        .drivetrain
-        .units
-        .iter()
-        .flat_map(|u| u.path.iter());
+    let unit_gearboxes = spec.drivetrain.units.iter().flat_map(|u| u.path.iter());
     let coupler_gearboxes = spec.drivetrain.couplers.iter().map(|e| &e.coupler);
     let max_gears = unit_gearboxes
         .chain(coupler_gearboxes)

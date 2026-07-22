@@ -46,7 +46,8 @@ fn override_closed_form_w(v_kph: f64) -> f64 {
 /// mandatory, not cosmetic.
 #[test]
 fn taper_matches_the_closed_form_at_interior_speeds() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     let mut rng = TestRng::new(0x5EED_0001);
     for _ in 0..10_000 {
         let v_kph = rng.range(0.0, 400.0);
@@ -69,7 +70,8 @@ fn taper_matches_the_closed_form_at_interior_speeds() {
 /// The knee is EXACTLY 100 kW at 340 km/h — 350·(2/7), the fraction, never a truncated decimal.
 #[test]
 fn knee_is_exactly_two_sevenths() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     let at_knee = rb.deploy_cap_electrical_w(340.0 * KPH_TO_MPS, false);
     assert_eq!(at_knee, 350e3 * (2.0 / 7.0), "knee must be exact");
     assert!(
@@ -87,7 +89,8 @@ fn knee_is_exactly_two_sevenths() {
 /// higher speed; it never reduces it).
 #[test]
 fn override_dominates_normal_deployment() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     let mut rng = TestRng::new(0x5EED_0002);
     for _ in 0..10_000 {
         let v = rng.range(0.0, 120.0);
@@ -102,7 +105,8 @@ fn override_dominates_normal_deployment() {
 /// without; and a car without an override mode gets the base envelope for override queries.
 #[test]
 fn harvest_budget_carries_the_override_bonus() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     assert_eq!(rb.harvest_budget_j(false), 8.5e6);
     assert_eq!(rb.harvest_budget_j(true), 9.0e6);
 }
@@ -120,7 +124,8 @@ fn torque_cap_binds_at_low_shaft_speed() {
     // At 1200 rad/s the envelope allows 600 kW — the power argument passes through.
     assert!((rb.torque_capped_mech_w(339.5e3, 1200.0) - 339.5e3).abs() < 1e-6);
     // No envelope → identity.
-    let rb_none: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let rb_none: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     assert_eq!(rb_none.torque_capped_mech_w(339.5e3, 200.0), 339.5e3);
 }
 
@@ -128,7 +133,8 @@ fn torque_cap_binds_at_low_shaft_speed() {
 /// mechanical power absorbed at the 350 kW electrical harvest cap is ≈ 360.8 kW (C5.2.21).
 #[test]
 fn conversion_seam_is_the_c5_2_14_factor() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     assert_eq!(rb.mech_deploy_w(350e3), 350e3 * 0.97);
     assert_eq!(rb.elec_harvest_w(100e3), 97e3);
     let mech_at_cap = rb.mech_harvest_w(350e3);
