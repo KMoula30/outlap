@@ -13,7 +13,7 @@
 #![allow(clippy::float_cmp)]
 
 use outlap_core::GriddedTable;
-use outlap_powertrain::Policy;
+use outlap_powertrain::DeployPolicy;
 use outlap_qss::path::T0Path;
 use outlap_qss::{
     solve_stint, ErsCoupling, GgvEnvelope, LapRequest, LineDescriptor, Pack, PackState,
@@ -116,7 +116,14 @@ fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
         ..T0Options::default()
     };
     let t0 = T0Vehicle::assemble(&resolved, &Conditions::default(), &loader, &t0_opts).unwrap();
-    let batt_path = resolved.spec.battery.as_ref().unwrap().params.as_str();
+    let batt_path = resolved
+        .spec
+        .batteries
+        .values()
+        .next()
+        .unwrap()
+        .params
+        .as_str();
     let doc = load_battery(batt_path, &loader).unwrap();
     let sidecar = format!("battery/{}", doc.ecm.tables.file.as_str());
     let ecm_bytes = loader.load_bytes(&sidecar).unwrap();
@@ -144,9 +151,11 @@ fn plan<'a>(h: &'a Hybrid, ers: &'a ErsCoupling, path: &'a T0Path) -> StintPlan<
         path,
         electro: Some(StintElectro {
             vehicle: &h.t1,
-            pack: &h.pack,
+            packs: std::slice::from_ref(&h.pack),
             thermal: None,
-            pack_state: h.state,
+            pack_states: vec![h.state],
+            unit_pack: vec![0; h.t1.powertrain().unit_count()],
+            governed_pack: 0,
             active: h.t1.has_energy_maps(),
         }),
         ers: Some(ers),
@@ -169,9 +178,15 @@ fn plan<'a>(h: &'a Hybrid, ers: &'a ErsCoupling, path: &'a T0Path) -> StintPlan<
 fn f1_qss_stint_carries_soc_across_lap_boundaries() {
     let h = hybrid("f1_2026", None);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let ers = ErsCoupling::assemble(
+        &h.resolved.spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let n_laps = 5;
     let result = solve_stint(&plan(&h, &ers, &path), n_laps, StintSeeds::default()).unwrap();
     assert_eq!(result.laps.len(), n_laps);
@@ -182,6 +197,7 @@ fn f1_qss_stint_carries_soc_across_lap_boundaries() {
         let slow = lap.slow.as_ref().expect("f1 stint lap has slow channels");
         lap.terminal
             .pack
+            .as_ref()
             .expect("f1 stint lap carries a pack terminal");
 
         // Station 0 logs the ENTRY SoC — exactly the state this lap seeded from. Continuity: lap N+1
@@ -190,7 +206,7 @@ fn f1_qss_stint_carries_soc_across_lap_boundaries() {
         if i == 0 {
             assert_eq!(entry, seed, "lap 1 must start from the assembled seed");
         } else {
-            let prev_terminal = result.laps[i - 1].terminal.pack.unwrap().soc;
+            let prev_terminal = result.laps[i - 1].terminal.pack.as_ref().unwrap()[0].soc;
             assert_eq!(
                 entry,
                 prev_terminal,
@@ -206,7 +222,9 @@ fn f1_qss_stint_carries_soc_across_lap_boundaries() {
     // (the f1 pack recharges toward the top of its window over the run, then charge-sustains there).
     let lap0 = &result.laps[0];
     assert!(
-        (lap0.terminal.pack.unwrap().soc - lap0.slow.as_ref().unwrap().state_of_charge[0]).abs()
+        (lap0.terminal.pack.as_ref().unwrap()[0].soc
+            - lap0.slow.as_ref().unwrap().state_of_charge[0])
+            .abs()
             > 1e-6,
         "lap 1 SoC must move from the seed"
     );
@@ -226,9 +244,15 @@ fn f1_qss_stint_carries_soc_across_lap_boundaries() {
 fn f1_qss_stint_surfaces_the_per_lap_ledger() {
     let h = hybrid("f1_2026", None);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let ers = ErsCoupling::assemble(
+        &h.resolved.spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let result = solve_stint(&plan(&h, &ers, &path), 5, StintSeeds::default()).unwrap();
     for (k, lap) in result.laps.iter().enumerate() {
         let e = lap
@@ -265,12 +289,24 @@ fn f1_qss_stint_respects_the_initial_soc_seed() {
     let path = T0Path::from_track(&stadium_track(), 5.0);
     let high = hybrid("f1_2026", Some(0.85));
     let low = hybrid("f1_2026", Some(0.45));
-    let ers_h = ErsCoupling::assemble(&high.resolved.spec, &high.t0, Policy::RuleBased, false)
-        .unwrap()
-        .unwrap();
-    let ers_l = ErsCoupling::assemble(&low.resolved.spec, &low.t0, Policy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let ers_h = ErsCoupling::assemble(
+        &high.resolved.spec,
+        &high.t0,
+        high.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    let ers_l = ErsCoupling::assemble(
+        &low.resolved.spec,
+        &low.t0,
+        low.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let r_hi = solve_stint(&plan(&high, &ers_h, &path), 3, StintSeeds::default()).unwrap();
     let r_lo = solve_stint(&plan(&low, &ers_l, &path), 3, StintSeeds::default()).unwrap();
     assert_eq!(r_hi.laps[0].slow.as_ref().unwrap().state_of_charge[0], 0.85);
@@ -282,14 +318,23 @@ fn f1_qss_stint_respects_the_initial_soc_seed() {
 fn f1_qss_stint_is_deterministic() {
     let h = hybrid("f1_2026", None);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, Policy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let ers = ErsCoupling::assemble(
+        &h.resolved.spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let a = solve_stint(&plan(&h, &ers, &path), 4, StintSeeds::default()).unwrap();
     let b = solve_stint(&plan(&h, &ers, &path), 4, StintSeeds::default()).unwrap();
     for (la, lb) in a.laps.iter().zip(&b.laps) {
         assert_eq!(la.lap_time_s, lb.lap_time_s);
-        assert_eq!(la.terminal.pack.unwrap().soc, lb.terminal.pack.unwrap().soc);
+        assert_eq!(
+            la.terminal.pack.as_ref().unwrap()[0].soc,
+            lb.terminal.pack.as_ref().unwrap()[0].soc
+        );
         assert_eq!(
             la.slow.as_ref().unwrap().state_of_charge,
             lb.slow.as_ref().unwrap().state_of_charge

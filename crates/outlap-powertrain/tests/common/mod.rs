@@ -6,21 +6,21 @@
 #![allow(clippy::doc_markdown, clippy::cast_precision_loss)] // fixture names; 53-bit RNG mantissa
 
 use outlap_schema::io::FsLoader;
-use outlap_schema::vehicle::{
-    Activation, Deployment, EnergyStore, Ers, OverrideMode, Recovery, SpeedTaper,
-};
+use outlap_schema::vehicle::{Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper};
 use outlap_schema::{load_vehicle, LoadOptions};
 
-/// The verified FIA 2026 Issue-19 `ers:` block (D-M6-5): two-segment deployment taper with the
-/// knee at EXACTLY 100/350 = 2/7 (a truncated decimal fails the knee-exactness test), override
+/// The f1_es governed pack's usable SoC window (the rulebook's `recharge_target` default source).
+pub const F1_PACK_WINDOW: [f64; 2] = [0.2, 0.9];
+/// The gt_es governed pack's usable SoC window.
+pub const GT_PACK_WINDOW: [f64; 2] = [0.3, 0.85];
+
+/// The verified FIA 2026 Issue-19 `policy:` overlay (D-M6-5/13): two-segment deployment taper with
+/// the knee at EXACTLY 100/350 = 2/7 (a truncated decimal fails the knee-exactness test), override
 /// per C5.2.8(ii), 8.5 MJ harvest + 0.5 MJ override bonus, NO per-lap deploy budget.
-pub fn f1_ers() -> Ers {
-    Ers {
-        mgu_k: "ptm/mgu_k.ptm.yaml".into(),
-        es: EnergyStore {
-            capacity_mj: 4.0,
-            soc_window: [0.2, 0.9],
-        },
+pub fn f1_policy() -> Policy {
+    Policy {
+        governs: vec!["mguk".into()],
+        regulatory_window_mj: 4.0,
         deployment: Deployment {
             power_limit_kw: 350.0,
             taper_vs_speed: SpeedTaper {
@@ -51,17 +51,17 @@ pub fn f1_ers() -> Ers {
     }
 }
 
-/// The gt_hybrid fixture's `ers:` block, loaded through the real schema pipeline (D-M6-12): no
+/// The gt_hybrid fixture's `policy:` overlay, loaded through the real schema pipeline (D-M6-12): no
 /// override mode, no recharge phases, a decreasing mid-knot taper, 120 kW / 3 MJ budgets — the
 /// Option-handling paths must never ship untested.
-pub fn gt_ers() -> Ers {
+pub fn gt_policy() -> Policy {
     let loader = FsLoader::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../outlap-schema/tests/fixtures"
     ));
     let resolved = load_vehicle("gt_hybrid/vehicle.yaml", &loader, &LoadOptions::default())
         .expect("gt_hybrid fixture resolves");
-    resolved.spec.ers.expect("gt_hybrid has an ers block")
+    resolved.spec.policy.expect("gt_hybrid has a policy block")
 }
 
 /// A deterministic counter-based test RNG (splitmix64) — fixed seeds, no clock, no rand dep.

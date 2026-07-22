@@ -339,6 +339,10 @@ impl PtUnit {
 #[derive(Clone, Debug)]
 pub struct T1Powertrain {
     units: Vec<PtUnit>,
+    /// Maps each `spec.drivetrain.units[]` index to its slot in `units` (`None` for a
+    /// policy-governed machine excluded from the ceilings) — reconciles the positional sidecar
+    /// install with the de-duped unit list (D-M6-13).
+    spec_to_slot: Vec<Option<usize>>,
     /// Static front-axle torque share (from `control.split.front`), if declared.
     split_front: Option<f64>,
     /// Static left-side torque share (from `control.split.left`), if declared.
@@ -363,16 +367,29 @@ impl T1Powertrain {
         r_rear: f64,
     ) -> Result<Self, T1Error> {
         let spec = &vehicle.spec;
+        // A policy-governed machine (the MGU-K) is a force-adder, not a mechanical ceiling
+        // contributor — exclude it from the T1 traction/regen sums (the PRIMARY D-M6-13 de-dup;
+        // T2/T3 inherit these ceilings). `spec_to_slot` maps each spec unit index to its slot in
+        // `units` (None for the governed machine) so the positional sidecar install reconciles.
+        let governed = crate::graph::governed_unit_ids(spec);
         let mut units = Vec::with_capacity(spec.drivetrain.units.len());
+        let mut spec_to_slot: Vec<Option<usize>> = Vec::with_capacity(spec.drivetrain.units.len());
         let mut notes = Vec::new();
         for (i, unit) in spec.drivetrain.units.iter().enumerate() {
+            if governed.contains(unit.id.as_str()) {
+                spec_to_slot.push(None);
+                continue;
+            }
+            spec_to_slot.push(Some(units.len()));
             let ptm = load_ptm(unit.source.as_str(), loader)?;
+            // Flatten the shared graph: private path ++ couplers from the source's output node.
+            let (chain, wheels) = crate::graph::flatten_chain(&spec.drivetrain, unit);
             let mut driven = [false; 4];
-            for w in &unit.wheels {
+            for w in &wheels {
                 driven[wheel_index(*w)] = true;
             }
             let r_wheel = driven_radius(driven, r_front, r_rear);
-            let (base_ratio, base_eff, gearbox, has_eff_map) = fold_path(&unit.path);
+            let (base_ratio, base_eff, gearbox, has_eff_map) = fold_path(&chain);
             if has_eff_map {
                 notes.push(format!(
                     "drive unit {i} gearbox uses a map efficiency; a constant proxy carries the \
@@ -410,7 +427,7 @@ impl T1Powertrain {
                 }
             };
             let regen_omega_max = regen_env.domain().1;
-            let diff = diff_model(&unit.path);
+            let diff = diff_model(&chain);
             units.push(PtUnit {
                 kind: ptm.kind,
                 peak_env,
@@ -437,15 +454,17 @@ impl T1Powertrain {
              loss maps (when installed) drive energy accounting only."
                 .to_owned(),
         );
-        if spec.ers.is_some() {
+        if spec.policy.is_some() {
             notes.push(
-                "ERS/MGU-K deployment is NOT folded into the T1 traction ceiling (it is a separate \
-                 rule-based deployment mechanism, §8.3); the ceiling is the drivetrain units only."
+                "the policy-governed machine (MGU-K) is force-added by the energy manager, NOT \
+                 folded into the T1 traction/regen ceiling (a separate rule-based deployment \
+                 mechanism, §8.3); the ceiling is the non-governed drivetrain units only."
                     .to_owned(),
             );
         }
         Ok(Self {
             units,
+            spec_to_slot,
             split_front,
             split_left,
             notes,
@@ -469,10 +488,26 @@ impl T1Powertrain {
         unit_idx: usize,
         table: &GriddedTable<f64>,
     ) -> Result<(), T1Error> {
+        // `unit_idx` is the SPEC drivetrain-unit index (the caller's positional loop). Resolve it
+        // to the de-duped `units` slot; a policy-governed machine maps to `None` and its map is a
+        // no-op here (the MGU-K is force-added, never a T1 energy unit — byte-identical to pre-2.0
+        // where it was not a drivetrain unit at all).
+        let Some(slot) = self
+            .spec_to_slot
+            .get(unit_idx)
+            .ok_or(T1Error::UnknownDriveUnit { unit: unit_idx })?
+        else {
+            self.notes.push(format!(
+                "spec drive unit {unit_idx} is the policy-governed machine — its efficiency/loss \
+                 map is not installed into the T1 ceiling (force-added by the energy manager)"
+            ));
+            return Ok(());
+        };
+        let slot = *slot;
         let unit = self
             .units
-            .get_mut(unit_idx)
-            .ok_or(T1Error::UnknownDriveUnit { unit: unit_idx })?;
+            .get_mut(slot)
+            .ok_or(T1Error::UnknownDriveUnit { unit: slot })?;
         // A Vdc axis (ptm/1.1) makes the maps 3-D and enables the coupling; extrapolate on Vdc only.
         // The Linear mode and `eval_map` both attach positionally to axis index 2, so the decode must
         // put Vdc last (it does — decode with `map_axis_names_vdc`); assert that contract.
@@ -657,6 +692,12 @@ impl T1Powertrain {
         })
     }
 
+    /// The number of (de-duped, non-governed) drive-unit slots — the length of a `unit_pack` map.
+    #[must_use]
+    pub fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
     /// Front/rear axle torque split fractions `(front, rear)` — the static `control.split.front`
     /// (default: all torque to whichever axle the units drive). Always sums to 1.
     #[must_use]
@@ -823,6 +864,61 @@ impl T1Powertrain {
                 source_w += pt.source_w;
                 loss_w += pt.loss_w;
                 omega_rad_s = omega_rad_s.max(rpm * RPM_TO_RAD_PER_S);
+            }
+        }
+        Some(TractionEnergy {
+            source_w,
+            loss_w,
+            omega_rad_s,
+        })
+    }
+
+    /// Multi-pack variant of [`Self::traction_energy`] (D-M6-13): the aggregate outcome is
+    /// **identical** (same per-unit summation, same order), but each mapped unit's `source_w` is
+    /// ALSO routed into `per_pack_sw[unit_pack[slot]]` so the march can step each pack independently.
+    /// `unit_pack` is indexed by this powertrain's unit slot; `per_pack_sw` is zeroed on entry.
+    /// A single-pack car (`unit_pack` all-zero, `per_pack_sw.len() == 1`) yields
+    /// `per_pack_sw[0] == source_w` bit-for-bit — the march then reduces to the scalar path.
+    pub fn traction_energy_by_pack(
+        &self,
+        v: f64,
+        wheel_force_n: f64,
+        vdc: Option<f64>,
+        unit_pack: &[usize],
+        per_pack_sw: &mut [f64],
+    ) -> Option<TractionEnergy> {
+        per_pack_sw.fill(0.0);
+        let mut total_cap = 0.0;
+        let mut any_map = false;
+        for u in &self.units {
+            if u.eff_map.is_some() {
+                any_map = true;
+                total_cap += u.max_wheel_force(v);
+            }
+        }
+        if !any_map || total_cap <= 0.0 {
+            return None;
+        }
+        let mut source_w = 0.0f64;
+        let mut loss_w = 0.0f64;
+        let mut omega_rad_s = 0.0f64;
+        for (idx, u) in self.units.iter().enumerate() {
+            if u.eff_map.is_none() {
+                continue;
+            }
+            let share = u.max_wheel_force(v) / total_cap;
+            let unit_force = wheel_force_n * share;
+            let Some((rpm, tau)) = u.source_op(v, unit_force) else {
+                continue;
+            };
+            if let Some(pt) = self.energy_at_shaft_inner(idx, rpm, tau, vdc) {
+                source_w += pt.source_w;
+                loss_w += pt.loss_w;
+                omega_rad_s = omega_rad_s.max(rpm * RPM_TO_RAD_PER_S);
+                let k = unit_pack.get(idx).copied().unwrap_or(0);
+                if let Some(slot) = per_pack_sw.get_mut(k) {
+                    *slot += pt.source_w;
+                }
             }
         }
         Some(TractionEnergy {

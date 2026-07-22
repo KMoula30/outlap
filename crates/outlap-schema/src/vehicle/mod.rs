@@ -8,8 +8,8 @@ mod brakes;
 mod chassis;
 mod driver;
 mod drivetrain;
-mod ers;
 mod fuel;
+mod policy;
 mod suspension;
 mod tires;
 
@@ -19,26 +19,28 @@ pub use brakes::{AxlePair, BrakeDisc, Brakes, RegenBlend};
 pub use chassis::Chassis;
 pub use driver::Driver;
 pub use drivetrain::{
-    Coupler, Diff, DiffKind, DriveControl, DriveUnit, Drivetrain, Efficiency, Gearbox, ShiftMap,
-    ShiftMapKind, Split, TorqueVectoring, Wheel,
+    Coupler, CouplerEdge, Diff, DiffKind, DriveControl, DriveUnit, Drivetrain, Efficiency, Gearbox,
+    ShiftMap, ShiftMapKind, Split, TorqueVectoring, Wheel,
 };
-pub use ers::{Activation, Deployment, EnergyStore, Ers, OverrideMode, Recovery, SpeedTaper};
 pub use fuel::{default_lhv_j_per_kg, Fuel, FuelFlowLimit, RpmFlowLine};
+pub use policy::{Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper};
 pub use suspension::{AxleKc, Bumpstop, Suspension, SuspensionModel};
 pub use tires::Tires;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::refs::{Extensions, PresetRef};
+use std::collections::BTreeMap;
+
+use crate::refs::{BatteryId, Extensions, PresetRef};
 use crate::version::SchemaVersion;
 
 /// A complete vehicle description.
 ///
 /// `extends` and `extensions` are the two contract-level affordances: inheritance is a single
 /// `extends:` parent chain (resolved to `None` in the loaded model), and `x-*` vendor keys are
-/// gathered into `extensions`. Whole optional subsystems (`ers`, `battery`) are `Option`; see the
-/// crate docs for the required-vs-optional rule.
+/// gathered into `extensions`. Optional subsystems (`policy`, `fuel`) are `Option` and packs are an
+/// id-keyed map (`batteries`); see the crate docs for the required-vs-optional rule.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Vehicle {
@@ -59,12 +61,15 @@ pub struct Vehicle {
     pub tires: Tires,
     /// Drivetrain topology graph (sources → couplers → wheels) plus the control layer.
     pub drivetrain: Drivetrain,
-    /// Energy-recovery system (MGU-K + energy store), if the car has one.
+    /// Optional energy-management policy overlay governing one or more electric drive units
+    /// (deploy taper, override, harvest/recharge budgets). Absent ⇒ electric units run as plain
+    /// force-adders with no manager (a pure EV) (§8.3, D-M6-13).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ers: Option<Ers>,
-    /// Battery equivalent-circuit model reference, if the car has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub battery: Option<Battery>,
+    pub policy: Option<Policy>,
+    /// Battery equivalent-circuit packs, keyed by in-document id and referenced by
+    /// `drivetrain.units[].battery`. A single-pack car is a length-1 map (§8.4, D-M6-13).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub batteries: BTreeMap<BatteryId, Battery>,
     /// Brakes (balance, discs, ABS, regen blending).
     pub brakes: Brakes,
     /// On-board fuel (mass, CG offset, flow limit), if the car burns fuel. Absent ⇒ mass is the

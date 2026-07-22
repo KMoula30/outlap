@@ -14,7 +14,7 @@ use outlap_schema::io::SourceLoader;
 use outlap_schema::load::{load_ptm, load_tyr};
 use outlap_schema::ptm::TorqueCurve;
 use outlap_schema::tyr::Tyr;
-use outlap_schema::vehicle::{Coupler, Efficiency, Gearbox};
+use outlap_schema::vehicle::{Coupler, Efficiency, Gearbox, Wheel};
 use outlap_schema::ResolvedVehicle;
 use outlap_tire::TireModel;
 
@@ -117,6 +117,9 @@ struct T0Ers {
 
 impl T0Vehicle {
     /// Assemble a [`T0Vehicle`] from a resolved vehicle, session conditions, and a source loader.
+    // One linear assembly procedure (tyres → aero → mechanical units → ERS force-adder); the
+    // D-M6-13 graph flatten + governed-unit de-dup pushed it a few lines past the pedantic cap.
+    #[allow(clippy::too_many_lines)]
     pub fn assemble(
         vehicle: &ResolvedVehicle,
         conditions: &Conditions,
@@ -165,12 +168,19 @@ impl T0Vehicle {
             None => return Err(T0Error::NoConstantAero),
         };
 
-        // --- Drive units ---
+        // --- Drive units (mechanical sources only; a policy-governed machine is excluded here and
+        // force-added by the ERS block below — the D-M6-13 T0 de-dup) ---
+        let governed = crate::graph::governed_unit_ids(spec);
         let mut units = Vec::with_capacity(spec.drivetrain.units.len());
         for (i, unit) in spec.drivetrain.units.iter().enumerate() {
+            if governed.contains(unit.id.as_str()) {
+                continue;
+            }
             let ptm = load_ptm(unit.source.as_str(), loader)?;
-            let r_wheel = driven_radius(unit, r_front, r_rear, i, &mut notes);
-            let (base_ratio, base_eff, gearbox) = fold_path(&unit.path, i, &mut notes)?;
+            // Flatten the shared graph: private path ++ couplers from the source's output node.
+            let (chain, wheels) = crate::graph::flatten_chain(&spec.drivetrain, unit);
+            let r_wheel = driven_radius(&wheels, r_front, r_rear, i, &mut notes);
+            let (base_ratio, base_eff, gearbox) = fold_path(&chain, i, &mut notes)?;
             let torque_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
             let omega_max = torque_env.domain().1;
             let gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
@@ -181,10 +191,20 @@ impl T0Vehicle {
             });
         }
 
-        // --- ERS (rulebook-governed force; schema gives the MGU-K no path/ratio) ---
-        let ers = match &spec.ers {
-            Some(e) => {
-                let ptm = load_ptm(e.mgu_k.as_str(), loader)?;
+        // --- ERS (rulebook-governed force from the policy-governed machine unit) ---
+        // The pack SoC window is unused on the T0 pedal-availability path (only the deploy taper
+        // and the 0.97 seam are read; `recharge_target` is a march-only concern), so the rulebook
+        // is built with a placeholder window — the march (ErsCoupling) builds its own rulebook from
+        // the real governed-pack window.
+        let ers = match spec.policy.as_ref().and_then(|policy| {
+            policy
+                .governs
+                .first()
+                .and_then(|id| spec.drivetrain.units.iter().find(|u| u.id == *id))
+                .map(|unit| (policy, unit))
+        }) {
+            Some((policy, gov_unit)) => {
+                let ptm = load_ptm(gov_unit.source.as_str(), loader)?;
                 let curve = &ptm.limits.max_torque_nm_vs_speed;
                 let p_mech_max_w = curve
                     .speed_rpm
@@ -195,7 +215,7 @@ impl T0Vehicle {
                 // The C5.2.11 crank torque cap stays proxied by `p_mech_max_w` (no declared
                 // machine→crank ratio at T0 — see the `T0Ers` doc); the rulebook carries the
                 // electrical caps + piecewise-linear tapers + the 0.97 conversion seam.
-                let rulebook = ErsRulebook::from_schema(e, None)?;
+                let rulebook = ErsRulebook::from_schema(policy, [0.0, 1.0], None)?;
                 let eta = single_gearbox_eff(spec).unwrap_or(1.0);
                 notes.push(
                     "ERS folded into the T0 pedal-availability force as the greedy, budget-free \
@@ -359,16 +379,16 @@ fn coeff(tyr: &Tyr, key: &str, default: f64) -> f64 {
     tyr.mf61.0.get(key).copied().unwrap_or(default)
 }
 
-/// The driven-axle wheel radius for a unit (mean if it spans both axles).
+/// The driven-axle wheel radius for a unit's terminal wheels (mean if it spans both axles).
 fn driven_radius(
-    unit: &outlap_schema::vehicle::DriveUnit,
+    wheels: &[Wheel],
     r_front: f64,
     r_rear: f64,
     index: usize,
     notes: &mut Vec<String>,
 ) -> f64 {
-    let front = unit.wheels.iter().any(|w| w.is_front());
-    let rear = unit.wheels.iter().any(|w| !w.is_front());
+    let front = wheels.iter().any(|w| w.is_front());
+    let rear = wheels.iter().any(|w| !w.is_front());
     match (front, rear) {
         (true, false) => r_front,
         (false, _) => r_rear, // rear-only, or no wheels declared → rear radius
@@ -458,19 +478,27 @@ fn torque_env(curve: &TorqueCurve) -> Result<MonotoneCubic<f64>, T0Error> {
     MonotoneCubic::new(omega, curve.torque_nm.clone()).map_err(T0Error::from)
 }
 
-/// If the whole drivetrain has exactly one gearbox with a constant efficiency, return it.
+/// If the whole drivetrain has exactly one gearbox with a constant efficiency, return it. Scans
+/// non-governed units' private paths AND the shared top-level couplers (an f1 gearbox now lives on
+/// a coupler); the policy-governed machine is excluded (its ratio never enters the ICE eta).
 fn single_gearbox_eff(spec: &outlap_schema::Vehicle) -> Option<f64> {
+    let governed = crate::graph::governed_unit_ids(spec);
+    let unit_couplers = spec
+        .drivetrain
+        .units
+        .iter()
+        .filter(|u| !governed.contains(u.id.as_str()))
+        .flat_map(|u| u.path.iter());
+    let graph_couplers = spec.drivetrain.couplers.iter().map(|e| &e.coupler);
     let mut found: Option<f64> = None;
-    for unit in &spec.drivetrain.units {
-        for coupler in &unit.path {
-            if let Coupler::Gearbox(g) = coupler {
-                if found.is_some() {
-                    return None; // ambiguous
-                }
-                match g.efficiency {
-                    Efficiency::Constant(e) => found = Some(e),
-                    Efficiency::Map { .. } => return None,
-                }
+    for coupler in unit_couplers.chain(graph_couplers) {
+        if let Coupler::Gearbox(g) = coupler {
+            if found.is_some() {
+                return None; // ambiguous
+            }
+            match g.efficiency {
+                Efficiency::Constant(e) => found = Some(e),
+                Efficiency::Map { .. } => return None,
             }
         }
     }

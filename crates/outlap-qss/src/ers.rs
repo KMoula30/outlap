@@ -28,7 +28,7 @@
 //! (`mech_regen_envelope_w`, `brake_demand_w`) exactly as its field docs specify; ceiling 3 clips
 //! the realized command in the march.
 
-use outlap_powertrain::{EnergyManager, Policy};
+use outlap_powertrain::{DeployPolicy, EnergyManager};
 use outlap_schema::Vehicle;
 
 use crate::error::T0Error;
@@ -36,9 +36,10 @@ use crate::vehicle::T0Vehicle;
 
 // Re-export the manager surface so tier consumers (the Python binding, the T2 governor) need not
 // depend on `outlap-powertrain` directly to pick a policy, hand in a u(s) schedule, or drive the
-// manager per step.
+// manager per step. `ErsPolicy` aliases the renamed runtime `DeployPolicy` (D-M6-13: the schema's
+// `vehicle::Policy` overlay took the bare `Policy` name).
 pub use outlap_powertrain::{
-    DecideInput, ErsCommand, ErsMode, LapEnergyLedger, Policy as ErsPolicy, ScheduleError,
+    DecideInput, DeployPolicy as ErsPolicy, ErsCommand, ErsMode, LapEnergyLedger, ScheduleError,
     UsSchedule,
 };
 
@@ -71,7 +72,7 @@ pub struct ErsCoupling {
     /// Blend authority `brakes.regen_blend.max_regen_frac` (0 without a `regen_blend` block —
     /// the T2 convention: no blend policy, no braking harvest) — harvest ceiling 4.
     pub max_regen_frac: f64,
-    /// FIA C5.2.9 on-track energy-swing limit, J (`ers.es.capacity_mj`) — the maximum
+    /// FIA C5.2.9 on-track energy-swing limit, J (`policy.regulatory_window_mj`) — the maximum
     /// `max − min` SoC energy the store may vary on track. A REGULATORY limit, enforced
     /// independently of the pack's PHYSICAL `soc_window`: the physical window is the battery's
     /// range; this caps the swing WITHIN it (they coincide only when the pack is sized exactly to
@@ -91,29 +92,32 @@ impl ErsCoupling {
     pub fn assemble(
         spec: &Vehicle,
         t0: &T0Vehicle,
-        policy: Policy<f64>,
+        pack_soc_window: [f64; 2],
+        policy_deploy: DeployPolicy<f64>,
         override_active: bool,
     ) -> Result<Option<Self>, T0Error> {
-        let Some(ers) = &spec.ers else {
+        let Some(policy) = &spec.policy else {
             return Ok(None);
         };
-        // Built from the SPEC's `ers:` block (the caller's source of truth — a mutated what-if
-        // spec must govern the march it builds); when `spec` is the block `t0` was assembled
-        // from — the production path — the curves are identical to the pedal availability by
-        // construction (same `ErsRulebook::from_schema`).
-        let rulebook = outlap_powertrain::ErsRulebook::from_schema(ers, None)?;
-        let front_driven = spec
+        // Built from the SPEC's `policy:` overlay + the governed pack's usable SoC window (the
+        // single source of truth for `recharge_target`'s default); when `spec` is the block `t0`
+        // was assembled from — the production path — the deploy curves are identical to the pedal
+        // availability by construction (same `ErsRulebook::from_schema`).
+        let rulebook = outlap_powertrain::ErsRulebook::from_schema(policy, pack_soc_window, None)?;
+        // Driven axles come from the graph terminal wheels of the MECHANICAL sources (a
+        // policy-governed machine is a force-adder, not a mechanical driver, so it is excluded).
+        let governed = crate::graph::governed_unit_ids(spec);
+        let (mut front_driven, mut rear_driven) = (false, false);
+        for unit in spec
             .drivetrain
             .units
             .iter()
-            .flat_map(|u| &u.wheels)
-            .any(|w| w.is_front());
-        let rear_driven = spec
-            .drivetrain
-            .units
-            .iter()
-            .flat_map(|u| &u.wheels)
-            .any(|w| !w.is_front());
+            .filter(|u| !governed.contains(u.id.as_str()))
+        {
+            let (_, wheels) = crate::graph::flatten_chain(&spec.drivetrain, unit);
+            front_driven |= wheels.iter().any(|w| w.is_front());
+            rear_driven |= wheels.iter().any(|w| !w.is_front());
+        }
         let bias = spec.brakes.balance_bar;
         let regen_axle_share =
             (if front_driven { bias } else { 0.0 }) + (if rear_driven { 1.0 - bias } else { 0.0 });
@@ -123,13 +127,13 @@ impl ErsCoupling {
             .as_ref()
             .map_or(0.0, |b| b.max_regen_frac.clamp(0.0, 1.0));
         Ok(Some(Self {
-            manager: EnergyManager::new(rulebook, policy),
+            manager: EnergyManager::new(rulebook, policy_deploy),
             override_active,
             eta: t0.ers_eta(),
             p_mech_max_w: t0.ers_p_mech_max_w(),
             regen_axle_share,
             max_regen_frac,
-            swing_limit_j: ers.es.capacity_mj * 1.0e6,
+            swing_limit_j: policy.regulatory_window_mj * 1.0e6,
         }))
     }
 

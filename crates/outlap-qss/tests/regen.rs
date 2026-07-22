@@ -149,8 +149,9 @@ fn ev(regen: bool, soc0: f64) -> Ev {
     // The 800 V pack.
     let batt_path = resolved
         .spec
-        .battery
-        .as_ref()
+        .batteries
+        .values()
+        .next()
         .unwrap()
         .params
         .as_str()
@@ -175,13 +176,8 @@ fn ev(regen: bool, soc0: f64) -> Ev {
 
 fn march(e: &Ev) -> Vec<f64> {
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let electro = SlowCoupling {
-        vehicle: &e.t1,
-        thermal: None,
-        pack: e.pack.clone(),
-        pack_state: e.state,
-        active: e.t1.has_energy_maps(),
-    };
+    let electro =
+        SlowCoupling::single(&e.t1, None, e.pack.clone(), e.state, e.t1.has_energy_maps());
     let lap = solve_t0(
         &e.t0,
         e.env.clone(),
@@ -248,5 +244,76 @@ fn regen_is_throttled_by_charge_acceptance_near_a_full_pack() {
         "a near-full pack accepts less regen ({:.2e}) than a mid-charge pack ({:.2e})",
         recovered(&full),
         recovered(&mid)
+    );
+}
+
+/// D-M6-13 genuine multi-pack march: with the drivetrain unit routed to pack 0, ONLY pack 0
+/// discharges — the unreferenced pack 1 is untouched; routing the same unit to pack 1 flips it.
+/// Proves each unit draws from ITS referenced pack and the pack states move independently. A
+/// single-pack car (length-1 packs, `unit_pack == [0]`) is the byte-identical scalar path the other
+/// tests in this file already pin.
+#[test]
+fn units_draw_from_their_referenced_pack_independently() {
+    use outlap_qss::solve_t0;
+    let e = ev(false, 0.6); // regen off: a clean discharge, so the routed pack strictly falls
+    let path = T0Path::from_track(&stadium_track(), 5.0);
+    let req = || LapRequest {
+        line: LineDescriptor::Centerline,
+        resolved_hash: String::new(),
+        notes: vec![],
+        fz_coupling: FzCoupling::OneStepLag,
+        flat_track: false,
+    };
+    // Two packs, identical model + seed; the single mapped drive unit routes to `pack_idx`.
+    let run = |pack_idx: usize| -> [f64; 2] {
+        let coupling = SlowCoupling {
+            vehicle: &e.t1,
+            thermal: None,
+            packs: vec![e.pack.clone(), e.pack.clone()],
+            pack_states: vec![e.state, e.state],
+            unit_pack: vec![pack_idx],
+            governed_pack: pack_idx,
+            active: e.t1.has_energy_maps(),
+        };
+        let lap = solve_t0(
+            &e.t0,
+            e.env.clone(),
+            &Couplings {
+                electro: Some(&coupling),
+                tire: None,
+                ers: None,
+                fuel: None,
+            },
+            &path,
+            req(),
+        )
+        .unwrap();
+        let terminal = lap.slow_terminal.pack.expect("two-pack terminal");
+        [terminal[0].soc, terminal[1].soc]
+    };
+
+    let [p0_a, p1_a] = run(0); // unit → pack 0
+    assert!(
+        p0_a < 0.6 - 1e-6,
+        "the referenced pack 0 discharges: {p0_a}"
+    );
+    assert!(
+        (p1_a - 0.6).abs() < 1e-12,
+        "the unreferenced pack 1 is untouched: {p1_a}"
+    );
+
+    let [p0_b, p1_b] = run(1); // unit → pack 1
+    assert!(
+        p1_b < 0.6 - 1e-6,
+        "the referenced pack 1 discharges: {p1_b}"
+    );
+    assert!(
+        (p0_b - 0.6).abs() < 1e-12,
+        "the unreferenced pack 0 is untouched: {p0_b}"
+    );
+    // The routed pack falls by the same amount whichever slot it sits in (independent, symmetric).
+    assert!(
+        (p0_a - p1_b).abs() < 1e-12,
+        "routing is pack-slot-symmetric"
     );
 }

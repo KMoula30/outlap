@@ -356,9 +356,15 @@ pub(crate) fn prepare_qss(
     let ers_policy = us_schedule.map_or(outlap_qss::ers::ErsPolicy::RuleBased, |u| {
         outlap_qss::ers::ErsPolicy::Schedule(u)
     });
+    // The governed pack's usable SoC window feeds the manager rulebook's recharge-target default
+    // (the pack is the single source of truth, D-M6-13); [0,1] when no pack (the coupling is inert).
+    let pack_window = stack
+        .as_ref()
+        .map_or([0.0, 1.0], |(_, pack, _)| pack.soc_window());
     let ers_coupling = build_ers_coupling(
         &resolved,
         &t0v,
+        pack_window,
         stack.is_some(),
         sim_cfg.allow_degraded,
         ers_policy,
@@ -464,12 +470,14 @@ pub(crate) fn solve_lap(
         us_schedule,
     )?;
 
-    let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
-        vehicle: &t1v,
-        thermal: thermal.clone(),
-        pack: pack.clone(),
-        pack_state: *state,
-        active: t1v.has_energy_maps(),
+    let coupling = stack.as_ref().map(|(thermal, pack, state)| {
+        SlowCoupling::single(
+            &t1v,
+            thermal.clone(),
+            pack.clone(),
+            *state,
+            t1v.has_energy_maps(),
+        )
     });
     let fuel_coupling = fuel_model.map(|model| outlap_qss::fuel::FuelCoupling {
         model,
@@ -505,16 +513,18 @@ pub(crate) fn solve_lap(
 /// not be BUILT — a missing/broken ECM sidecar. That is the same missing-energy-store contract
 /// violation, so it is a hard error too unless `allow_degraded` (the ONLY fallback path, which
 /// then marks the run and runs the budget-free curve).
+#[allow(clippy::too_many_arguments)] // cold binding-edge assembly; the pack window joins the set (D-M6-13)
 pub(crate) fn build_ers_coupling(
     resolved: &ResolvedVehicle,
     t0v: &T0Vehicle,
+    pack_soc_window: [f64; 2],
     pack_present: bool,
     allow_degraded: bool,
     policy: outlap_qss::ers::ErsPolicy<f64>,
     override_active: bool,
     notes: &mut Vec<String>,
 ) -> PyResult<Option<ErsCoupling>> {
-    if resolved.spec.ers.is_none() {
+    if resolved.spec.policy.is_none() {
         return Ok(None);
     }
     if !pack_present {
@@ -533,8 +543,14 @@ pub(crate) fn build_ers_coupling(
         );
         return Ok(None);
     }
-    let coupling =
-        ErsCoupling::assemble(&resolved.spec, t0v, policy, override_active).map_err(err)?;
+    let coupling = ErsCoupling::assemble(
+        &resolved.spec,
+        t0v,
+        pack_soc_window,
+        policy,
+        override_active,
+    )
+    .map_err(err)?;
     Ok(coupling)
 }
 
@@ -901,9 +917,11 @@ pub(crate) fn solve_stint(
         .as_ref()
         .map(|(thermal, pack, state)| outlap_qss::StintElectro {
             vehicle: &t1v,
-            pack,
+            packs: std::slice::from_ref(pack),
             thermal: thermal.as_ref(),
-            pack_state: *state,
+            pack_states: vec![*state],
+            unit_pack: vec![0; t1v.powertrain().unit_count()],
+            governed_pack: 0,
             active: t1v.has_energy_maps(),
         });
     let fuel_coupling = fuel_model.map(|model| outlap_qss::fuel::FuelCoupling {
@@ -987,8 +1005,9 @@ pub(crate) fn solve_stint(
             have_fuel = true;
         }
         // End-of-lap pack + machine temperature from the terminal snapshot the next lap seeded from.
-        if let Some(p) = &lap.terminal.pack {
-            pack_temp.push(p.temp_k - 273.15);
+        // The channel reports the primary pack (index 0); every committed car is single-pack.
+        if let Some(ps) = lap.terminal.pack.as_ref().and_then(|v| v.first()) {
+            pack_temp.push(ps.temp_k - 273.15);
             have_pack_temp = true;
         }
         if let Some(m) = &lap.terminal.machine {

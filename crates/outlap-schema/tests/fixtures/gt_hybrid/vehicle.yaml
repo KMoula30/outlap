@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # Reference topology: GT hybrid 80/20 (ICE -> gearbox -> rear diff -> RL+RR; EM in parallel as the
 # ERS machine — the split ratio is data). Same block as F1, different numbers.
-schema: vehicle/1.0
+schema: vehicle/2.0
 name: "Reference GT hybrid"
 chassis:
   mass_kg: 1250.0
@@ -20,17 +20,30 @@ tires:
   front: tyr/slick.tyr.yaml
   rear: tyr/slick.tyr.yaml
 drivetrain:
+  # D-M6-13 graph shape (mirrors f1_2026): ICE + MGU-K share the crank node; gearbox + diff on
+  # top-level couplers. The MGU-K is governed by `policy` and force-added.
   units:
-    - source: ptm/ice_v6.ptm.yaml
-      path:
-        - gearbox: { ratios: [2.6, 2.0, 1.6, 1.3, 1.1, 0.9], final_drive: 3.4, shift_time_s: 0.04 }
-        - diff: { type: lsd, preload_nm: 80.0, ramp: [40.0, 65.0] }
+    - id: ice
+      source: ptm/ice_v6.ptm.yaml
+      output: crank
+    - id: mguk
+      source: ptm/mgu_k.ptm.yaml
+      battery: gt_es
+      output: crank
+  couplers:
+    - coupler:
+        gearbox: { ratios: [2.6, 2.0, 1.6, 1.3, 1.1, 0.9], final_drive: 3.4, shift_time_s: 0.04 }
+      from: crank
+      to: gearbox_out
+    - coupler:
+        diff: { type: lsd, preload_nm: 80.0, ramp: [40.0, 65.0] }
+      from: gearbox_out
       wheels: [RL, RR]
-ers:
-  mgu_k: ptm/mgu_k.ptm.yaml
-  es:
-    capacity_mj: 2.0
-    soc_window: [0.3, 0.85]
+policy:
+  # Exercises the OPTIONAL policy paths: no override_mode, no recharge_phases — proving the
+  # Option-handling stays tested (D-M6-12).
+  governs: [mguk]
+  regulatory_window_mj: 2.0
   deployment:
     power_limit_kw: 120.0
     taper_vs_speed:
@@ -39,9 +52,10 @@ ers:
   recovery:
     braking_power_limit_kw: 120.0
     per_lap_harvest_mj: 3.0
-battery:
-  model: rc_pairs
-  params: battery/gt_es.yaml
+batteries:
+  gt_es:
+    model: rc_pairs
+    params: battery/gt_es.yaml
 brakes:
   balance_bar: 0.6
   disc:

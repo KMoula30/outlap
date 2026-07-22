@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# `soc_window` out of range / not ascending — must fail the semantic check.
+# Negative fixture (D-M6-13): the pre-2.0 singleton `ers:` layout — the legacy sniff must reject it
+# with a curated pointer to the drivetrain.units[]/policy:/batteries: shape (there is no migrate).
 schema: vehicle/2.0
-name: "bad soc window"
+name: "legacy ers layout"
 chassis:
   mass_kg: 768.0
   cg: [1.70, 0.0, 0.30]
@@ -23,15 +24,15 @@ drivetrain:
     - id: ice
       source: ptm/ice_v6.ptm.yaml
       path:
-        - gearbox: { ratios: [2.9, 2.2, 1.8], final_drive: 3.1, shift_time_s: 0.02 }
-        - diff: { type: lsd, preload_nm: 90.0 }
+        - diff: { type: open }
       wheels: [RL, RR]
-# The bad (descending) soc_window now lives on the referenced pack document — check_battery
-# rejects it. This preserves the negative-test intent after the D-M6-13 single-source-of-truth move.
-batteries:
-  bad_pack:
-    model: rc_pairs
-    params: battery/bad_soc_pack.yaml
+ers:
+  mgu_k: ptm/mgu_k.ptm.yaml
+  es: { capacity_mj: 4.0, soc_window: [0.2, 0.9] }
+  deployment:
+    power_limit_kw: 350.0
+    taper_vs_speed: { speed_kph: [0.0, 345.0], power_frac: [1.0, 0.0] }
+  recovery: { braking_power_limit_kw: 350.0, per_lap_harvest_mj: 8.5 }
 brakes:
   balance_bar: 0.58
   disc:

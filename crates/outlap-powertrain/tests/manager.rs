@@ -12,9 +12,9 @@
 
 mod common;
 
-use common::{f1_ers, gt_ers, TestRng};
+use common::{f1_policy, gt_policy, TestRng, F1_PACK_WINDOW, GT_PACK_WINDOW};
 use outlap_powertrain::{
-    DecideInput, EnergyManager, ErsCommand, ErsMode, ErsRulebook, LapEnergyLedger, Policy,
+    DecideInput, DeployPolicy, EnergyManager, ErsCommand, ErsMode, ErsRulebook, LapEnergyLedger,
     UsSchedule,
 };
 
@@ -74,9 +74,12 @@ fn run_trace(
 /// block and the gt_hybrid fixture block (D-M6-12).
 #[test]
 fn budgets_are_never_exceeded() {
-    for (ers, name) in [(f1_ers(), "f1_2026"), (gt_ers(), "gt_hybrid")] {
-        let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&ers, None).unwrap();
-        let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    for (ers, ewin, name) in [
+        (f1_policy(), F1_PACK_WINDOW, "f1_2026"),
+        (gt_policy(), GT_PACK_WINDOW, "gt_hybrid"),
+    ] {
+        let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&ers, ewin, None).unwrap();
+        let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
         for seed in 0..8u64 {
             let mut rng = TestRng::new(0xB0D6_E750 ^ seed);
             let mut ledger = LapEnergyLedger::new();
@@ -129,11 +132,11 @@ fn budgets_are_never_exceeded() {
 /// heuristic that back-filled it with `capacity_mj` is dead (D-M6-5).
 #[test]
 fn a_null_deploy_budget_is_unenforced() {
-    let ers = f1_ers();
+    let ers = f1_policy();
     assert!(ers.deployment.per_lap_deploy_mj.is_none());
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&ers, None).unwrap();
+    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&ers, F1_PACK_WINDOW, None).unwrap();
     assert!(rb.per_lap_deploy_j().is_none());
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let mut ledger = LapEnergyLedger::new();
     let inp = DecideInput {
         v: 50.0,
@@ -164,10 +167,10 @@ fn a_null_deploy_budget_is_unenforced() {
 /// the budget — the ledger can never exceed it by construction.
 #[test]
 fn an_explicit_deploy_budget_binds() {
-    let mut ers = gt_ers();
+    let mut ers = gt_policy();
     ers.deployment.per_lap_deploy_mj = Some(1.0);
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&ers, None).unwrap();
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&ers, GT_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let mut ledger = LapEnergyLedger::new();
     let inp = DecideInput {
         v: 40.0,
@@ -198,8 +201,9 @@ fn an_explicit_deploy_budget_binds() {
 /// energy is the mechanical absorption × 0.97, never the raw mechanical number.
 #[test]
 fn ledger_integrates_electrical_not_mechanical() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let ledger = LapEnergyLedger::new();
     let mech = 200e3;
     let inp = DecideInput {
@@ -231,8 +235,9 @@ fn ledger_integrates_electrical_not_mechanical() {
 /// uses the same additions).
 #[test]
 fn ledger_closes_over_the_commands() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let (cmds, ledger) = run_trace(&mgr, 0xC105_0E5, 50_000);
     let mut deploy = 0.0;
     let mut harvest = 0.0;
@@ -256,8 +261,9 @@ fn ledger_closes_over_the_commands() {
 /// initial step on the first reduction and by rate·dt afterwards, down to the back-drive floor.
 #[test]
 fn recharge_ramp_limits_are_respected() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let ledger = LapEnergyLedger::new();
     let mut inp = DecideInput {
         v: 80.0,
@@ -310,8 +316,9 @@ fn recharge_ramp_limits_are_respected() {
 /// A part-throttle step harvests the ICE-covered demand gap without any ramp involvement.
 #[test]
 fn part_throttle_harvests_the_demand_gap() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let ledger = LapEnergyLedger::new();
     let inp = DecideInput {
         v: 45.0,
@@ -340,7 +347,8 @@ fn part_throttle_harvests_the_demand_gap() {
 /// A `Schedule` policy reproduces a hand-computed u(s) trace exactly.
 #[test]
 fn schedule_policy_reproduces_a_hand_computed_trace() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
     let schedule = UsSchedule::new(
         vec![1.0, 0.5, 0.0, -0.25, -1.0],
         vec![false, true, false, false, false],
@@ -348,7 +356,7 @@ fn schedule_policy_reproduces_a_hand_computed_trace() {
         vec![0; 5],
     )
     .unwrap();
-    let mgr = EnergyManager::new(rb, Policy::Schedule(schedule));
+    let mgr = EnergyManager::new(rb, DeployPolicy::Schedule(schedule));
     let ledger = LapEnergyLedger::new();
     let base = DecideInput {
         v: 50.0, // 180 kph: inside the full-power plateau on both envelopes
@@ -433,8 +441,9 @@ fn shift_map_ids_are_validated_against_the_resolved_map_count() {
 /// Determinism: the same trace twice produces bit-identical commands and ledgers.
 #[test]
 fn same_trace_twice_is_bit_identical() {
-    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
-    let mgr = EnergyManager::new(rb, Policy::RuleBased);
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rb, DeployPolicy::RuleBased);
     let (cmds_a, ledger_a) = run_trace(&mgr, 0xDE7E_2814, 20_000);
     let (cmds_b, ledger_b) = run_trace(&mgr, 0xDE7E_2814, 20_000);
     assert_eq!(ledger_a.deploy_j().to_bits(), ledger_b.deploy_j().to_bits());
@@ -452,14 +461,14 @@ fn same_trace_twice_is_bit_identical() {
 /// f32 and f64 managers agree over a trace to single-precision tolerance.
 #[test]
 fn f32_f64_manager_parity() {
-    let ers = f1_ers();
+    let ers = f1_policy();
     let mgr64 = EnergyManager::new(
-        ErsRulebook::<f64>::from_schema(&ers, None).unwrap(),
-        Policy::RuleBased,
+        ErsRulebook::<f64>::from_schema(&ers, F1_PACK_WINDOW, None).unwrap(),
+        DeployPolicy::RuleBased,
     );
     let mgr32 = EnergyManager::new(
-        ErsRulebook::<f32>::from_schema(&ers, None).unwrap(),
-        Policy::RuleBased,
+        ErsRulebook::<f32>::from_schema(&ers, F1_PACK_WINDOW, None).unwrap(),
+        DeployPolicy::RuleBased,
     );
     let mut rng = TestRng::new(0xF3264);
     let ledger64 = LapEnergyLedger::<f64>::new();

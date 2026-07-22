@@ -17,24 +17,21 @@
 )]
 
 use outlap_powertrain::{
-    DecideInput, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger, Policy,
+    DecideInput, DeployPolicy, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger,
 };
-use outlap_schema::vehicle::{
-    Activation, Deployment, EnergyStore, Ers, OverrideMode, Recovery, SpeedTaper,
-};
+use outlap_schema::vehicle::{Activation, Deployment, OverrideMode, Policy, Recovery, SpeedTaper};
 
 const DT: f64 = 0.02;
 /// Usable-window energy for the toy SoC integrator, J (D-M6-3: 4 MJ over [0.2, 0.9]).
 const WINDOW_J: f64 = 4.0e6;
+/// The f1_es governed pack's usable SoC window.
+const F1_PACK_WINDOW: [f64; 2] = [0.2, 0.9];
 
-/// The verified FIA Issue-19 `ers:` block (D-M6-5 breakpoints; knee exactly 2/7).
-fn f1_ers() -> Ers {
-    Ers {
-        mgu_k: "ptm/mgu_k.ptm.yaml".into(),
-        es: EnergyStore {
-            capacity_mj: 4.0,
-            soc_window: [0.2, 0.9],
-        },
+/// The verified FIA Issue-19 `policy:` overlay (D-M6-5 breakpoints; knee exactly 2/7).
+fn f1_policy() -> Policy {
+    Policy {
+        governs: vec!["mguk".into()],
+        regulatory_window_mj: 4.0,
         deployment: Deployment {
             power_limit_kw: 350.0,
             taper_vs_speed: SpeedTaper {
@@ -76,8 +73,9 @@ const PHASES: &[(f64, f64, f64, f64, f64, f64)] = &[
 ];
 
 fn main() {
-    let rulebook: ErsRulebook<f64> = ErsRulebook::from_schema(&f1_ers(), None).unwrap();
-    let mgr = EnergyManager::new(rulebook, Policy::RuleBased);
+    let rulebook: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&f1_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mgr = EnergyManager::new(rulebook, DeployPolicy::RuleBased);
     let mut ledger = LapEnergyLedger::new();
     let mut prev = ErsCommand::idle();
     let mut soc = 0.62_f64; // just above mid-window at the start line

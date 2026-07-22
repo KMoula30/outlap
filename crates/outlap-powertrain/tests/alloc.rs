@@ -7,9 +7,9 @@
 
 mod common;
 
-use common::{f1_ers, TestRng};
+use common::{f1_policy, TestRng, F1_PACK_WINDOW};
 use outlap_powertrain::{
-    DecideInput, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger, Policy, UsSchedule,
+    DecideInput, DeployPolicy, EnergyManager, ErsCommand, ErsRulebook, LapEnergyLedger, UsSchedule,
 };
 
 #[global_allocator]
@@ -43,10 +43,10 @@ fn step(rng: &mut TestRng, prev: &ErsCommand<f64>) -> DecideInput<f64> {
 fn decide_and_record_are_zero_alloc() {
     let _profiler = dhat::Profiler::builder().testing().build();
 
-    let ers = f1_ers();
+    let ers = f1_policy();
     let rule_based = EnergyManager::new(
-        ErsRulebook::<f64>::from_schema(&ers, None).unwrap(),
-        Policy::RuleBased,
+        ErsRulebook::<f64>::from_schema(&ers, F1_PACK_WINDOW, None).unwrap(),
+        DeployPolicy::RuleBased,
     );
     let schedule = UsSchedule::new(
         (0..64).map(|i| f64::from(i % 5) / 2.0 - 1.0).collect(),
@@ -56,8 +56,8 @@ fn decide_and_record_are_zero_alloc() {
     )
     .unwrap();
     let scheduled = EnergyManager::new(
-        ErsRulebook::<f64>::from_schema(&ers, None).unwrap(),
-        Policy::Schedule(schedule),
+        ErsRulebook::<f64>::from_schema(&ers, F1_PACK_WINDOW, None).unwrap(),
+        DeployPolicy::Schedule(schedule),
     );
 
     for mgr in [&rule_based, &scheduled] {

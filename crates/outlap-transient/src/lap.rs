@@ -567,6 +567,16 @@ impl<T: Float> TierBlocks<T> for T3Blocks<T> {
     }
 }
 
+/// An additional battery pack at T2 beyond the primary `slow` stack (D-M6-13): the fraction of the
+/// net electrical power it takes, a running energy accumulator over the decimated slow window, and
+/// the scalar [`SlowStack`] it marches. Every committed car is single-pack, so this is empty and
+/// the primary stack sees the full aggregate — byte-identical to the pre-2.0 slow clock.
+struct ExtraSlow<T> {
+    stack: Box<dyn SlowStack>,
+    weight: T,
+    accum: T,
+}
+
 /// The T2 lap solver: fixed block set + split integrator over one lane (batch = 1; the batch
 /// dimension is reserved for the future GPU tier, HANDOFF §11.3).
 pub struct TransientSolver<T, B = T2Blocks<T>> {
@@ -593,6 +603,13 @@ pub struct TransientSolver<T, B = T2Blocks<T>> {
     /// The lift-and-coast speed cap resolved at the current step boundary, m/s (`+∞` ⇒ no lift).
     lift_cap: T,
     slow: Option<Box<dyn SlowStack>>,
+    /// The primary pack's share of the net electrical power (D-M6-13). `1` for a single-pack car,
+    /// so `slow` sees the full aggregate `(regen − traction)` — byte-identical; `< 1` when
+    /// `slow_extra` packs split the draw.
+    primary_slow_weight: T,
+    /// Additional battery packs that split the net electrical power by their weight and march
+    /// independently (genuine T2 N-pack). Empty for every committed (single-pack) car.
+    slow_extra: Vec<ExtraSlow<T>>,
     /// The 2026 ERS energy manager as a step-boundary governor (M6/PR4). Optional artifact handed in
     /// by the caller; absent ⇒ a non-ERS car (byte-identical to the pre-PR4 skeleton). Decides the
     /// MGU-K deploy/harvest once per step, published frozen for the powertrain block.
@@ -700,6 +717,8 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
             lift: LiftSchedule::default(),
             lift_cap: T::infinity(),
             slow: None,
+            primary_slow_weight: T::one(),
+            slow_extra: Vec::new(),
             ers: None,
             tire_thermal: None,
             fuel: None,
@@ -748,6 +767,29 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
         self.discharge_limit_w =
             T::from(slow.discharge_power_limit_w()).unwrap_or_else(T::infinity);
         self.slow = Some(slow);
+        self
+    }
+
+    /// Split the net electrical power between the primary `slow` stack and additional packs, each
+    /// marching independently (genuine T2 N-pack, D-M6-13). `primary_weight` + Σ extra weights
+    /// should sum to 1; the blend/deploy ceilings stay anchored on the primary (governed) pack. A
+    /// single-pack car never calls this — `primary_slow_weight == 1`, `slow_extra` empty — so the
+    /// slow clock is byte-identical to the pre-2.0 scalar path.
+    #[must_use]
+    pub fn with_pack_split(
+        mut self,
+        primary_weight: f64,
+        extras: Vec<(f64, Box<dyn SlowStack>)>,
+    ) -> Self {
+        self.primary_slow_weight = T::from(primary_weight).unwrap_or_else(T::one);
+        self.slow_extra = extras
+            .into_iter()
+            .map(|(w, stack)| ExtraSlow {
+                stack,
+                weight: T::from(w).unwrap_or_else(T::zero),
+                accum: T::zero(),
+            })
+            .collect();
         self
     }
 
@@ -1058,8 +1100,14 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
         if self.slow.is_some() {
             let regen_power = self.bus.get_channel(self.actuation.regen_power_w, 0);
             let traction_power = self.bus.get_channel(self.actuation.traction_power_w, 0);
+            let net = (regen_power - traction_power) * dt;
+            // The primary pack takes its weight share (`1` for a single-pack car → the full net,
+            // byte-identical); the extra packs take theirs and march independently (D-M6-13).
             self.net_charge_energy_accum =
-                self.net_charge_energy_accum + (regen_power - traction_power) * dt;
+                self.net_charge_energy_accum + self.primary_slow_weight * net;
+            for ex in &mut self.slow_extra {
+                ex.accum = ex.accum + ex.weight * net;
+            }
             self.slow_pending_steps += 1;
         }
         // Tire-thermal accumulation (M5 PR3): bank this step's per-wheel frictional + carcass heat
@@ -1093,6 +1141,14 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
         let avg_power = if slow_dt > 0.0 { energy / slow_dt } else { 0.0 };
         slow.on_slow_step(slow_dt, avg_power);
         self.net_charge_energy_accum = T::zero();
+        // March each extra pack over the same window with its own accumulated net energy — genuine
+        // independent SoC (D-M6-13). The blend/deploy ceilings below stay on the primary pack.
+        for ex in &mut self.slow_extra {
+            let e = ex.accum.to_f64().unwrap_or(0.0);
+            let p = if slow_dt > 0.0 { e / slow_dt } else { 0.0 };
+            ex.stack.on_slow_step(slow_dt, p);
+            ex.accum = T::zero();
+        }
         self.slow_pending_steps = 0;
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
         self.discharge_limit_w =

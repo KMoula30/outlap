@@ -270,3 +270,98 @@ fn torque_vectoring_reduces_steady_state_yaw_tracking_error() {
         "torque vectoring should not worsen yaw tracking: off={err_off}, on={err_on}"
     );
 }
+
+// --- D-M6-13 genuine T2 N-pack -----------------------------------------------------------------
+
+/// A shared-handle slow-state double: accumulates the net electrical energy it receives into a
+/// shared cell, so the test can read each pack's share after the lap (the boxed stack is otherwise
+/// swallowed by the solver).
+struct SharedStack {
+    energy: std::rc::Rc<std::cell::RefCell<f64>>,
+}
+impl SlowStack for SharedStack {
+    fn on_slow_step(&mut self, dt_s: f64, net_charge_power_w: f64) {
+        *self.energy.borrow_mut() += net_charge_power_w * dt_s;
+    }
+    fn regen_power_limit_w(&self) -> f64 {
+        1.0e12
+    }
+    fn soc(&self) -> f64 {
+        0.5
+    }
+    fn temp_c(&self) -> f64 {
+        25.0
+    }
+}
+
+/// The net electrical power splits between the primary pack and an extra pack by their weights, and
+/// each marches independently (genuine T2 N-pack). A single-pack car never calls `with_pack_split`
+/// (`primary_slow_weight == 1`, no extras), so its slow clock is the byte-identical scalar path the
+/// other tests in this file pin.
+#[test]
+fn two_packs_split_the_net_power_by_weight() {
+    let (t1, spec) = limebeer();
+    let mut it = ChannelInterner::new();
+    let mut blocks = build_blocks(&t1, &spec, &mut it);
+    blocks.powertrain.regen = common::regen_params(&t1, 0.6, 0.9);
+    blocks.powertrain.regen.enabled = true;
+
+    let len = 1500.0;
+    let stations = 200;
+    let s: Vec<f64> = (0..stations)
+        .map(|i| i as f64 * len / (stations as f64 - 1.0))
+        .collect();
+    let v_ref: Vec<f64> = s.iter().map(|&si| 70.0 - 45.0 * (si / len)).collect();
+    let mk = |v: f64| vec![v; stations];
+    let table = outlap_transient::LineTable::new(&outlap_transient::LineSamples {
+        s: s.clone(),
+        kappa_h: mk(0.0),
+        grade: mk(0.0),
+        banking: mk(0.0),
+        kappa_v: mk(0.0),
+        n_ref: mk(0.0),
+        kappa_ref: mk(0.0),
+        v_ref,
+        x_ref: s.clone(),
+        y_ref: mk(0.0),
+        z_ref: mk(0.0),
+        lat_x: mk(0.0),
+        lat_y: mk(1.0),
+        lat_z: mk(0.0),
+        closed: false,
+    })
+    .unwrap();
+    let cfg = SimConfig {
+        fz_coupling: outlap_schema::sim::FzCoupling::OneStepLag,
+        ..SimConfig::default()
+    };
+
+    let primary = std::rc::Rc::new(std::cell::RefCell::new(0.0));
+    let extra = std::rc::Rc::new(std::cell::RefCell::new(0.0));
+    let mut solver = TransientSolver::new(blocks, table, &it, cfg)
+        .with_slow_stack(Box::new(SharedStack {
+            energy: primary.clone(),
+        }))
+        .with_pack_split(
+            0.6,
+            vec![(
+                0.4,
+                Box::new(SharedStack {
+                    energy: extra.clone(),
+                }) as Box<dyn SlowStack>,
+            )],
+        );
+    let _ = solver.run(len - 50.0, 400_000);
+
+    let (ep, ex) = (*primary.borrow(), *extra.borrow());
+    assert!(
+        ep.abs() > 1.0 && ex.abs() > 1.0,
+        "both packs exchange energy independently: primary={ep} extra={ex}"
+    );
+    // The two packs split the SAME net-power stream by their weights, so the ratio is exactly 0.4/0.6.
+    assert!(
+        (ex / ep - 0.4 / 0.6).abs() < 1e-9,
+        "the split follows the weights (0.4/0.6): got {}",
+        ex / ep
+    );
+}

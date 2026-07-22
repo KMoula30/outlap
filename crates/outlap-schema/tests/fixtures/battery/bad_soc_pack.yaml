@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Negative fixture (D-M6-13): a DESCENDING soc_window — check_battery must reject it. The
+# pack document is now the single source of truth for the window, so the old vehicle-level
+# bad soc_window moves here. (No parquet is needed: the doc-level check fires before it.)
+schema: battery/1.0
+model: rc_pairs
+topology:
+  ns: 96
+  np: 1
+capacity:
+  q_pack_ah: 2.84
+  e_pack_wh: 1010.1010
+soc_window: [0.9, 0.2]
+ecm:
+  rc_pairs: 1
+  axes:
+    soc: [0.00, 0.25, 0.50, 0.75, 1.00]
+    temp_c: [10.0, 30.0, 50.0]
+  tables:
+    file: bad_soc_pack.tables.parquet
+    level: cell
+limits:
+  peak_discharge_power_w_vs_soc:
+    soc: [0.30, 0.50, 0.75, 0.90, 1.00]
+    power_w: [120000.0, 200000.0, 220000.0, 220000.0, 220000.0]
+  peak_regen_power_w_vs_soc:
+    soc: [0.30, 0.50, 0.75, 0.90, 1.00]
+    power_w: [200000.0, 190000.0, 160000.0, 80000.0, 0.0]
+  cell_v_min: 2.8
+  cell_v_max: 4.2
+  max_c_rate: 70.0
+thermal:
+  mass_kg: 60.0
+  cp_j_per_kgk: 900.0
+  thermal_resistance_k_per_w: 0.01
+  coolant_temp_c: 30.0
+meta:
+  source: negative fixture — descending soc_window
+  cell: bad
