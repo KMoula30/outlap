@@ -145,13 +145,7 @@ fn coupled_lap_discharges_heats_and_is_deterministic() {
     let uncoupled = solve(None);
     assert!(uncoupled.slow.is_none(), "no coupling ⇒ no slow channels");
 
-    let coupling = SlowCoupling {
-        vehicle: &t1,
-        thermal: Some(thermal),
-        pack,
-        pack_state: state,
-        active: t1.has_energy_maps(),
-    };
+    let coupling = SlowCoupling::single(&t1, Some(thermal), pack, state, t1.has_energy_maps());
     let a = solve(Some(&coupling));
     let b = solve(Some(&coupling));
 
@@ -209,13 +203,7 @@ fn coupling_without_installed_maps_is_inert() {
         plain_request(),
     )
     .unwrap();
-    let coupling = SlowCoupling {
-        vehicle: &t1,
-        thermal: Some(thermal),
-        pack,
-        pack_state: state,
-        active: t1.has_energy_maps(),
-    };
+    let coupling = SlowCoupling::single(&t1, Some(thermal), pack, state, t1.has_energy_maps());
     let coupled = solve_t0(
         &t0,
         env,

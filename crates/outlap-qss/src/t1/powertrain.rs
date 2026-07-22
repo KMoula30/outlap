@@ -692,6 +692,12 @@ impl T1Powertrain {
         })
     }
 
+    /// The number of (de-duped, non-governed) drive-unit slots — the length of a `unit_pack` map.
+    #[must_use]
+    pub fn unit_count(&self) -> usize {
+        self.units.len()
+    }
+
     /// Front/rear axle torque split fractions `(front, rear)` — the static `control.split.front`
     /// (default: all torque to whichever axle the units drive). Always sums to 1.
     #[must_use]
@@ -858,6 +864,61 @@ impl T1Powertrain {
                 source_w += pt.source_w;
                 loss_w += pt.loss_w;
                 omega_rad_s = omega_rad_s.max(rpm * RPM_TO_RAD_PER_S);
+            }
+        }
+        Some(TractionEnergy {
+            source_w,
+            loss_w,
+            omega_rad_s,
+        })
+    }
+
+    /// Multi-pack variant of [`Self::traction_energy`] (D-M6-13): the aggregate outcome is
+    /// **identical** (same per-unit summation, same order), but each mapped unit's `source_w` is
+    /// ALSO routed into `per_pack_sw[unit_pack[slot]]` so the march can step each pack independently.
+    /// `unit_pack` is indexed by this powertrain's unit slot; `per_pack_sw` is zeroed on entry.
+    /// A single-pack car (`unit_pack` all-zero, `per_pack_sw.len() == 1`) yields
+    /// `per_pack_sw[0] == source_w` bit-for-bit — the march then reduces to the scalar path.
+    pub fn traction_energy_by_pack(
+        &self,
+        v: f64,
+        wheel_force_n: f64,
+        vdc: Option<f64>,
+        unit_pack: &[usize],
+        per_pack_sw: &mut [f64],
+    ) -> Option<TractionEnergy> {
+        per_pack_sw.fill(0.0);
+        let mut total_cap = 0.0;
+        let mut any_map = false;
+        for u in &self.units {
+            if u.eff_map.is_some() {
+                any_map = true;
+                total_cap += u.max_wheel_force(v);
+            }
+        }
+        if !any_map || total_cap <= 0.0 {
+            return None;
+        }
+        let mut source_w = 0.0f64;
+        let mut loss_w = 0.0f64;
+        let mut omega_rad_s = 0.0f64;
+        for (idx, u) in self.units.iter().enumerate() {
+            if u.eff_map.is_none() {
+                continue;
+            }
+            let share = u.max_wheel_force(v) / total_cap;
+            let unit_force = wheel_force_n * share;
+            let Some((rpm, tau)) = u.source_op(v, unit_force) else {
+                continue;
+            };
+            if let Some(pt) = self.energy_at_shaft_inner(idx, rpm, tau, vdc) {
+                source_w += pt.source_w;
+                loss_w += pt.loss_w;
+                omega_rad_s = omega_rad_s.max(rpm * RPM_TO_RAD_PER_S);
+                let k = unit_pack.get(idx).copied().unwrap_or(0);
+                if let Some(slot) = per_pack_sw.get_mut(k) {
+                    *slot += pt.source_w;
+                }
             }
         }
         Some(TractionEnergy {

@@ -470,12 +470,14 @@ pub(crate) fn solve_lap(
         us_schedule,
     )?;
 
-    let coupling = stack.as_ref().map(|(thermal, pack, state)| SlowCoupling {
-        vehicle: &t1v,
-        thermal: thermal.clone(),
-        pack: pack.clone(),
-        pack_state: *state,
-        active: t1v.has_energy_maps(),
+    let coupling = stack.as_ref().map(|(thermal, pack, state)| {
+        SlowCoupling::single(
+            &t1v,
+            thermal.clone(),
+            pack.clone(),
+            *state,
+            t1v.has_energy_maps(),
+        )
     });
     let fuel_coupling = fuel_model.map(|model| outlap_qss::fuel::FuelCoupling {
         model,
@@ -915,9 +917,11 @@ pub(crate) fn solve_stint(
         .as_ref()
         .map(|(thermal, pack, state)| outlap_qss::StintElectro {
             vehicle: &t1v,
-            pack,
+            packs: std::slice::from_ref(pack),
             thermal: thermal.as_ref(),
-            pack_state: *state,
+            pack_states: vec![*state],
+            unit_pack: vec![0; t1v.powertrain().unit_count()],
+            governed_pack: 0,
             active: t1v.has_energy_maps(),
         });
     let fuel_coupling = fuel_model.map(|model| outlap_qss::fuel::FuelCoupling {
@@ -1001,8 +1005,9 @@ pub(crate) fn solve_stint(
             have_fuel = true;
         }
         // End-of-lap pack + machine temperature from the terminal snapshot the next lap seeded from.
-        if let Some(p) = &lap.terminal.pack {
-            pack_temp.push(p.temp_k - 273.15);
+        // The channel reports the primary pack (index 0); every committed car is single-pack.
+        if let Some(ps) = lap.terminal.pack.as_ref().and_then(|v| v.first()) {
+            pack_temp.push(ps.temp_k - 273.15);
             have_pack_temp = true;
         }
         if let Some(m) = &lap.terminal.machine {
