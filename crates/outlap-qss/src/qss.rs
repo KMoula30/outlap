@@ -245,8 +245,9 @@ pub struct QssLap {
 pub struct SlowSnapshot {
     /// Terminal representative-tyre state (present iff a [`TireThermalMarch`] ran).
     pub tire: Option<TireThermalState<f64>>,
-    /// Terminal battery pack state (present iff an electro stack was coupled).
-    pub pack: Option<PackState>,
+    /// Terminal battery pack states (present iff an electro stack was coupled), parallel to the
+    /// coupling's `packs` — length-1 for a single-pack car (D-M6-13).
+    pub pack: Option<Vec<PackState>>,
     /// Terminal machine-thermal network (present iff a drive unit declared an `.emotor` and it was
     /// marched — never under an energy manager, D-M6-10). A per-lap diagnostic; not carried.
     pub machine: Option<MachineThermal>,
@@ -266,14 +267,45 @@ pub struct SlowCoupling<'a> {
     /// The machine thermal network (advanced from its assembled state each march) — `None` when
     /// no drive unit declares an `.emotor` (the pack still marches; M6 PR2 relaxed rule).
     pub thermal: Option<MachineThermal>,
-    /// The battery pack (immutable maps + limits).
-    pub pack: Pack,
-    /// The pack's initial per-segment state.
-    pub pack_state: PackState,
+    /// The battery packs, keyed by index (id-keyed at assembly, D-M6-13). A single-pack car is a
+    /// length-1 `Vec` and the march reduces to the pre-2.0 scalar arithmetic bit-for-bit.
+    pub packs: Vec<Pack>,
+    /// Each pack's initial per-segment state (parallel to `packs`).
+    pub pack_states: Vec<PackState>,
+    /// For each T1 (mechanical) drive-unit slot, the index of the pack it draws from — routes each
+    /// unit's discharge to its pack in the mapped-EV march. All-zero for a single-pack car.
+    pub unit_pack: Vec<usize>,
+    /// The pack the ERS manager's governed unit banks into (also the SoC channel's primary pack).
+    /// `0` for a single-pack car.
+    pub governed_pack: usize,
     /// Whether this stack can actually move a slow state — set at ASSEMBLY (installed energy
     /// maps on some drive unit), not inferred from outputs. An [`ErsCoupling`] activates the
     /// stack regardless (the manager drives the pack directly).
     pub active: bool,
+}
+
+impl<'a> SlowCoupling<'a> {
+    /// Build a single-pack coupling (the shape every committed car has). All units route to pack 0
+    /// and the governed pack is 0, so the march is byte-identical to the pre-2.0 scalar path.
+    #[must_use]
+    pub fn single(
+        vehicle: &'a T1Vehicle,
+        thermal: Option<MachineThermal>,
+        pack: Pack,
+        pack_state: PackState,
+        active: bool,
+    ) -> Self {
+        let n_units = vehicle.powertrain().unit_count();
+        Self {
+            vehicle,
+            thermal,
+            packs: vec![pack],
+            pack_states: vec![pack_state],
+            unit_pack: vec![0; n_units],
+            governed_pack: 0,
+            active,
+        }
+    }
 }
 
 /// The optional per-lap couplings, bundled (they were heading past 10 positional parameters).
@@ -361,10 +393,13 @@ pub(crate) struct SlowMarchBuffers {
     pub deploy_w: Vec<f64>,
     /// Realized electrical harvest power, W.
     pub harvest_w: Vec<f64>,
+    /// Scratch: per-pack discharge source power this segment (len = pack count) — pre-allocated so
+    /// the mapped-EV march stays zero-alloc while routing each unit's draw to its pack (D-M6-13).
+    pub per_pack_sw: Vec<f64>,
 }
 
 impl SlowMarchBuffers {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, n_packs: usize) -> Self {
         Self {
             scale: vec![1.0; n],
             soc: vec![0.0; n],
@@ -372,6 +407,7 @@ impl SlowMarchBuffers {
             deploy_force_n: vec![0.0; n],
             deploy_w: vec![0.0; n],
             harvest_w: vec![0.0; n],
+            per_pack_sw: vec![0.0; n_packs.max(1)],
         }
     }
 }
@@ -389,7 +425,7 @@ struct MarchStats {
 /// and machine-thermal state at the end of the lap (what a stint carries into the next lap's seed).
 struct MarchOutcome {
     stats: MarchStats,
-    pack_terminal: PackState,
+    pack_terminal: Vec<PackState>,
     machine_terminal: Option<MachineThermal>,
 }
 
@@ -422,7 +458,10 @@ fn march_slow_states(
     bufs: &mut SlowMarchBuffers,
 ) -> MarchOutcome {
     let mut thermal = c.thermal.clone();
-    let mut st = c.pack_state;
+    // The pack states marched this lap (length-1 for every committed car → the scalar path). `gp`
+    // is the primary/governed pack that owns the SoC channel + the manager's banking (D-M6-13).
+    let mut states = c.pack_states.clone();
+    let gp = c.governed_pack.min(states.len().saturating_sub(1));
     let pt = c.vehicle.powertrain();
     let m = c.vehicle.mass_kg;
     let n = path.len();
@@ -436,8 +475,8 @@ fn march_slow_states(
     let mut prev_k_power_w = 0.0_f64;
     let mut ramp_reduced_w = 0.0_f64;
     let mut stats = MarchStats {
-        soc_min: st.soc,
-        soc_max: st.soc,
+        soc_min: states[gp].soc,
+        soc_max: states[gp].soc,
         ..MarchStats::default()
     };
     for seg in 0..path.segments() {
@@ -448,7 +487,7 @@ fn march_slow_states(
         // Log the ENTRY state at station i (the state the car carries INTO segment i): station 0
         // reports the initial SoC/temperature, and the channels line up with the stations rather
         // than leading the car by one segment.
-        bufs.soc[i] = st.soc;
+        bufs.soc[i] = states[gp].soc;
         if let Some(th) = &thermal {
             bufs.temp_c[i] = th.winding_temp_c();
         }
@@ -458,7 +497,7 @@ fn march_slow_states(
             let cmd = ers_decide(
                 t0,
                 e,
-                &st,
+                &states[gp],
                 f_req,
                 vi,
                 dt,
@@ -472,9 +511,21 @@ fn march_slow_states(
             let band = SwingBand {
                 seen_lo: stats.soc_min,
                 seen_hi: stats.soc_max,
-                swing_soc: e.swing_limit_j / c.pack.total_energy_j(),
+                swing_soc: e.swing_limit_j / c.packs[gp].total_energy_j(),
             };
-            let realized = ers_realize(t0, e, c, &mut st, &cmd, f_req, vi, dt, band, bufs, i);
+            let realized = ers_realize(
+                t0,
+                e,
+                &c.packs[gp],
+                &mut states[gp],
+                &cmd,
+                f_req,
+                vi,
+                dt,
+                band,
+                bufs,
+                i,
+            );
             ledger.record(&realized, dt);
             // Ramp episode accounting (the manager_trace idiom): reductions accumulate while the
             // signed K power falls, and the episode resets the moment it rises.
@@ -485,7 +536,7 @@ fn march_slow_states(
                 ramp_reduced_w = 0.0;
             }
             prev_k_power_w = k_now;
-            debug_assert!(st.soc <= 1.0 && st.soc >= 0.0);
+            debug_assert!(states[gp].soc <= 1.0 && states[gp].soc >= 0.0);
         } else {
             // Mapped-EV march. The drive/idle DISCHARGE path is the pre-M6 algorithm verbatim (a
             // braking segment requests `f_drive = 0`, so it draws only the map's no-load power) — so
@@ -498,51 +549,71 @@ fn march_slow_states(
             // clipped by the pack charge acceptance (CV taper ∧ kinetic derate). The braking force at
             // the wheels is untouched (the calipers supply the rest), so the trajectory is unchanged.
             let f_drive = f_req.max(0.0);
-            let vdc = c.pack.terminal_voltage_v(&st);
-            // Braking regen (zero on drive segments and for a car with no `regen_blend` / no regen
-            // curve — hence byte-identical to the pre-M6 discharge-only march there). Evaluated from
-            // the ENTRY state, before the pack step.
+            // Terminal voltage / regen ceiling read from the PRIMARY pack's entry state (its SoC is
+            // the reported channel); for a single-pack car this is THE pack. Braking regen banks
+            // into the primary pack (per-pack braking attribution across axles is a follow-up; the
+            // N-pack witness is drive-dominated). Byte-identical for a single pack.
+            let vdc = c.packs[gp].terminal_voltage_v(&states[gp]);
             let regen_w = if f_req < 0.0 {
                 let braking_power = -f_req * vi;
                 let demand_w =
                     c.vehicle.regen_max_frac() * c.vehicle.regen_axle_share() * braking_power;
                 let envelope_w = c.vehicle.regen_mech_power_max_w(vi) * ErsCoupling::fade(vi);
                 let mech_w = demand_w.min(envelope_w).max(0.0);
-                let e = (mech_w * REGEN_EFFICIENCY).min(c.pack.regen_power_limit_w(&st));
+                let e =
+                    (mech_w * REGEN_EFFICIENCY).min(c.packs[gp].regen_power_limit_w(&states[gp]));
                 bufs.harvest_w[i] = e;
                 e
             } else {
                 0.0
             };
-            if let Some(te) = pt.traction_energy(vi, f_drive, Some(vdc)) {
-                // Machine thermal → derate. A thermal-integrator error leaves the derate at 1.
+            // Multi-pack discharge routing: `traction_energy_by_pack` reproduces the aggregate
+            // `TractionEnergy` bit-for-bit (same per-unit summation order) AND fills `per_pack_sw`
+            // with each unit's draw routed to its pack. For a single-pack car `per_pack_sw[0] ==
+            // te.source_w`, so stepping pack 0 with it — net of regen — is the exact scalar path.
+            if let Some(te) = pt.traction_energy_by_pack(
+                vi,
+                f_drive,
+                Some(vdc),
+                &c.unit_pack,
+                &mut bufs.per_pack_sw,
+            ) {
                 let derate = thermal.as_mut().map_or(1.0, |th| {
                     th.step(te.loss_w, |_| None, te.omega_rad_s, dt)
                         .unwrap_or(1.0)
                 });
-                // Battery peak-power cap, evaluated before the step advances SoC.
-                let p_cap = c.pack.discharge_power_limit_w(&st);
-                let batt_scale = if te.source_w > p_cap && te.source_w > 0.0 {
-                    (p_cap / te.source_w).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                // The pack exchanges the drive/idle draw NET of any recovered regen this segment.
-                let out = c.pack.step_power(&mut st, te.source_w - regen_w, dt);
+                // The traction scale is bounded by the MOST-limited pack's peak-power cap (min over
+                // packs); for a single pack this is exactly `p_cap / te.source_w`.
+                let mut batt_scale = 1.0_f64;
+                for (k, pack) in c.packs.iter().enumerate() {
+                    let sw = bufs.per_pack_sw[k];
+                    let p_cap = pack.discharge_power_limit_w(&states[k]);
+                    let scale_k = if sw > p_cap && sw > 0.0 {
+                        (p_cap / sw).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    batt_scale = batt_scale.min(scale_k);
+                }
+                // Step each pack once with its own draw; the primary pack also absorbs the regen.
+                for k in 0..c.packs.len() {
+                    let draw = bufs.per_pack_sw[k] - if k == gp { regen_w } else { 0.0 };
+                    let out = c.packs[k].step_power(&mut states[k], draw, dt);
+                    debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
+                }
                 bufs.scale[i] = (derate.min(batt_scale)).clamp(0.0, 1.0);
-                debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
             } else if regen_w > 0.0 {
                 // No mapped drive result (e.g. above the map) but the machine still regenerates.
-                let out = c.pack.step_power(&mut st, -regen_w, dt);
+                let out = c.packs[gp].step_power(&mut states[gp], -regen_w, dt);
                 debug_assert!(out.soc <= 1.0 && out.soc >= 0.0);
             }
         }
-        stats.soc_min = stats.soc_min.min(st.soc);
-        stats.soc_max = stats.soc_max.max(st.soc);
+        stats.soc_min = stats.soc_min.min(states[gp].soc);
+        stats.soc_max = stats.soc_max.max(states[gp].soc);
     }
     // An open path's final station is not a segment start: it carries the end-of-lap state.
     if !path.closed && n > 0 {
-        bufs.soc[n - 1] = st.soc;
+        bufs.soc[n - 1] = states[gp].soc;
         if let Some(th) = &thermal {
             bufs.temp_c[n - 1] = th.winding_temp_c();
         }
@@ -551,7 +622,7 @@ fn march_slow_states(
     stats.ledger_harvest_j = ledger.harvest_j();
     MarchOutcome {
         stats,
-        pack_terminal: st,
+        pack_terminal: states,
         machine_terminal: thermal,
     }
 }
@@ -628,7 +699,7 @@ fn ers_decide(
 fn ers_realize(
     t0: &T0Vehicle,
     e: &ErsCoupling,
-    c: &SlowCoupling<'_>,
+    pack: &Pack,
     st: &mut PackState,
     cmd: &ErsCommand<f64>,
     f_req: f64,
@@ -651,29 +722,29 @@ fn ers_realize(
     // band is STRICTLY inside the physical window, so the pack stops delivering/accepting at the
     // regulatory limit (ledger-consistent) — and a pack sized to the reg (`reg == physical`, the
     // f1 case) is untouched by this branch.
-    let [phys_lo, phys_hi] = c.pack.soc_window();
+    let [phys_lo, phys_hi] = pack.soc_window();
     let (soc_floor, soc_ceil) = band.bounds([phys_lo, phys_hi]);
-    let e_total = c.pack.total_energy_j();
+    let e_total = pack.total_energy_j();
     if cmd.deploy_w > 0.0 {
         // Pack discharge ceiling on the ELECTRIC share (D-M6-10; the ICE is untouched), then — only
         // if the reg floor sits ABOVE the physical floor — the reg headroom, then the machine's
         // mechanical ceiling (the pack never pays for power the machine cannot convert).
-        let mut p_elec = cmd.deploy_w.min(c.pack.discharge_power_limit_w(st));
+        let mut p_elec = cmd.deploy_w.min(pack.discharge_power_limit_w(st));
         if soc_floor > phys_lo {
             p_elec = p_elec.min((st.soc - soc_floor).max(0.0) * e_total / dt);
         }
         let (_p_mech, p_elec_real) = t0.ers_realized_deploy_w(p_elec);
-        c.pack.step_power(st, p_elec_real, dt);
+        pack.step_power(st, p_elec_real, dt);
         bufs.deploy_force_n[i] = t0.ers_deploy_force_n(vi, p_elec_real);
         realized.deploy_w = p_elec_real;
     } else if cmd.harvest_w > 0.0 {
         // Harvest ceiling 3: pack charge acceptance (design curve × kinetic derate ∧ CV taper),
         // then — only if the reg ceiling sits BELOW the physical ceiling — the reg headroom.
-        let mut p_elec = cmd.harvest_w.min(c.pack.regen_power_limit_w(st));
+        let mut p_elec = cmd.harvest_w.min(pack.regen_power_limit_w(st));
         if soc_ceil < phys_hi {
             p_elec = p_elec.min((soc_ceil - st.soc).max(0.0) * e_total / dt);
         }
-        c.pack.step_power(st, -p_elec, dt);
+        pack.step_power(st, -p_elec, dt);
         realized.harvest_w = p_elec;
         if cmd.mode == ErsMode::HarvestStraight && f_req > 0.0 {
             // Super-clip back-drive: the K absorbs mechanical power at the crank while the ICE
@@ -686,7 +757,7 @@ fn ers_realize(
         // (the calipers supply the deficit) and the ICE covers the part-throttle gap.
     } else {
         // Idle: the pack still relaxes (RC decay + thermal node) over the segment.
-        c.pack.step_power(st, 0.0, dt);
+        pack.step_power(st, 0.0, dt);
     }
     // Belt-and-suspenders: `step_power` clamps SoC to [0, 1] only, so a segment that begins just
     // inside an edge can overshoot by one step. Clamp to the physical ∩ regulatory band so the
@@ -833,7 +904,8 @@ fn solve_profile(
     let mut fuel_kg = vec![0.0; n];
     let fuel_start = fuel.map(|f| f.model.initial_kg);
     let mut ax = vec![0.0; n];
-    let mut bufs = SlowMarchBuffers::new(n);
+    let n_packs = coupling.map_or(1, |c| c.packs.len());
+    let mut bufs = SlowMarchBuffers::new(n, n_packs);
     // Previous-iteration copies for the recorded convergence residual (PR2c).
     let mut prev_scale = vec![1.0; n];
     let mut prev_deploy = vec![0.0; n];
@@ -944,7 +1016,7 @@ fn solve_profile(
     // FIRST (filling `bufs.deploy_w`), THEN the fuel march reads that deploy slice, THEN the `SlowLog`
     // takes the buffers — the deploy slice must be intact for the fuel ICE-share when the log build
     // moves it out.
-    let mut pack_terminal: Option<PackState> = None;
+    let mut pack_terminal: Option<Vec<PackState>> = None;
     let mut machine_terminal: Option<MachineThermal> = None;
     let slow_outcome = coupling.map(|c| {
         let outcome = march_slow_states(t0, c, ers, env, path, &ws.v, &ax, &mut bufs);
@@ -1144,17 +1216,21 @@ pub fn solve_t1(
 /// The electro slow-stack ingredients a stint reuses across laps: the pack + optional machine
 /// thermal network are cloned into a fresh [`SlowCoupling`] each lap, seeded with the CARRIED
 /// pack/machine state (not the assembled one — that is the whole point of a stint).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct StintElectro<'a> {
     /// The T1 vehicle carrying the installed drive units + mass (as in [`SlowCoupling`]).
     pub vehicle: &'a T1Vehicle,
-    /// The battery pack (immutable maps + limits), cloned per lap.
-    pub pack: &'a Pack,
+    /// The battery packs (immutable maps + limits), cloned per lap. Length-1 for a single-pack car.
+    pub packs: &'a [Pack],
     /// The assembled machine-thermal network, if a drive unit declared an `.emotor` — the lap-1
     /// seed; later laps carry the terminal network forward (never marched under a manager).
     pub thermal: Option<&'a MachineThermal>,
-    /// The lap-1 pack state (`initial_soc` already applied by assembly).
-    pub pack_state: PackState,
+    /// The lap-1 pack states (`initial_soc` already applied by assembly), parallel to `packs`.
+    pub pack_states: Vec<PackState>,
+    /// Per-unit → pack index map (as in [`SlowCoupling::unit_pack`]).
+    pub unit_pack: Vec<usize>,
+    /// The governed/primary pack index (as in [`SlowCoupling::governed_pack`]).
+    pub governed_pack: usize,
     /// Assembly-time activity flag (installed energy maps), copied into each lap's coupling.
     pub active: bool,
 }
@@ -1244,24 +1320,29 @@ pub fn solve_stint(
     let mut s_grid = Vec::new();
     // The carried seeds — updated from each lap's terminal snapshot (the stint's whole point).
     let mut tire_seed = seeds.tire;
-    let mut pack_seed = plan.electro.map(|e| e.pack_state);
+    let mut pack_seed: Option<Vec<PackState>> =
+        plan.electro.as_ref().map(|e| e.pack_states.clone());
     // The carried fuel mass (kg): lap-1 uses the model's initial load, later laps the prior
     // terminal (a lighter car ⇒ a faster lap, the D-M6-4 acceptance check).
     let mut fuel_seed = plan.fuel.map(|f| f.model.initial_kg);
     // The machine-thermal network re-seeds from the assembled state each lap (see the boundary note
     // below): a constant lap-1 seed, never carried, so it is not `mut`.
-    let machine_seed = plan.electro.and_then(|e| e.thermal.cloned());
+    let machine_seed = plan.electro.as_ref().and_then(|e| e.thermal.cloned());
 
     for lap_idx in 0..n_laps {
         let march_lap = plan.base_march.map(|bm| {
             bm.clone()
                 .with_state(tire_seed.expect("tyre seed set when a march is supplied"))
         });
-        let electro = plan.electro.map(|e| SlowCoupling {
+        let electro = plan.electro.as_ref().map(|e| SlowCoupling {
             vehicle: e.vehicle,
             thermal: machine_seed.clone(),
-            pack: e.pack.clone(),
-            pack_state: pack_seed.expect("pack seed set when an electro stack is supplied"),
+            packs: e.packs.to_vec(),
+            pack_states: pack_seed
+                .clone()
+                .expect("pack seed set when an electro stack is supplied"),
+            unit_pack: e.unit_pack.clone(),
+            governed_pack: e.governed_pack,
             active: e.active,
         });
         // Re-seed the fuel model with this lap's starting mass (carried from the prior lap's terminal).
@@ -1299,19 +1380,24 @@ pub fn solve_stint(
         // Carry the terminal slow state into the next lap's seed BEFORE moving the lap result. A
         // `None` terminal (subsystem absent this lap) keeps the prior seed rather than resetting it.
         tire_seed = qss.slow_terminal.tire.or(tire_seed);
-        if let Some(p) = qss.slow_terminal.pack {
+        if let Some(terminals) = qss.slow_terminal.pack.clone() {
             // Carry the SLOW pack states — SoC and temperature — across the lap boundary (the
-            // headline acceptance check). The RC overpotential `v_rc_v` and the last-solved
-            // terminal `current_a` are within-lap transients (τ ~ seconds), re-established in the
-            // new lap's first segments; carrying them would feed a stale end-of-straight
-            // high-current terminal-voltage estimate into station 0. Reset them to match the
-            // single-lap entry, which starts from a rested pack.
-            pack_seed = Some(PackState {
-                v_rc_v: 0.0,
-                v_rc2_v: 0.0,
-                current_a: 0.0,
-                ..p
-            });
+            // headline acceptance check), for EVERY pack. The RC overpotential `v_rc_v` and the
+            // last-solved terminal `current_a` are within-lap transients (τ ~ seconds), re-
+            // established in the new lap's first segments; carrying them would feed a stale end-of-
+            // straight high-current terminal-voltage estimate into station 0. Reset them to match
+            // the single-lap entry, which starts from a rested pack.
+            pack_seed = Some(
+                terminals
+                    .into_iter()
+                    .map(|p| PackState {
+                        v_rc_v: 0.0,
+                        v_rc2_v: 0.0,
+                        current_a: 0.0,
+                        ..p
+                    })
+                    .collect(),
+            );
         }
         // Carry the terminal fuel mass into the next lap (a lighter car ⇒ a faster lap, D-M6-4). A
         // `None` terminal keeps the prior seed rather than resetting to the full tank.
@@ -1367,7 +1453,7 @@ fn finish_notes(
             let swing = log.soc_max - log.soc_min;
             let swing_mj = couplings
                 .electro
-                .map(|c| swing * c.pack.total_energy_j() * 1e-6);
+                .map(|c| swing * c.packs[c.governed_pack].total_energy_j() * 1e-6);
             let swing_note = match swing_mj {
                 Some(mj) => format!("{swing:.3} ≈ {mj:.2} MJ"),
                 None => format!("{swing:.3}"),

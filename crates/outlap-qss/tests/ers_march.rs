@@ -127,7 +127,14 @@ fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
         ..T0Options::default()
     };
     let t0 = T0Vehicle::assemble(&resolved, &Conditions::default(), &loader, &t0_opts).unwrap();
-    let batt_path = resolved.spec.batteries.values().next().unwrap().params.as_str();
+    let batt_path = resolved
+        .spec
+        .batteries
+        .values()
+        .next()
+        .unwrap()
+        .params
+        .as_str();
     let doc = load_battery(batt_path, &loader).unwrap();
     let sidecar = format!("battery/{}", doc.ecm.tables.file.as_str());
     let ecm_bytes = loader.load_bytes(&sidecar).unwrap();
@@ -159,16 +166,17 @@ fn plain_request() -> LapRequest {
 fn managed_lap(h: &Hybrid, override_active: bool) -> (QssLap, T0Path) {
     let track = stadium_track();
     let path = T0Path::from_track(&track, 5.0);
-    let electro = SlowCoupling {
-        vehicle: &h.t1,
-        thermal: None,
-        pack: h.pack.clone(),
-        pack_state: h.state,
-        active: h.t1.has_energy_maps(),
-    };
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, override_active)
-        .unwrap()
-        .expect("ers block present");
+    let electro =
+        SlowCoupling::single(&h.t1, None, h.pack.clone(), h.state, h.t1.has_energy_maps());
+    let ers = ErsCoupling::assemble(
+        &h.resolved.spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        override_active,
+    )
+    .unwrap()
+    .expect("ers block present");
     let lap = solve_t0(
         &h.t0,
         h.env.clone(),
@@ -207,8 +215,12 @@ fn f1_lap_deploys_under_the_curve_and_harvests_under_braking() {
 
     let slow = lap.slow.as_ref().expect("managed lap has slow channels");
     let ers = slow.ers.as_ref().expect("managed lap has ers channels");
-    let rb: ErsRulebook<f64> =
-        ErsRulebook::from_schema(h.resolved.spec.policy.as_ref().unwrap(), h.pack.soc_window(), None).unwrap();
+    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(
+        h.resolved.spec.policy.as_ref().unwrap(),
+        h.pack.soc_window(),
+        None,
+    )
+    .unwrap();
 
     // Deployment: happens, and never exceeds the regulation curve at the station speed.
     let total_deploy: f64 = ers.deploy_power_w.iter().sum();
@@ -273,28 +285,39 @@ fn the_c5_2_9_swing_clip_is_independent_of_the_physical_window() {
     let mut h = hybrid("f1_2026", None);
     let e_total = h.pack.total_energy_j();
     let swing_mj = 2.0;
-    h.resolved.spec.policy.as_mut().unwrap().regulatory_window_mj = swing_mj; // 2 MJ < the 4 MJ window
+    h.resolved
+        .spec
+        .policy
+        .as_mut()
+        .unwrap()
+        .regulatory_window_mj = swing_mj; // 2 MJ < the 4 MJ window
 
     let spec = {
         let mut s = h.resolved.spec.clone();
         s.policy.as_mut().unwrap().recovery.recharge_phases = false;
         s
     };
-    let ers = ErsCoupling::assemble(&spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, true)
-        .unwrap()
-        .unwrap();
+    let ers = ErsCoupling::assemble(
+        &spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        true,
+    )
+    .unwrap()
+    .unwrap();
     assert!((ers.swing_limit_j - swing_mj * 1e6).abs() < 1.0);
     let path = T0Path::from_track(&stadium_track(), 5.0);
-    let electro = SlowCoupling {
-        vehicle: &h.t1,
-        thermal: None,
-        pack: h.pack.clone(),
-        pack_state: PackState {
+    let electro = SlowCoupling::single(
+        &h.t1,
+        None,
+        h.pack.clone(),
+        PackState {
             soc: 0.9,
             ..h.state
         },
-        active: h.t1.has_energy_maps(),
-    };
+        h.t1.has_energy_maps(),
+    );
     let lap = solve_t0(
         &h.t0,
         h.env.clone(),
@@ -339,9 +362,15 @@ fn pack_soc_closes_against_the_ledger_over_the_lap() {
     let ers = lap.slow.as_ref().unwrap().ers.as_ref().unwrap();
 
     // Independently re-run the manager march reading the pack terminal state.
-    let e = ErsCoupling::assemble(&h.resolved.spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let e = ErsCoupling::assemble(
+        &h.resolved.spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let mut st = h.state;
     let mut ledger = LapEnergyLedger::<f64>::new();
     let mut ax = vec![0.0; path.len()];
@@ -436,20 +465,26 @@ fn pack_soc_closes_against_the_ledger_over_the_lap() {
 fn production_soc_closes_on_a_draining_lap(h: &Hybrid) {
     let mut spec = h.resolved.spec.clone();
     spec.policy.as_mut().unwrap().recovery.recharge_phases = false;
-    let drain = ErsCoupling::assemble(&spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, true)
-        .unwrap()
-        .unwrap();
+    let drain = ErsCoupling::assemble(
+        &spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        true,
+    )
+    .unwrap()
+    .unwrap();
     let dpath = T0Path::from_track(&stadium_track(), 5.0);
-    let electro = SlowCoupling {
-        vehicle: &h.t1,
-        thermal: None,
-        pack: h.pack.clone(),
-        pack_state: PackState {
+    let electro = SlowCoupling::single(
+        &h.t1,
+        None,
+        h.pack.clone(),
+        PackState {
             soc: 0.9,
             ..h.state
         },
-        active: h.t1.has_energy_maps(),
-    };
+        h.t1.has_energy_maps(),
+    );
     let dlap = solve_t0(
         &h.t0,
         h.env.clone(),
@@ -516,8 +551,12 @@ fn recharge_phases_only_harvest_below_the_target() {
     let (lap, path) = managed_lap(&h, false);
     let slow = lap.slow.unwrap();
     let ers = slow.ers.unwrap();
-    let rb: ErsRulebook<f64> =
-        ErsRulebook::from_schema(h.resolved.spec.policy.as_ref().unwrap(), h.pack.soc_window(), None).unwrap();
+    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(
+        h.resolved.spec.policy.as_ref().unwrap(),
+        h.pack.soc_window(),
+        None,
+    )
+    .unwrap();
     let target = rb.recharge_target_soc();
 
     // Reconstruct drive stations from the solved profile (the march's own classification input).
@@ -558,16 +597,17 @@ fn override_extends_the_envelope_and_the_harvest_bonus() {
     let track = stadium_track();
     let path = T0Path::from_track(&track, 5.0);
     let solve = |override_active: bool| {
-        let electro = SlowCoupling {
-            vehicle: &h.t1,
-            thermal: None,
-            pack: h.pack.clone(),
-            pack_state: h.state,
-            active: h.t1.has_energy_maps(),
-        };
-        let ers = ErsCoupling::assemble(&spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, override_active)
-            .unwrap()
-            .unwrap();
+        let electro =
+            SlowCoupling::single(&h.t1, None, h.pack.clone(), h.state, h.t1.has_energy_maps());
+        let ers = ErsCoupling::assemble(
+            &spec,
+            &h.t0,
+            h.pack.soc_window(),
+            DeployPolicy::RuleBased,
+            override_active,
+        )
+        .unwrap()
+        .unwrap();
         solve_t0(
             &h.t0,
             h.env.clone(),
@@ -592,8 +632,12 @@ fn override_extends_the_envelope_and_the_harvest_bonus() {
         normal.lap.lap_time_s
     );
     // And the Recharge ledger may use the +0.5 MJ bonus (C5.2.10iii) — never exceeded.
-    let rb: ErsRulebook<f64> =
-        ErsRulebook::from_schema(h.resolved.spec.policy.as_ref().unwrap(), h.pack.soc_window(), None).unwrap();
+    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(
+        h.resolved.spec.policy.as_ref().unwrap(),
+        h.pack.soc_window(),
+        None,
+    )
+    .unwrap();
     let ers = over.slow.unwrap().ers.unwrap();
     assert!(ers.ledger_harvest_j <= rb.harvest_budget_j(true) + 1e-6);
 }
@@ -606,8 +650,12 @@ fn gt_hybrid_option_paths_wire_through_the_march() {
     let (lap, _) = managed_lap(&h, false);
     let slow = lap.slow.unwrap();
     let ers = slow.ers.unwrap();
-    let rb: ErsRulebook<f64> =
-        ErsRulebook::from_schema(h.resolved.spec.policy.as_ref().unwrap(), h.pack.soc_window(), None).unwrap();
+    let rb: ErsRulebook<f64> = ErsRulebook::from_schema(
+        h.resolved.spec.policy.as_ref().unwrap(),
+        h.pack.soc_window(),
+        None,
+    )
+    .unwrap();
 
     for (&p, &v) in ers.deploy_power_w.iter().zip(&lap.lap.v) {
         assert!(p <= rb.deploy_cap_electrical_w(v, false) + 1e-6);
@@ -750,13 +798,13 @@ fn no_ers_ev_stack_matches_the_pre_pr2_march_bit_for_bit() {
     let path = T0Path::from_track(&track, 5.0);
 
     // A: the production march through the new Couplings surface.
-    let coupling = SlowCoupling {
-        vehicle: &t1,
-        thermal: Some(thermal.clone()),
-        pack: pack.clone(),
-        pack_state: state,
-        active: t1.has_energy_maps(),
-    };
+    let coupling = SlowCoupling::single(
+        &t1,
+        Some(thermal.clone()),
+        pack.clone(),
+        state,
+        t1.has_energy_maps(),
+    );
     let a = solve_t0(
         &t0,
         env.clone(),
@@ -839,9 +887,15 @@ fn ers_coupling_without_a_pack_is_a_typed_error() {
     let h = hybrid("f1_2026", None);
     let track = stadium_track();
     let path = T0Path::from_track(&track, 5.0);
-    let ers = ErsCoupling::assemble(&h.resolved.spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let ers = ErsCoupling::assemble(
+        &h.resolved.spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let e = solve_t0(
         &h.t0,
         h.env.clone(),
@@ -878,16 +932,17 @@ fn soc_starved_and_budget_exhausted_laps_stay_stable() {
     spec.policy.as_mut().unwrap().recovery.per_lap_harvest_mj = 0.05;
     let track = stadium_track();
     let path = T0Path::from_track(&track, 5.0);
-    let electro = SlowCoupling {
-        vehicle: &h.t1,
-        thermal: None,
-        pack: h.pack.clone(),
-        pack_state: h.state,
-        active: h.t1.has_energy_maps(),
-    };
-    let ers = ErsCoupling::assemble(&spec, &h.t0, h.pack.soc_window(), DeployPolicy::RuleBased, false)
-        .unwrap()
-        .unwrap();
+    let electro =
+        SlowCoupling::single(&h.t1, None, h.pack.clone(), h.state, h.t1.has_energy_maps());
+    let ers = ErsCoupling::assemble(
+        &spec,
+        &h.t0,
+        h.pack.soc_window(),
+        DeployPolicy::RuleBased,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     let lap = solve_t0(
         &h.t0,
         h.env.clone(),
