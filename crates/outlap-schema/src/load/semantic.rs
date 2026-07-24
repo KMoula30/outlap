@@ -476,7 +476,10 @@ fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
     }
     for (ci, edge) in spec.drivetrain.couplers.iter().enumerate() {
         if let Coupler::Diff(diff) = &edge.coupler {
-            check_diff(diff, &format!("/drivetrain/couplers/{ci}/diff"))?;
+            // The coupler nests under a `coupler:` key on `CouplerEdge`, so the diff's JSON pointer
+            // is `.../couplers/{ci}/coupler/diff` (the closure appends `/ramp` under the same base);
+            // omitting the `/coupler` segment would miss the span and degrade to a blank one.
+            check_diff(diff, &format!("/drivetrain/couplers/{ci}/coupler/diff"))?;
         }
     }
 
@@ -513,8 +516,9 @@ fn check_drivetrain_ids(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<
     use crate::diagnostics::suggest;
     let dt = &spec.drivetrain;
 
-    // Unit ids: unique.
-    let mut unit_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // Unit ids: unique. A `BTreeSet` keeps candidate iteration deterministic so the did-you-mean
+    // suggestions over these ids are reproducible run-to-run (a `HashSet`'s `RandomState` is not).
+    let mut unit_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for (ui, unit) in dt.units.iter().enumerate() {
         if !unit_ids.insert(unit.id.as_str()) {
             return Err(SchemaError::semantic(
@@ -553,10 +557,45 @@ fn check_drivetrain_ids(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<
         }
     }
 
-    // policy.governs → declared unit ids.
+    // policy.governs → declared electric units, with the Layer-1 arity + electric-ness contract
+    // (D-M6-13 hardening). The old typed `ers.mgu_k` block guaranteed exactly one electric machine
+    // with a store; the generic `governs` list must re-establish that structurally or a policy that
+    // governs nothing / a non-electric unit / two machines loads clean and mis-simulates silently.
     if let Some(policy) = &spec.policy {
+        if policy.governs.is_empty() {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/policy/governs"),
+                "`policy.governs` must name at least one drive unit",
+                Some(
+                    "a policy that governs nothing builds an energy manager that can never deploy \
+                     or harvest; name the electric unit it rules, or drop the `policy:` block for a \
+                     plain (unmanaged) EV"
+                        .into(),
+                ),
+            ));
+        }
+        // Layer 1 evaluates ONE governed machine (D-M6-13 §6); a second `governs` entry would be
+        // dropped from the mechanical traction/regen ceilings yet never given a force-adder,
+        // silently losing a machine. Reject until a per-unit force-adder is wired.
+        if policy.governs.len() > 1 {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/policy/governs/1"),
+                format!(
+                    "`policy.governs` names {} units, but this build evaluates a single governed \
+                     machine",
+                    policy.governs.len()
+                ),
+                Some(
+                    "list exactly one governed drive unit; multi-machine `governs` is not yet \
+                     supported"
+                        .into(),
+                ),
+            ));
+        }
         for (gi, id) in policy.governs.iter().enumerate() {
-            if !unit_ids.contains(id.as_str()) {
+            let Some(ui) = dt.units.iter().position(|u| u.id.as_str() == id.as_str()) else {
                 let hint = suggest(id.as_str(), unit_ids.iter().copied()).map_or_else(
                     || "`policy.governs` must name a declared drive unit".into(),
                     |c| format!("did you mean `{c}`?"),
@@ -567,12 +606,31 @@ fn check_drivetrain_ids(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<
                     format!("`policy.governs` references unknown drive-unit id `{id}`"),
                     Some(hint),
                 ));
+            };
+            // A governed unit is an electric machine the manager deploys/harvests through, so it
+            // MUST reference a pack. This is the only intra-document electric-ness signal (a
+            // mechanical source like the ICE declares no `battery:`) and it re-establishes the
+            // pre-2.0 "the ERS needs a store" hard error the typed `ers` block enforced by shape.
+            if dt.units[ui].battery.is_none() {
+                return Err(SchemaError::semantic(
+                    sources,
+                    s.at(&format!("/policy/governs/{gi}")),
+                    format!(
+                        "`policy.governs` names drive unit `{id}`, which declares no `battery:` — \
+                         only an electric machine (one that references a pack) can be governed"
+                    ),
+                    Some(
+                        "add `battery: <id>` (a key in the `batteries` map) to that unit, or govern \
+                         the electric machine instead of a mechanical source"
+                            .into(),
+                    ),
+                ));
             }
         }
     }
 
     // unit.battery → batteries map keys.
-    let battery_keys: std::collections::HashSet<&str> =
+    let battery_keys: std::collections::BTreeSet<&str> =
         spec.batteries.keys().map(BatteryId::as_str).collect();
     for (ui, unit) in dt.units.iter().enumerate() {
         if let Some(id) = &unit.battery {

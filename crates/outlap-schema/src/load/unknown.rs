@@ -186,6 +186,15 @@ impl Ctx<'_> {
                 }
             }
         }
+        // A map schema (`additionalProperties` is a schema object, e.g. the id-keyed `batteries`
+        // map, D-M6-13): every key's VALUE is walked against it, so typos inside a map entry are
+        // still hard errors rather than silently accepted. A boolean `additionalProperties`
+        // (true/false) constrains nothing to recurse into, so it is skipped.
+        if let Some(ap) = schema.get("additionalProperties") {
+            if ap.is_object() {
+                return Some(ap.clone());
+            }
+        }
         None
     }
 

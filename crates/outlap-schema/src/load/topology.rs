@@ -150,6 +150,36 @@ pub fn check(
         out_edges.entry(edge.from.as_str()).or_default().push(ci);
     }
 
+    // --- Fan-out guard (D-M6-13 hardening) ------------------------------------------------------
+    // `flatten_chain`/`fold_path` reduce a source's chain as a SERIES path: a node with more than
+    // one outgoing coupler (a branch) has its branch ratios multiplied together and applied to
+    // every downstream wheel, so a branched (fan-out) graph would assemble a silently-wrong ratio.
+    // Branching is not yet supported — reject it rather than mis-assemble. Every shared-crank layout
+    // is linear (one coupler out of each node), so no committed car is affected.
+    for (node, edges) in &out_edges {
+        if edges.len() > 1 {
+            let labels = edges
+                .iter()
+                .map(|&ci| {
+                    (
+                        at(&format!("/drivetrain/couplers/{ci}")),
+                        format!("coupler {ci} leaves node `{node}`"),
+                    )
+                })
+                .collect();
+            return Err(SchemaError::topology(
+                sources,
+                file,
+                format!(
+                    "node `{node}` feeds {} couplers — a branching (fan-out) drivetrain graph is \
+                     not yet supported; each node may drive at most one downstream coupler",
+                    edges.len()
+                ),
+                labels,
+            ));
+        }
+    }
+
     // --- Cycle detection over node→node edges (fresh 3-color DFS; not merge.rs's extends walk) ---
     detect_cycles(dt, &out_edges, at, sources, file)?;
 
