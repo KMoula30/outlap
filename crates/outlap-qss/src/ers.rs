@@ -104,15 +104,20 @@ impl ErsCoupling {
         // was assembled from — the production path — the deploy curves are identical to the pedal
         // availability by construction (same `ErsRulebook::from_schema`).
         let rulebook = outlap_powertrain::ErsRulebook::from_schema(policy, pack_soc_window, None)?;
-        // Driven axles come from the graph terminal wheels of the MECHANICAL sources (a
-        // policy-governed machine is a force-adder, not a mechanical driver, so it is excluded).
+        // The harvest axle-share (ceiling 5) is the axle(s) the GOVERNED machine itself brakes — a
+        // machine only recovers on the wheels it is mechanically connected to. Read it from the
+        // governed unit's own graph terminal wheels, not the mechanical sources'. For the
+        // shared-crank F1 layout the MGU-K flattens through crank→gearbox→diff to the same rear
+        // wheels the ICE drives, so this is byte-identical there; it differs (correctly) for a
+        // machine on a different axle or a single-motor governed EV, where reading the mechanical
+        // units would pick the wrong axle (or an empty set → zero harvest).
         let governed = crate::graph::governed_unit_ids(spec);
         let (mut front_driven, mut rear_driven) = (false, false);
         for unit in spec
             .drivetrain
             .units
             .iter()
-            .filter(|u| !governed.contains(u.id.as_str()))
+            .filter(|u| governed.contains(u.id.as_str()))
         {
             let (_, wheels) = crate::graph::flatten_chain(&spec.drivetrain, unit);
             front_driven |= wheels.iter().any(|w| w.is_front());

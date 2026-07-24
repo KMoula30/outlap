@@ -71,11 +71,31 @@ pub fn plan_slow_stack(spec: &Vehicle) -> SlowStackPlan {
         return SlowStackPlan::NoBattery;
     };
     let mut notes = Vec::new();
+    // D-M6-13/D-M6-10: a policy-GOVERNED machine's thermal network is not marched under the energy
+    // manager (the ERS branch of the QSS march evaluates the governed unit through the deploy/harvest
+    // shortcut and never steps the LPTN). Exclude governed units from the machine-thermal pairing so
+    // a governed `.emotor` ref cannot steal the single pairing from a mechanical unit and then
+    // flatline; if a governed unit declares one, surface that it is not integrated (nothing silent).
+    let governed = crate::graph::governed_unit_ids(spec);
+    if let Some(gov) = spec
+        .drivetrain
+        .units
+        .iter()
+        .find(|u| governed.contains(u.id.as_str()) && u.thermal.is_some())
+    {
+        notes.push(format!(
+            "drive unit `{}` is policy-governed and declares a `.emotor` thermal model — it is not \
+             marched under the energy manager this milestone (no machine-thermal derate applies to \
+             the governed machine)",
+            gov.id
+        ));
+    }
     let thermal_units: Vec<usize> = spec
         .drivetrain
         .units
         .iter()
         .enumerate()
+        .filter(|(_, u)| !governed.contains(u.id.as_str()))
         .filter_map(|(i, u)| u.thermal.as_ref().map(|_| i))
         .collect();
     let thermal = if let Some(&unit_idx) = thermal_units.first() {
