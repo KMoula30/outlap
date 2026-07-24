@@ -599,6 +599,192 @@ fn a_non_ers_vehicle_with_a_missing_battery_stays_clean() {
     );
 }
 
+// --- D-M6-13 Layer-1 hardening: policy/graph/pack validation guards -------------------------------
+
+/// `policy.governs` must name at least one unit — a policy that governs nothing would build an
+/// energy manager that can never deploy or harvest (and freezes an EV's state of charge), so it
+/// is rejected.
+#[test]
+fn an_empty_governs_is_rejected() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    let l = loader();
+    let mut broken = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    broken.policy.as_mut().expect("f1 has policy").governs = vec![];
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("an empty governs must be rejected");
+    match err {
+        SchemaError::Semantic { message, .. } => {
+            assert!(message.contains("governs"), "message: {message}");
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+/// This build evaluates a single governed machine; a second `governs` entry would be dropped from
+/// the mechanical ceilings yet never force-added (silently losing a machine), so it is rejected.
+#[test]
+fn a_multi_unit_governs_is_rejected() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    use outlap_schema::refs::UnitId;
+    let l = loader();
+    let mut broken = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    broken.policy.as_mut().unwrap().governs = vec![UnitId::from("mguk"), UnitId::from("ice")];
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("a multi-unit governs must be rejected");
+    match err {
+        SchemaError::Semantic { message, .. } => {
+            assert!(
+                message.contains("single governed machine"),
+                "message: {message}"
+            );
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+/// Governing a NON-electric unit (one with no `battery:`, e.g. the ICE) is rejected — only an
+/// electric machine that references a pack can be governed. Re-establishes the pre-2.0 "the ERS
+/// needs a store" hard error the typed `ers.mgu_k` block enforced by shape.
+#[test]
+fn governing_a_non_electric_unit_is_rejected() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    use outlap_schema::refs::UnitId;
+    let l = loader();
+    let mut broken = load_vehicle("f1_2026/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    broken.policy.as_mut().unwrap().governs = vec![UnitId::from("ice")]; // the ICE has no battery
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("governing a non-electric unit must be rejected");
+    match err {
+        SchemaError::Semantic { message, .. } => {
+            assert!(
+                message.contains("battery") && message.contains("electric"),
+                "message: {message}"
+            );
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+/// A branching (fan-out) drivetrain graph — one node feeding more than one coupler — would have its
+/// branch ratios multiplied in series and applied to every wheel, so it is rejected at topology.
+#[test]
+fn a_fan_out_drivetrain_graph_is_rejected() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    use outlap_schema::vehicle::{Coupler, CouplerEdge, Wheel};
+    let l = loader();
+    let mut broken = load_vehicle("gt_hybrid/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    // Add a SECOND coupler leaving the shared `crank` node (it already feeds the gearbox), so the
+    // crank now has out-degree 2 — a fan-out.
+    let crank = broken
+        .drivetrain
+        .units
+        .iter()
+        .find_map(|u| u.output.clone())
+        .expect("gt_hybrid outputs onto a shared node");
+    broken.drivetrain.couplers.push(CouplerEdge {
+        coupler: Coupler::FixedRatio(2.0),
+        from: crank,
+        to: None,
+        wheels: vec![Wheel::Fl, Wheel::Fr],
+    });
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("a fan-out graph must be rejected");
+    match err {
+        SchemaError::Topology { message, .. } => {
+            assert!(message.contains("fan-out"), "message: {message}");
+        }
+        other => panic!("expected Topology, got {other:?}"),
+    }
+}
+
+/// An unknown key INSIDE a `batteries` map entry must be a hard error (the id-keyed map values are
+/// walked through `additionalProperties` now, so typos in a pack entry are not silently dropped).
+#[test]
+fn an_unknown_key_inside_a_battery_entry_is_rejected() {
+    let with_typo = GT_VEHICLE.replace(
+        "    model: rc_pairs\n    params: battery/gt_es.yaml",
+        "    model: rc_pairs\n    bogus_key: 1\n    params: battery/gt_es.yaml",
+    );
+    assert!(with_typo.contains("bogus_key"), "typo spliced in");
+    let l = gt_loader(&with_typo, Some(GT_BATTERY));
+    match load_vehicle("vehicle.yaml", &l, &LoadOptions::default())
+        .expect_err("an unknown key inside a pack entry must be rejected")
+    {
+        SchemaError::UnknownField { field, .. } => assert_eq!(field, "bogus_key"),
+        other => panic!("expected UnknownField, got {other:?}"),
+    }
+}
+
+/// The solver marches a SINGLE pack, so a car whose units reference more than one distinct pack is
+/// gated (a hard error) — unless `allow_degraded` records the single-pack collapse.
+#[test]
+fn a_multi_pack_car_is_gated() {
+    use outlap_schema::load::{resolve_vehicle, Overrides};
+    use outlap_schema::refs::BatteryId;
+    let l = loader();
+    let base = load_vehicle("gt_hybrid/vehicle.yaml", &l, &LoadOptions::default())
+        .expect("fixture resolves")
+        .spec;
+    let mut broken = base;
+    // Add a second pack (reusing the same on-disk params so it is loadable) and point the ICE at
+    // it, so two distinct packs are referenced.
+    let pack = broken.batteries.values().next().cloned().expect("a pack");
+    broken.batteries.insert(BatteryId::from("gt_es2"), pack);
+    broken.drivetrain.units[0].battery = Some(BatteryId::from("gt_es2"));
+    let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
+        .expect_err("distinct packs per unit must be gated");
+    assert!(
+        format!("{err}").contains("distinct battery packs"),
+        "message: {err}"
+    );
+    // allow_degraded runs it collapsed-to-primary, with the collapse recorded (nothing silent).
+    let resolved = resolve_vehicle(
+        &broken,
+        &Overrides::default(),
+        &l,
+        &LoadOptions {
+            allow_degraded: true,
+        },
+    )
+    .expect("allow_degraded collapses to the primary pack");
+    assert!(
+        resolved
+            .report
+            .degraded
+            .iter()
+            .any(|e| e.pointer.contains("batteries")),
+        "the collapse is recorded: {:?}",
+        resolved.report.degraded
+    );
+}
+
+/// A legacy `ers:` block inherited through an `extends:` PARENT (not present in the root tree) must
+/// still yield the curated legacy diagnostic — the merged-tree re-sniff, not a generic error.
+#[test]
+fn a_legacy_block_inherited_through_extends_is_rejected() {
+    let child = "schema: vehicle/2.0\nname: child\nextends: parent.yaml\n";
+    let parent = "schema: vehicle/2.0\nname: parent\ners:\n  mgu_k: {}\n";
+    let l = MemLoader::new()
+        .with("child.yaml", child)
+        .with("parent.yaml", parent);
+    match load_vehicle("child.yaml", &l, &LoadOptions::default())
+        .expect_err("a legacy block in an extends parent must be rejected")
+    {
+        SchemaError::LegacyDrivetrainFormat { message, .. } => {
+            assert!(message.contains("ers"), "names the legacy key: {message}");
+        }
+        other => panic!("expected LegacyDrivetrainFormat, got {other:?}"),
+    }
+}
+
 /// Remove the top-level `ers:` block (up to the next top-level `battery:` key) from a vehicle
 /// YAML string — a test helper for the no-manager battery cases.
 fn strip_policy_block(vehicle: &str) -> String {

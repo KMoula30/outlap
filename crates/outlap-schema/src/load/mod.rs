@@ -141,6 +141,12 @@ fn finish(
     sources: &mut Sources,
     options: &LoadOptions,
 ) -> Result<ResolvedVehicle> {
+    // Stage 3.5: re-run the legacy layout sniff on the MERGED tree (D-M6-13). The root-tree sniff in
+    // the entry points runs before `version_gate`, but a legacy `ers:`/`battery:` key inherited
+    // through an `extends:` preset only appears after the merge — catch it here so it still yields
+    // the curated diagnostic instead of a generic `UnknownField` on the merged document.
+    legacy_drivetrain_sniff(merged, sources)?;
+
     let mut report = LoadedModelReport::default();
 
     // Stage 4/5: value + spans, capture extensions, unknown walk, deserialize.
@@ -275,6 +281,45 @@ fn load_battery_referenced(
                 .map(crate::refs::BatteryId::as_str)
         })
         .collect();
+
+    // Multi-pack guard (D-M6-13 hardening): the solver assembly resolves a SINGLE pack (the QSS
+    // slow-march and the T2 stack each march one `Pack`; the Python binding wires one). A car whose
+    // drive units reference more than one DISTINCT pack would have every unit's draw charged to that
+    // one pack and the others silently dropped — a wrong (not merely degraded) result. Surface it:
+    // a hard error unless `allow_degraded`, which records the collapse so the results are marked.
+    let referenced_packs: BTreeSet<&str> = spec
+        .drivetrain
+        .units
+        .iter()
+        .filter_map(|u| u.battery.as_ref().map(crate::refs::BatteryId::as_str))
+        .collect();
+    if referenced_packs.len() > 1 {
+        if !options.allow_degraded {
+            return Err(SchemaError::semantic(
+                sources,
+                span_at("/batteries"),
+                format!(
+                    "drive units reference {} distinct battery packs, but the solver marches a \
+                     single pack — the extra packs would be silently unsimulated",
+                    referenced_packs.len()
+                ),
+                Some(
+                    "route every drive unit to one shared pack for now (multi-pack marching is not \
+                     yet wired through assembly), or set `allow_degraded: true` in sim.yaml to run \
+                     the primary pack only with the result marked degraded"
+                        .to_owned(),
+                ),
+            ));
+        }
+        report.degraded.push(ReportEntry::new(
+            "/batteries",
+            format!(
+                "{} distinct packs referenced but the solver marches a single (primary) pack — \
+                 non-primary packs are not simulated",
+                referenced_packs.len()
+            ),
+        ));
+    }
 
     if spec.batteries.is_empty() {
         // No packs at all. A policy that governs a unit still needs somewhere to bank.
