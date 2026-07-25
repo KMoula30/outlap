@@ -33,6 +33,14 @@ pub struct Policy {
     pub override_mode: Option<OverrideMode>,
     /// Recovery rules.
     pub recovery: Recovery,
+    /// The regulatory engine rev limit, rpm (FIA 2026: 15 000 for the V6). Applied at load as a
+    /// cap on every **combustion** unit's usable envelope; the crank speed the shared node runs at
+    /// therefore never exceeds it, and any machine welded to that node is capped transitively.
+    /// The `.ptm` maps are capability data — this is the regulation that clips them, so a map
+    /// authored past the limit simply carries unreachable range (recorded in the notes). Absent ⇒
+    /// the envelope domain alone bounds the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_engine_speed_rpm: Option<f64>,
     /// Fixed electrical→mechanical conversion factor between the CU-K DC bus (where the
     /// regulatory power caps and energy ledgers live) and the crank (FIA 2026 C5.2.14; the
     /// harvest direction uses its inverse per C5.2.21). Default 0.97.

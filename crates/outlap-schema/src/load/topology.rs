@@ -15,19 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostics::{SourceId, Sources, SrcSpan};
 use crate::error::{Result, SchemaError};
-use crate::ptm::PtmKind;
 use crate::tree::SpanIndex;
 use crate::vehicle::{Coupler, DiffKind, DriveUnit, Vehicle, Wheel};
-
-/// What the pipeline learned about a unit's source `.ptm` (kind + whether an internal ratio is
-/// already applied). `None` when the `.ptm` could not be loaded (the error surfaces earlier).
-#[derive(Clone, Copy, Debug)]
-pub struct UnitSource {
-    /// The source kind.
-    pub kind: PtmKind,
-    /// `meta.upstream_ratio_applied` (defaults to `true` when absent).
-    pub upstream_ratio_applied: bool,
-}
 
 /// The flattened drive chain for one source: the ordered couplers from the source shaft to the
 /// wheels it drives, plus those terminal wheels. For a `wheels:`-sugar unit this is simply
@@ -39,13 +28,7 @@ struct FlatChain<'a> {
 }
 
 /// Run the topology-graph checks.
-pub fn check(
-    spec: &Vehicle,
-    unit_sources: &[Option<UnitSource>],
-    index: &SpanIndex,
-    sources: &Sources,
-    file: SourceId,
-) -> Result<()> {
+pub fn check(spec: &Vehicle, index: &SpanIndex, sources: &Sources, file: SourceId) -> Result<()> {
     let at = |ptr: &str| index.span_for(ptr).unwrap_or_else(|| SrcSpan::blank(file));
     let dt = &spec.drivetrain;
 
@@ -220,29 +203,6 @@ pub fn check(
             wheel_units.entry(*w).or_default().push(ui);
         }
 
-        // A lumped drive_unit must not sit behind a gearbox / fixed ratio (anywhere on its chain).
-        if let Some(src) = unit_sources.get(ui).copied().flatten() {
-            if matches!(src.kind, PtmKind::DriveUnit) && src.upstream_ratio_applied {
-                for coupler in &flat.couplers {
-                    if matches!(coupler, Coupler::Gearbox(_) | Coupler::FixedRatio(_)) {
-                        return Err(SchemaError::topology(
-                            sources,
-                            file,
-                            format!(
-                                "drive unit `{}` is a lumped `drive_unit` (ratio already applied) but its \
-                                 path applies another ratio; set `meta.upstream_ratio_applied: false` in \
-                                 the .ptm or remove the coupler",
-                                unit.id
-                            ),
-                            vec![(
-                                at(&format!("/drivetrain/units/{ui}/source")),
-                                "lumped drive_unit with an extra ratio on its chain".into(),
-                            )],
-                        ));
-                    }
-                }
-            }
-        }
         flats.push(flat);
     }
 

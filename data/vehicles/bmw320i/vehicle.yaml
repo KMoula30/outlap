@@ -55,8 +55,8 @@ drivetrain:
   units:
     - source: ptm/engine.ptm.yaml
       id: ice
+      # No `fixed_ratio`: the envelope is defined at the wheel shaft.
       path:
-        - fixed_ratio: 1.0 # envelope defined at the wheel shaft
         - diff: { type: open }
       wheels: [RL, RR] # rear-wheel drive
 brakes:

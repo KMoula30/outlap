@@ -2,7 +2,7 @@
 # Reference topology: F1 2026 hybrid (ICE + MGU-K on the same shaft -> gearbox -> rear diff -> RL+RR).
 # NOTE: ERS/energy figures are approximate 2026-regulation values for testing — verify against the
 # published FIA 2026 Technical Regulations before shipping this as reference data.
-schema: vehicle/2.0
+schema: vehicle/2.1
 name: "Reference F1 2026 hybrid"
 chassis:
   # DRY mass = car + driver, no fuel (the 2026 ≤768 kg minimum-mass convention); the race fuel
@@ -97,6 +97,9 @@ policy:
   # The energy-management overlay governs the MGU-K unit. `regulatory_window_mj` is the FIA C5.2.9
   # on-track swing limit (4 MJ); the physical pack window lives on `battery/f1_es.yaml`.
   governs: [mguk]
+  # FIA 2026 V6 rev limit: clips the engine envelope at load; the crank — and the MGU-K welded to
+  # it — can never be driven past this, whatever a .ptm is authored to.
+  max_engine_speed_rpm: 15000
   regulatory_window_mj: 4.0
   deployment:
     power_limit_kw: 350.0

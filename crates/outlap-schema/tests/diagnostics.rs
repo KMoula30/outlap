@@ -11,6 +11,12 @@ fn loader() -> FsLoader {
     FsLoader::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
 }
 
+/// Load a fixture that is expected to resolve cleanly.
+fn resolved(path: &str) -> outlap_schema::ResolvedVehicle {
+    load_vehicle(path, &loader(), &LoadOptions::default())
+        .unwrap_or_else(|e| panic!("{path} should have resolved: {e}"))
+}
+
 fn load_err(path: &str) -> SchemaError {
     load_vehicle(path, &loader(), &LoadOptions::default())
         .expect_err(&format!("{path} should have failed to load"))
@@ -64,16 +70,74 @@ fn lsd_without_preload_is_a_semantic_error() {
 }
 
 #[test]
-fn drive_unit_behind_gearbox_is_a_topology_error() {
+fn a_gearbox_on_a_units_private_path_is_rejected() {
+    // A unit's `path` carries its differential ONLY — a gearbox belongs on the shared graph
+    // (`drivetrain.couplers`), where every source below it shares its ratios. The rule is
+    // structural and deliberately blind to what the `.ptm` calls itself (D-M6-13 Layer 3).
     let err = load_err("bad/drive_unit_gearbox/vehicle.yaml");
     match err {
-        SchemaError::Topology {
-            message, labels, ..
-        } => {
-            assert!(message.contains("drive_unit"), "message: {message}");
-            assert!(!labels.is_empty(), "topology error should carry spans");
+        SchemaError::Semantic { message, help, .. } => {
+            assert!(message.contains("gearbox"), "message: {message}");
+            assert!(
+                help.is_some_and(|h| h.contains("couplers")),
+                "the fix names the shared graph"
+            );
         }
-        other => panic!("expected Topology, got {other:?}"),
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fixed_ratio_on_a_units_private_path_is_rejected() {
+    // There is exactly ONE way to declare a unit's internal reduction: the `fixed_ratio:` field.
+    let err = load_err("bad/path_fixed_ratio/vehicle.yaml");
+    match err {
+        SchemaError::Semantic { message, help, .. } => {
+            assert!(message.contains("fixed_ratio"), "message: {message}");
+            assert!(
+                help.is_some_and(|h| h.contains("`fixed_ratio:` field")),
+                "the fix names the field"
+            );
+        }
+        other => panic!("expected Semantic, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_units_fixed_ratio_is_folded_into_its_reduction_at_load() {
+    // `fixed_ratio` declares that a unit's `.ptm` map is referenced to the MACHINE's own shaft
+    // rather than the shaft it outputs onto, and supplies the ratio between them. The loader folds
+    // it into the unit's private reduction once, at load — closest to the machine, ahead of the
+    // diff — so every tier downstream sees one consistent output-shaft frame and no per-step code
+    // ever knows the ratio existed.
+    use outlap_schema::vehicle::Coupler;
+
+    let sugar = resolved("fixed_ratio_sugar/vehicle.yaml");
+    let unit = &sugar.spec.drivetrain.units[0];
+    assert!(
+        unit.fixed_ratio.is_none(),
+        "the field is consumed by the fold, not left dangling"
+    );
+    assert!(
+        matches!(unit.path.first(), Some(Coupler::FixedRatio(r)) if (*r - 3.5).abs() < 1e-12),
+        "the ratio is folded in closest to the machine: {:?}",
+        unit.path
+    );
+    assert!(
+        matches!(unit.path.get(1), Some(Coupler::Diff(_))),
+        "the declared diff follows it: {:?}",
+        unit.path
+    );
+}
+
+#[test]
+fn a_non_positive_fixed_ratio_is_a_semantic_error() {
+    let err = load_err("bad/fixed_ratio_zero/vehicle.yaml");
+    match err {
+        SchemaError::Semantic { message, .. } => {
+            assert!(message.contains("fixed_ratio"), "message: {message}");
+        }
+        other => panic!("expected Semantic, got {other:?}"),
     }
 }
 

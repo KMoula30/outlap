@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# A lumped `drive_unit` .ptm sitting behind a gearbox — must fail the topology check.
+# A gearbox on a unit's private `path` — must fail the load check regardless of what the
+# `.ptm` calls itself (the path carries the diff only; gearboxes live on the shared graph).
 schema: vehicle/2.0
 name: "drive unit behind gearbox"
 chassis:

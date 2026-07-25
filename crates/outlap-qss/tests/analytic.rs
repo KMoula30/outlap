@@ -43,7 +43,7 @@ fn vehicle(cx: f64, cz: f64, ptm: &str) -> T0Vehicle {
          aero: {{map: a.parquet, axes: [], constant: {{cx_a_m2: {cx}, cz_front_a_m2: 0.0, cz_rear_a_m2: {cz}}}}}\n\
          suspension: {{model: lumped_kc, front: {{ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}, rear: {{ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}}}\n\
          tires: {{front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}}\n\
-         drivetrain: {{units: [{{id: u0, source: ptm/u.ptm.yaml, path: [{{fixed_ratio: 4.0}}], wheels: [RL, RR]}}]}}\n\
+         drivetrain: {{units: [{{id: u0, source: ptm/u.ptm.yaml, fixed_ratio: 4.0, wheels: [RL, RR]}}]}}\n\
          brakes: {{balance_bar: 0.6, disc: {{front: {{thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}}, rear: {{thermal_capacity_j_per_k: 40000.0, cooling_area_m2: 0.1}}}}}}\n"
     );
     let loader = MemLoader::new()

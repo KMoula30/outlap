@@ -211,6 +211,17 @@ the same gear, which is what this formulation supplies. Both solver families eva
 one shared object, so the QSS march and the transient governor cannot drift apart (tier parity
 gate #4 measures physics, not two rule copies).
 
+**Declaring the reference frame.** A unit's `.ptm` is always read as referenced to the shaft the
+unit outputs onto — the crank here, a diff for an axle drive — regardless of what the map calls
+itself. If the map is authored at the machine's own shaft instead, the unit declares the reduction
+between the two as `fixed_ratio:` (machine speed ÷ output-shaft speed), and the loader folds it into
+the unit's gearing once, at load: there is exactly one way to declare a reduction, and no per-step
+code ever sees it. The unit's `path:` carries its differential only; gearboxes live on the shared
+graph (`drivetrain.couplers`), where every source below them shares their ratios. The regulatory
+engine rev limit is likewise config, not map data: `policy.max_engine_speed_rpm` clips every
+combustion envelope at load, so the crank — and any machine welded to it — can never be driven past
+the regulation, whatever a map is authored to.
+
 **The non-consequence: no numerical crank-torque cap.** C5.2.11 governs MGU-K crank torque, but the
 2026 regulations manage it through homologated real-time sensing rather than one published figure,
 so outlap enforces **no** hard number and adds no schema field for one. The binding gear-referenced

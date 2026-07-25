@@ -690,6 +690,14 @@
             }
           ]
         },
+        "fixed_ratio": {
+          "description": "The source's **internal** fixed reduction between the machine's own shaft and the shaft this\nunit outputs onto — an F1 MGU-K's motor→crank step-up, say. This is the ONLY place a unit's\nreduction is declared.\n\nA `.ptm` map is always read as referenced to the unit's **output shaft** (whatever `output`\nor `wheels` names), regardless of what the map calls itself. Declaring `fixed_ratio` says\nthe map is referenced to the machine's own shaft instead, and this is the ratio between\nthem (machine speed ÷ output-shaft speed): the loader folds it into the unit's reduction at\nload, so from then on every tier sees one consistent output-shaft frame and nothing\nper-step has to know about it.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "id": {
           "description": "Unique in-document id for this source (§8.0, D-M6-13). Targeted by `policy.governs` and the\n`.ptm` sidecar-install order; disjoint from node ids.",
           "$ref": "#/$defs/UnitId"
@@ -706,7 +714,7 @@
           ]
         },
         "path": {
-          "description": "The source's private series reduction toward its terminus (present only for an actual\nstep-up/down). Empty when the source outputs directly onto a shared node.",
+          "description": "The unit's **differential** (its only permitted content — enforced at load). An internal\nreduction is [`Self::fixed_ratio`]; a gearbox belongs on the shared graph\n[`Drivetrain::couplers`], where every source below it shares its ratios.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Coupler"
@@ -1094,6 +1102,14 @@
           "items": {
             "$ref": "#/$defs/UnitId"
           }
+        },
+        "max_engine_speed_rpm": {
+          "description": "The regulatory engine rev limit, rpm (FIA 2026: 15 000 for the V6). Applied at load as a\ncap on every **combustion** unit's usable envelope; the crank speed the shared node runs at\ntherefore never exceeds it, and any machine welded to that node is capped transitively.\nThe `.ptm` maps are capability data — this is the regulation that clips them, so a map\nauthored past the limit simply carries unreachable range (recorded in the notes). Absent ⇒\nthe envelope domain alone bounds the engine.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "override_mode": {
           "description": "Optional manual override mode (2026 regs).",
