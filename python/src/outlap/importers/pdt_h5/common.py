@@ -72,6 +72,13 @@ def opt_arr(f: h5py.File | h5py.Group, path: str) -> np.ndarray | None:
     )
 
 
+def opt_raw(f: h5py.File | h5py.Group, path: str) -> np.ndarray | None:
+    """An optional dataset as a RAW ndarray with no dtype coercion, or ``None`` if absent — for
+    string arrays such as ``thermal_obj/node_names`` (``float64`` coercion would raise on bytes)."""
+    node = f.get(path)
+    return node[()] if isinstance(node, h5py.Dataset) else None
+
+
 def scalar(f: h5py.File | h5py.Group, path: str, default: float | None = None) -> float:
     """A required scalar as ``float`` (``default`` if absent and provided)."""
     node = f.get(path)
