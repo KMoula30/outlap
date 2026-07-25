@@ -35,13 +35,20 @@ import yaml
 
 from outlap.importers.pdt_h5.edrive import convert_edrive
 
-# The synthetic MGU-K's authored axes (must match data/vehicles/f1_2026/ptm/mgu_k.ptm.yaml). A dense
-# grid (26 speeds × 25 torques) so the efficiency/loss map interpolates smoothly. The peak torque was
-# raised 120 → 223 N·m (D-M6-13 Layer 2 follow-up): the MGU-K sits on the crank (≤ 15 000 rpm redline),
-# so at 120 N·m it could only make ~188 kW there — well under the FIA 350 kW deploy ceiling. 223 N·m is
-# the torque that delivers 350 kW at the 15 000 rpm redline (τ = P/ω), so the machine can now actually
-# put down its rated deploy. The load grid is normalized (−1..1) and scaled to the new peak.
-SPEED_RPM = np.arange(0.0, 50000.0 + 1.0, 2000.0)  # 0, 2 000, … 50 000 rpm (26 pts)
+# The synthetic MGU-K's authored axes (must match data/vehicles/f1_2026/ptm/mgu_k.ptm.yaml).
+#
+# SPEED IS THE UNIT'S **OUTPUT SHAFT** (D-M6-13 Layer 3). The MGU-K is a `drive_unit`: a bare rotor
+# spinning to the regulatory ~50 000 rpm PLUS its fixed step-up reduction, lumped together and
+# expressed at the shaft the unit declares as its `output` — the crank. That shaft is the V6's, so it
+# redlines at 15 000 rpm and the axis stops just past it. (Layer 2 authored a 0–50 000 rpm axis here,
+# which is the ROTOR's range: two thirds of it was unreachable by any solver query AND extrapolated
+# past the 20 000 rpm reference. If a future car declares the machine as a bare `electric_machine`
+# with a `fixed_ratio` on its `path`, THAT map's axis is the rotor's and would run to 50 000.)
+#
+# A dense grid (10 speeds × 25 torques) so the efficiency/loss map interpolates smoothly; the whole
+# axis now sits INSIDE the reference sweep's 20 000 rpm domain, so no speed extrapolation remains.
+# Peak torque 223 N·m is the OUTPUT-SHAFT (crank) torque — τ·ω = 350 kW at the redline.
+SPEED_RPM = np.arange(0.0, 18000.0 + 1.0, 2000.0)  # 0, 2 000, … 18 000 rpm (10 pts)
 MGU_K_VDC = 800.0  # mgu_k.ptm meta.dc_voltage_v
 PEAK_TORQUE_NM = 223.0  # 350 kW at the 15 000 rpm crank redline (was 120 — under-torqued for F1)
 LOAD_FRACTION = np.linspace(-1.0, 1.0, 25)  # normalized load axis (−1 regen … +1 drive), 25 pts
@@ -180,13 +187,15 @@ def build_emotor(src: Path) -> dict:
     return emotor
 
 
-# The synthetic MGU-K drive envelope (mgu_k.ptm `limits.max_torque_nm_vs_speed`): constant 223 N·m to
-# the 15 000 rpm base speed (= 350 kW there), then a constant-power taper (350 kW: 139 N·m @ 24 krpm,
-# 67 N·m @ 50 krpm). The regen envelope follows the SAME taper (both voltage/power-limited); the
+# The synthetic MGU-K drive envelope (mgu_k.ptm `limits.max_torque_nm_vs_speed`), on the unit's
+# OUTPUT SHAFT: constant 223 N·m to the 15 000 rpm crank redline, where τ·ω = 350 kW. The rotor's own
+# constant-power taper (139 N·m @ 24 krpm, 67 N·m @ 50 krpm on the ROTOR axis) lives above the base
+# speed of the lumped reduction and is therefore not reachable through this shaft — carrying it here
+# implied the crank could turn to 50 000 rpm. The regen envelope follows the same shape; the
 # reference only fixes its magnitude via the drive/regen peak ratio.
 DRIVE_ENV = {
-    "speed_rpm": [0.0, 15000.0, 24000.0, 50000.0],
-    "torque_nm": [223.0, 223.0, 139.0, 67.0],
+    "speed_rpm": [0.0, 15000.0],
+    "torque_nm": [223.0, 223.0],
 }
 
 
