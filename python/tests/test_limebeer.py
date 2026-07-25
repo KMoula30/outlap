@@ -86,6 +86,13 @@ _GOLDEN_CASES = [
     ("f1_2026_t0", F1_2026, "t0", False),
 ]
 # Per-channel relative tolerances (fraction of the channel's max magnitude).
+#
+# `state_of_charge` and `fuel_mass_kg` gate the ENERGY physics: both are cumulative, so an ERS or
+# fuel change that leaves the trajectory alone still moves them (before D-M6-13 Layer 3 the f1
+# golden compared no energy channel at all, and the whole deploy/harvest shape was ungated).
+# `deploy_power_w`/`harvest_power_w` are deliberately NOT gated: they are near-bang-bang between 0
+# and the 350 kW cap, so a one-station shift reads as a 100 % relative drift — the SoC integral is
+# the stable observable of the same physics.
 _TOLS = {
     "v": 0.005,
     "ax": 0.02,
@@ -94,6 +101,8 @@ _TOLS = {
     "vertical_load_n": 0.01,
     "slip_ratio": 0.05,
     "slip_angle_rad": 0.05,
+    "state_of_charge": 0.02,
+    "fuel_mass_kg": 0.005,
 }
 
 
