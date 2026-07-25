@@ -99,7 +99,7 @@ def read_detailed_thermal(f: h5py.File) -> dict[str, Any] | None:
     and the per-component loss split (aggregated to reduced groups). Never reads the FEA mesh.
     """
     # All h5 access routes through the typed `common` helpers (opt_arr/scalar) so no raw indexing.
-    names_arr = c.opt_arr(f, "thermal_obj/node_names")
+    names_arr = c.opt_raw(f, "thermal_obj/node_names")
     c_arr = c.opt_arr(f, "thermal_obj/C")
     g_arr = c.opt_arr(f, "thermal_obj/G_const")
     flow = c.opt_arr(f, "thermal_obj/user/cooling_liquid_jacket/coolant_flow_rate")

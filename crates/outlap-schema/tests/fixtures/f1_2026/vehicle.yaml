@@ -47,6 +47,7 @@ drivetrain:
     - id: mguk
       source: ptm/mgu_k.ptm.yaml
       battery: f1_es
+      thermal: emotor/mgu_k.emotor.yaml
       output: crank
   couplers:
     - coupler:

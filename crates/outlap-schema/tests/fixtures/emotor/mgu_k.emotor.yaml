@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# Semi-virtual f1_2026 MGU-K thermal network (D-M6-13 Layer 2): the reference EDrive's
+# detailed LPTN, node capacities scaled to the MGU-K mass. Derived from a private PDT .h5
+# (never committed); regenerate with python/tools/gen_f1_mgu_k.py.
+schema: emotor/1.1
+nodes:
+- name: winding
+  role: winding
+  c_j_per_k: 811.49
+  t_warn_c: 155.0
+  t_max_c: 180.0
+- name: stator_iron
+  role: stator_iron
+  c_j_per_k: 2278.79
+- name: rotor
+  role: rotor
+  c_j_per_k: 2350.64
+  t_warn_c: 155.0
+  t_max_c: 180.0
+- name: housing
+  role: housing
+  c_j_per_k: 1332.91
+- name: coolant
+  role: coolant
+- name: ambient
+  role: ambient
+conductances:
+- between:
+  - housing
+  - rotor
+  w_per_k: 949.6992
+- between:
+  - housing
+  - stator_iron
+  w_per_k: 709.6089
+- between:
+  - stator_iron
+  - winding
+  w_per_k: 75.8019
+cooling:
+  ambient_node: ambient
+  jacket:
+    housing_node: housing
+    coolant_node: coolant
+    inlet_c: 65.0
+    flow_rate_lps: 0.75
+    channel_count: 8
+    channel_width_mm: 8.0
+    channel_height_mm: 10.0
+    wetted_area_m2: 0.07629
+    fluid:
+      props:
+        rho: 1043.0
+        cp: 3450.0
+        lam: 0.401
+        nu: 1.74e-06
+        pr: 15.6
+  air_gap:
+    between:
+    - stator_iron
+    - rotor
+    rotor_outer_radius_mm: 74.55
+    gap_mm: 1.15
+    stack_length_mm: 121.0
+loss_routing:
+- node: winding
+  fraction: 0.178
+- node: stator_iron
+  fraction: 0.4117
+- node: rotor
+  fraction: 0.4102
+meta:
+  source: pdt_imported
+  notes: "EDrive_121.0L_6Et_700.0I_730.0V_bcf42_outlap.h5 detailed LPTN; node capacities\
+    \ scaled \xD70.353 (68.0\u219224.0 kg), cooling paths \xD73.0 so a hard stint\
+    \ settles the winding warm (~170 \xB0C, in the derate band) but clear of the t_max\
+    \ cut-out (semi-virtual f1 MGU-K, D-M6-13 L2)"
+cu_feedback:
+  nodes:
+  - winding
+  t_ref_c: 60.0
+  alpha_per_k: 0.00393
