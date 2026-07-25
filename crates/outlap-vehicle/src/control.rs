@@ -450,10 +450,12 @@ impl<T: Float> Block<T> for Powertrain<T> {
         let f_avail = throttle * torque_scale * self.traction.eval(vx);
 
         // The MGU-K deploy force the energy manager scheduled at the step boundary (M6/PR4): an
-        // additive drive slice on an ERS car (`+` deploy / `−` super-clip back-drive), also subject
-        // to the shift torque interruption since it is crank-referenced upstream of the gearbox.
+        // additive drive slice on an ERS car (`+` deploy / `−` super-clip back-drive). It arrives
+        // ALREADY cut by the shift torque interruption — the machine is crank-referenced upstream of
+        // the gearbox, and since D-M6-13 Layer 3 the governor applies that one cut to the force, the
+        // pack draw and the winding loss together. Re-scaling it here would square the cut.
         let deploy_force = if self.ers_governed {
-            bus.get_channel(self.actuation.ers_deploy_force_n, lane) * torque_scale
+            bus.get_channel(self.actuation.ers_deploy_force_n, lane)
         } else {
             zero
         };
