@@ -28,8 +28,8 @@ pub mod tire_thermal;
 pub use outlap_core::bus::ChannelInterner;
 
 pub use control::{
-    ErsGovernor, ErsStepInput, ErsStepOut, LiftSchedule, ShiftEvent, ShiftSchedule, Shifter,
-    SlowStack, DOWNSHIFT_HYSTERESIS, SHIFT_CUT_FRACTION,
+    ErsGovernor, ErsStepInput, ErsStepOut, LiftSchedule, MachineThermalStack, ShiftEvent,
+    ShiftSchedule, Shifter, SlowStack, DOWNSHIFT_HYSTERESIS, SHIFT_CUT_FRACTION,
 };
 pub use lap::{
     FuelSlow, Provenance, SimConfig, SuspensionSample, T2Blocks, T3Blocks, TierBlocks,
