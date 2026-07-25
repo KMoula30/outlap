@@ -307,7 +307,7 @@ fn hot_paths_are_zero_alloc() {
         .unwrap();
         let _ = veh.mech_tractive_force(41.0);
         let _ = veh.ers_deploy_force_n(41.0, 250e3);
-        let _ = veh.ers_realized_deploy_w(250e3);
+        let _ = veh.ers_realized_deploy_w(41.0, 250e3);
     }
     let after = dhat::HeapStats::get();
     assert_eq!(

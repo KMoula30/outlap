@@ -34,13 +34,24 @@ fn assembles_f1_2026() {
     assert!(close(t0.qx, 0.5 * rho * 1.25, 1e-6), "qx {}", t0.qx);
     assert!(close(t0.qz, 0.5 * rho * 4.5, 1e-6), "qz {}", t0.qz);
 
-    // Tractive force is positive through the speed range, and ERS dominates at very low speed
-    // (power ÷ speed), so the launch force is large (the friction ellipse caps it in the solver).
+    // Tractive force is positive through the speed range, and the ERS contributes at low speed.
+    // Since D-M6-13 Layer 3 the MGU-K is pinned to the shared crank, so down there it is
+    // TORQUE-limited: its wheel force is τ_max·ratio(1st)·η/r — a finite launch force, invariant in
+    // speed — rather than the `p/v` singularity the ratio-invariant power ceiling produced (which
+    // reached ~165 kN at 2 m/s, far past anything the tyres could ever use).
     assert!(t0.tractive_force(50.0) > 0.0);
+    let ers_at = |v: f64| t0.tractive_force(v) - t0.mech_tractive_force(v);
     assert!(
-        t0.tractive_force(2.0) > 50_000.0,
+        ers_at(2.0) > 5_000.0,
         "ERS not contributing: {}",
-        t0.tractive_force(2.0)
+        ers_at(2.0)
+    );
+    assert!(
+        close(ers_at(2.0), ers_at(1.0), 1e-9),
+        "a torque-limited crank-mounted machine delivers a speed-invariant wheel force: \
+         {} N at 1 m/s vs {} N at 2 m/s",
+        ers_at(1.0),
+        ers_at(2.0)
     );
     assert!(!t0.notes().is_empty());
 }

@@ -392,6 +392,51 @@ def test_the_mgu_k_deploys_and_harvests_at_t2(f1_ers_lap: xr.Dataset) -> None:
     )
 
 
+def test_a_shift_cut_interrupts_the_mgu_k_as_well_as_the_engine(
+    f1_ers_lap: xr.Dataset,
+) -> None:
+    """D-M6-13 Layer 3: the MGU-K is welded to the crank, UPSTREAM of the gearbox, so a gear-change
+    torque cut interrupts it exactly as it interrupts the engine — and it interrupts the wheel
+    force, the pack draw AND the winding loss *together*.
+
+    Before Layer 3 only the force was cut (at the powertrain block), so a mid-shift MGU-K drained
+    the pack and heated its winding for zero wheel force. The cut now lives in one place, the
+    governor, which scales all three by the same factor; this gates the two of those three that the
+    result surfaces.
+    """
+    ds = f1_ers_lap
+    ts = ds["torque_scale"].to_numpy()
+    force = ds["ers_deploy_force_n"].to_numpy()
+    draw = ds["traction_power_w"].to_numpy()
+
+    cut = ts <= 0.0
+    assert cut.any(), "the lap contains at least one full torque-cut sample to test"
+    assert np.all(force[cut] == 0.0), (
+        f"the MGU-K still pushes {np.abs(force[cut]).max():.1f} N through a shift cut"
+    )
+    assert np.all(draw[cut] == 0.0), (
+        f"the MGU-K still draws {np.abs(draw[cut]).max() / 1e3:.1f} kW through a shift cut"
+    )
+    # …and the test is not vacuous: away from the cut the machine really is deploying.
+    assert draw[ts >= 1.0].max() > 100e3, "the MGU-K deploys outside the cut windows"
+    # The cut is applied EXACTLY ONCE (in the governor). Force and draw are scaled by the SAME
+    # factor there, so their ratio — the electrical→wheel efficiency `F·v / P_elec` — is
+    # cut-invariant. A second, block-level multiply would square the force only, dragging that
+    # ratio down to `torque_scale × η` on every partially-re-engaged step. Assert the ratio stays
+    # inside a physical efficiency band at EVERY deploying sample, ramps included.
+    vx = ds["vx"].to_numpy()
+    deploying = (draw > 1e3) & (force > 0.0) & (vx > 5.0)
+    assert deploying.any(), "there are deploying samples to check"
+    eta_total = force[deploying] * vx[deploying] / draw[deploying]
+    assert eta_total.min() > 0.6, (
+        f"electrical→wheel efficiency dropped to {eta_total.min():.3f} — the shift cut looks "
+        "applied twice (torque_scale²)"
+    )
+    assert eta_total.max() <= 1.0 + 1e-9, (
+        f"electrical→wheel efficiency {eta_total.max():.3f} > 1 — the machine cannot create energy"
+    )
+
+
 def test_the_override_flag_changes_the_ers_lap(catalunya: Track) -> None:
     # Override ("Overtake") enables the higher-speed deployment envelope + the extra harvest
     # allowance, so the deploy/energy picture differs from the rule-based lap (D-M6-5).

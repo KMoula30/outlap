@@ -451,7 +451,7 @@ fn pack_soc_closes_against_the_ledger_over_the_lap() {
             let vdc = h.pack.terminal_voltage_v(&st);
             let pe = pt
                 .governed_deploy(vi, p, Some(vdc), e.eta, 1.0)
-                .map_or_else(|| h.t0.ers_realized_deploy_w(p).1, |d| d.p_elec_used_w);
+                .map_or_else(|| h.t0.ers_realized_deploy_w(vi, p).1, |d| d.p_elec_used_w);
             h.pack.step_power(&mut st, pe, dt);
             (pe, 0.0)
         } else if cmd.harvest_w > 0.0 {
@@ -720,7 +720,6 @@ fn t0_deploy_force_is_piecewise_linear_between_the_knots() {
     let taper = &ers_block.deployment.taper_vs_speed;
     let cap_w = ers_block.deployment.power_limit_kw * 1e3;
     let eta = h.t0.ers_eta();
-    let p_mech_max = h.t0.ers_p_mech_max_w();
     let factor = ers_block.elec_mech_factor.unwrap_or(0.97);
 
     // Random interior speeds across the taper domain (splitmix-style counter, no clock/rand).
@@ -739,7 +738,9 @@ fn t0_deploy_force_is_piecewise_linear_between_the_knots() {
             let t = (v_kph - xs[k - 1]) / (xs[k] - xs[k - 1]);
             (ys[k - 1] + t * (ys[k] - ys[k - 1])).clamp(0.0, 1.0)
         };
-        let p_mech = (cap_w * frac * factor).min(p_mech_max).max(0.0);
+        // The binding mechanical ceiling is the machine's own τ(ω) at the ENGAGED gear's crank speed
+        // (D-M6-13 Layer 3), no longer the ratio-invariant max(τ·ω) over the whole map.
+        let p_mech = (cap_w * frac * factor).min(h.t0.ers_mech_cap_w(v)).max(0.0);
         let expect = eta * p_mech / v.max(1.0);
         let got = h.t0.tractive_force(v) - h.t0.mech_tractive_force(v);
         assert!(
