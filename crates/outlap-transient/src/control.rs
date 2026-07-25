@@ -369,6 +369,24 @@ pub trait SlowStack {
     fn temp_c(&self) -> f64;
 }
 
+/// The governed machine's thermal network (LPTN) as a slow subsystem (Layer 2 Phase D, D-M6-13).
+/// Like [`SlowStack`] the concrete implementation lives at the Python boundary (wrapping the QSS
+/// `MachineThermal` primitive), so the wasm-clean transient crate never depends on the QSS thermal
+/// machinery. Marched only on the slow clock (never the hot RK path); allocation-free per call.
+///
+/// The winding temperature is a genuine time-domain state here (heat in − cooling out, integrated in
+/// real time), so it settles at an equilibrium and is carried across a stint's lap boundaries — the
+/// physically-sound continuity the QSS distance march cannot provide.
+pub trait MachineThermalStack {
+    /// Advance the winding LPTN by `dt_s` with the average deploy `loss_w` (W) heating the winding
+    /// and the crank `omega_rad_s` (rad/s) driving convective cooling over the interval.
+    fn on_slow_step(&mut self, dt_s: f64, loss_w: f64, omega_rad_s: f64);
+    /// The current winding-thermal torque derate, `0..1` — the deploy multiplies its command by it.
+    fn derate(&self) -> f64;
+    /// The current winding temperature, °C (published as a channel).
+    fn winding_temp_c(&self) -> f64;
+}
+
 /// The per-step state a boundary [`ErsGovernor`] decides on. Assembled by the solver once per step
 /// at the boundary from the current fast state and the slow-clock-refreshed pack limits.
 #[derive(Clone, Copy, Debug, Default)]
@@ -393,6 +411,11 @@ pub struct ErsStepInput {
     /// Full-throttle mechanical drive power available at this speed, W — the ICE surplus the K may
     /// back-drive against for the part-throttle / super-clip recharge phases.
     pub mech_drive_power_w: f64,
+    /// The governed machine's winding-thermal derate this step, `0..1` (slow-clock refreshed) — caps
+    /// the deploy (Layer 2 Phase D, D-M6-13). Assembled to `1.0` when no machine-thermal network is
+    /// present; the solver sets it explicitly every step (the derived `Default` `0.0` is never used
+    /// by a governed run).
+    pub machine_derate: f64,
 }
 
 /// What a boundary [`ErsGovernor`] publishes for the powertrain block and the per-lap ledger.
@@ -404,6 +427,11 @@ pub struct ErsStepOut {
     pub deploy_power_w: f64,
     /// The realized electrical harvest banked into the pack, W (≥ 0).
     pub harvest_power_w: f64,
+    /// The governed machine's electrical→mechanical loss this step, W — heats the machine-thermal
+    /// LPTN winding (Layer 2 Phase D, D-M6-13). `0` when the machine is idle this step.
+    pub deploy_loss_w: f64,
+    /// The governed machine's crank shaft speed this step, rad/s — the LPTN cooling driver.
+    pub machine_omega_rad_s: f64,
 }
 
 /// The **2026 ERS energy manager** as the transient orchestrator's step-boundary controller

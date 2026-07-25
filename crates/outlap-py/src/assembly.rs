@@ -349,6 +349,55 @@ pub(crate) fn build_slow_stack(
     Ok(Some((Some(thermal), pack, pack_state)))
 }
 
+/// Assemble the governed machine's thermal LPTN alone (Layer 2 Phase D, D-M6-13) — the machine-thermal
+/// half of [`build_slow_stack`], for the transient tier (which carries the pack separately and marches
+/// the machine LPTN on its own slow clock). `None` when the plan names no `.emotor` pairing (the
+/// governed unit declares no thermal network) or a referenced file is absent (surfaced as a note).
+pub(crate) fn build_machine_thermal(
+    resolved: &ResolvedVehicle,
+    vl: &FsLoader,
+    conditions: &Conditions,
+    notes: &mut Vec<String>,
+) -> PyResult<Option<MachineThermal>> {
+    let outlap_qss::SlowStackPlan::Pack {
+        thermal: Some(pairing),
+        ..
+    } = outlap_qss::plan_slow_stack(&resolved.spec)
+    else {
+        return Ok(None);
+    };
+    let em = match outlap_schema::load::load_emotor(&pairing.emotor_path, vl) {
+        Ok(em) => em,
+        Err(e) if is_not_found(&e) => {
+            notes.push(format!(
+                "machine thermal `{}` not present — the transient machine runs thermally unlimited",
+                pairing.emotor_path
+            ));
+            return Ok(None);
+        }
+        Err(e) => return Err(schema_err(e)),
+    };
+    let ptm = match outlap_schema::load::load_ptm(&pairing.ptm_path, vl) {
+        Ok(ptm) => ptm,
+        Err(e) if is_not_found(&e) => {
+            notes.push(format!(
+                "drive-unit source `{}` not present — the transient machine runs thermally unlimited",
+                pairing.ptm_path
+            ));
+            return Ok(None);
+        }
+        Err(e) => return Err(schema_err(e)),
+    };
+    let thermal = MachineThermal::assemble(&em, conditions, ptm.mass_kg).map_err(err)?;
+    notes.extend(
+        thermal
+            .estimates()
+            .iter()
+            .map(|e| format!("machine thermal (T2/T3): {e}")),
+    );
+    Ok(Some(thermal))
+}
+
 /// Process-level cache of generated g-g-g-v envelopes. Generation is a seconds-scale cold step, so
 /// a notebook or sweep running many laps of the same car+grid pays it once. Keyed by the resolved
 /// vehicle hash, the session conditions, the envelope grid, and the coupling mode — everything that

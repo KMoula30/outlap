@@ -45,6 +45,28 @@ impl outlap_transient::SlowStack for PackSlowStack {
     }
 }
 
+/// The governed machine's thermal LPTN as the transient solver's machine-thermal slow stack (Layer 2
+/// Phase D, D-M6-13). Wraps the QSS [`MachineThermal`] primitive at the native edge (like
+/// [`PackSlowStack`]), so the wasm-clean transient crate keeps no QSS dependency. Marched on the slow
+/// clock with the accumulated deploy loss; its winding derate caps the ERS deploy, and — held on the
+/// persistent stint solver — the winding temperature carries across lap boundaries (real-time
+/// cooling), the continuity the QSS distance march cannot provide.
+pub(crate) struct MachineThermalController {
+    thermal: outlap_qss::MachineThermal,
+}
+
+impl outlap_transient::MachineThermalStack for MachineThermalController {
+    fn on_slow_step(&mut self, dt_s: f64, loss_w: f64, omega_rad_s: f64) {
+        let _ = self.thermal.step(loss_w, |_| None, omega_rad_s, dt_s);
+    }
+    fn derate(&self) -> f64 {
+        self.thermal.derate()
+    }
+    fn winding_temp_c(&self) -> f64 {
+        self.thermal.winding_temp_c()
+    }
+}
+
 /// Speed floor for the `P = F·v` deploy-force conversion, m/s (matches the T0 seam's floor).
 const ERS_V_FLOOR_MPS: f64 = 1.0;
 /// Driver demand at/above which the march treats the throttle as WIDE OPEN (the C5.12 super-clip
@@ -63,6 +85,11 @@ const FULL_THROTTLE_DEMAND: f64 = 0.98;
 /// clock (the netted `regen − traction` power), so the realize step here only clips + accounts.
 pub(crate) struct ErsController {
     coupling: ErsCoupling,
+    /// The governed machine (Layer 2, D-M6-13): its real `η(rpm, τ)` map drives the deploy force +
+    /// electrical draw and its regen envelope the harvest ceiling — no flat-0.97 fallback (assembly
+    /// hard-errors a policy-governed car whose machine map is absent). `None` only when unused. The
+    /// winding-thermal derate arrives per step via [`ErsStepInput::machine_derate`].
+    machine: Option<outlap_qss::GovernedMachine>,
     ledger: LapEnergyLedger<f64>,
     /// Caller-owned C5.12 ramp-episode accumulators (the manager mutates nothing).
     prev_k_power_w: f64,
@@ -75,11 +102,18 @@ pub(crate) struct ErsController {
 }
 
 impl ErsController {
-    /// Build the governor from the assembled coupling + the caliper capacity. `schedule_s` is the
-    /// arc-length grid a `Policy::Schedule` is sampled on (empty for the rule-based policy).
-    pub(crate) fn new(coupling: ErsCoupling, max_brake_force_n: f64, schedule_s: Vec<f64>) -> Self {
+    /// Build the governor from the assembled coupling, the governed machine, and the caliper
+    /// capacity. `schedule_s` is the arc-length grid a `Policy::Schedule` is sampled on (empty for
+    /// the rule-based policy).
+    pub(crate) fn new(
+        coupling: ErsCoupling,
+        machine: Option<outlap_qss::GovernedMachine>,
+        max_brake_force_n: f64,
+        schedule_s: Vec<f64>,
+    ) -> Self {
         Self {
             coupling,
+            machine,
             ledger: LapEnergyLedger::new(),
             prev_k_power_w: 0.0,
             ramp_reduced_w: 0.0,
@@ -112,32 +146,6 @@ impl ErsController {
             Err(i) => i.min(self.schedule_s.len() - 1),
         }
     }
-
-    /// The realized `(p_mech, p_elec_drawn)` for a pack-clipped electrical deploy demand — the
-    /// electrical draw is back-solved when the machine's mechanical ceiling binds, so the pack pays
-    /// only for power the machine can convert (mirrors `T0Vehicle::ers_realized_deploy_w`).
-    fn realized_deploy(&self, p_elec: f64) -> (f64, f64) {
-        let rb = self.coupling.manager.rulebook();
-        let p_mech_uncapped = rb.mech_deploy_w(p_elec);
-        let p_mech = p_mech_uncapped.min(self.coupling.p_mech_max_w).max(0.0);
-        let p_elec_real = if p_mech_uncapped > self.coupling.p_mech_max_w {
-            rb.mech_harvest_w(p_mech) // machine-bound: back-solve the electrical draw (p_mech / 0.97)
-        } else {
-            p_elec.max(0.0)
-        };
-        (p_mech, p_elec_real)
-    }
-
-    /// The additive deploy wheel force for a realized electrical draw (×0.97 → machine ceiling →
-    /// ×η / v), mirroring `T0Vehicle::ers_deploy_force_n`.
-    fn deploy_force(&self, v: f64, p_elec: f64) -> f64 {
-        let rb = self.coupling.manager.rulebook();
-        let p_mech = rb
-            .mech_deploy_w(p_elec)
-            .min(self.coupling.p_mech_max_w)
-            .max(0.0);
-        self.coupling.eta * p_mech / v.max(ERS_V_FLOOR_MPS)
-    }
 }
 
 impl outlap_transient::ErsGovernor for ErsController {
@@ -167,7 +175,14 @@ impl outlap_transient::ErsGovernor for ErsController {
         } else {
             (0.0, 0.0, 0.0) // coasting: the manager idles
         };
-        let mech_regen_envelope_w = e.p_mech_max_w * ErsCoupling::fade(inp.v);
+        // Harvest ceiling 1: the machine's real regen mechanical envelope at this speed (Layer 2,
+        // D-M6-13), else 0 (no on-envelope gear ⇒ no regen this speed). No scalar proxy.
+        let mech_regen_envelope_w = self
+            .machine
+            .as_ref()
+            .and_then(|m| m.regen_envelope_w(inp.v))
+            .unwrap_or(0.0)
+            * ErsCoupling::fade(inp.v);
         let di = DecideInput {
             v: inp.v,
             driver_demand,
@@ -201,10 +216,20 @@ impl outlap_transient::ErsGovernor for ErsController {
         // matching the QSS side's own "oversized pack" flag; no committed vehicle triggers it.
         if cmd.deploy_w > 0.0 {
             let p_elec = cmd.deploy_w.min(inp.discharge_limit_w.max(0.0));
-            let (_p_mech, p_elec_real) = self.realized_deploy(p_elec);
-            out.deploy_force_n = self.deploy_force(inp.v, p_elec_real);
-            out.deploy_power_w = p_elec_real;
-            realized.deploy_w = p_elec_real;
+            // Layer 2 (D-M6-13): the governed machine's real η(rpm, τ) deploy, derated by the
+            // winding-thermal state — force, electrical draw, loss, shaft speed. No flat-0.97
+            // fallback (assembly guarantees the map); a `None` (no on-envelope gear) means no deploy.
+            if let Some(dep) = self
+                .machine
+                .as_ref()
+                .and_then(|m| m.deploy(inp.v, p_elec, None, self.coupling.eta, inp.machine_derate))
+            {
+                out.deploy_force_n = dep.force_n;
+                out.deploy_power_w = dep.p_elec_used_w;
+                out.deploy_loss_w = dep.loss_w;
+                out.machine_omega_rad_s = dep.omega_rad_s;
+                realized.deploy_w = dep.p_elec_used_w;
+            }
         } else if cmd.harvest_w > 0.0 {
             let p_elec = cmd.harvest_w.min(inp.regen_limit_w.max(0.0));
             out.harvest_power_w = p_elec;
@@ -658,6 +683,9 @@ pub(crate) struct PreparedTransient {
     notes: Vec<String>,
     /// The vehicle's battery pack + its seeded state (`None` when the car carries no battery).
     pack: Option<(Pack, PackState)>,
+    /// The governed machine's thermal LPTN (Layer 2 Phase D, D-M6-13) — `None` when the governed unit
+    /// declares no `.emotor`. Carried across stint laps on the persistent solver (real-time cooling).
+    machine_thermal: Option<MachineThermalController>,
     /// The per-wheel tyre-thermal ring + wear stack (`None` unless `tire_thermal` opted in).
     tire_stack: Option<outlap_transient::TireThermalStack<f64>>,
     /// The gear-shift FSM (`None` for a single-speed car or one declaring no shift time).
@@ -702,6 +730,9 @@ struct LapSubsystems {
     shifter: Option<outlap_transient::Shifter<f64>>,
     lift: outlap_transient::LiftSchedule,
     tire_stack: Option<outlap_transient::TireThermalStack<f64>>,
+    /// The governed machine's thermal LPTN (Layer 2 Phase D, D-M6-13) — `None` when the car has no
+    /// `.emotor` on its governed unit; carried across stint laps on the persistent solver.
+    machine_thermal: Option<MachineThermalController>,
     fuel: Option<(outlap_transient::FuelSlow, f64)>,
 }
 
@@ -734,6 +765,9 @@ fn run_solver_lap<B: outlap_transient::TierBlocks<f64>>(
     solver = solver.with_lift(sub.lift);
     if let Some(stack) = sub.tire_stack {
         solver = solver.with_tire_thermal(stack);
+    }
+    if let Some(mt) = sub.machine_thermal {
+        solver = solver.with_machine_thermal(Box::new(mt));
     }
     if let Some((fuel_slow, initial_kg)) = sub.fuel {
         solver = solver.with_fuel(fuel_slow, initial_kg);
@@ -777,6 +811,9 @@ fn run_solver_stint<B: outlap_transient::TierBlocks<f64>>(
     solver = solver.with_lift(sub.lift);
     if let Some(stack) = sub.tire_stack {
         solver = solver.with_tire_thermal(stack);
+    }
+    if let Some(mt) = sub.machine_thermal {
+        solver = solver.with_machine_thermal(Box::new(mt));
     }
     if let Some((fuel_slow, initial_kg)) = sub.fuel {
         solver = solver.with_fuel(fuel_slow, initial_kg);
@@ -903,6 +940,11 @@ pub(crate) fn prepare_transient(
 
     // --- The T2 block set, through the shared assembly pipeline. ----------------------------------
     let mut pack = load_pack(&resolved, &vl, &mut notes)?;
+    // The governed machine's thermal LPTN (Layer 2 Phase D, D-M6-13): marched on the slow clock, its
+    // winding derate caps the deploy, and it carries across stint laps on the persistent solver.
+    let machine_thermal =
+        crate::assembly::build_machine_thermal(&resolved, &vl, &conditions, &mut notes)?
+            .map(|thermal| MachineThermalController { thermal });
     let mut interner = outlap_transient::ChannelInterner::new();
     let t2_opts = outlap_vehicle::T2Options {
         battery_present: pack.is_some(),
@@ -1132,17 +1174,32 @@ pub(crate) fn prepare_transient(
                 let mean_radius = blocks.mean_wheel_radius();
                 let max_brake_force_n = t2_opts.max_brake_torque_nm / mean_radius;
                 let schedule_s = schedule_stations(length, n_stations);
+                // Layer 2 (D-M6-13): the governed machine's real η(rpm, τ) map drives the T2/T3
+                // deploy — a policy-governed car MUST have it ingested (no flat-0.97 fallback).
+                let machine = t1v.powertrain().governed_machine();
+                if machine.is_none() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "policy-governed car has no installed MGU-K efficiency map — Layer 2 \
+                         (D-M6-13) needs its real η(rpm, τ); author + install the governed `.ptm` \
+                         efficiency/loss sidecar (there is no flat-0.97 fallback)",
+                    ));
+                }
                 notes.push(format!(
-                    "T2 2026 ERS energy manager active: the MGU-K deploys on the C5.2.8 taper, \
-                     harvests under braking/lift/super-clip, and enforces the per-lap Recharge \
-                     budget{}",
+                    "T2 2026 ERS energy manager active: the MGU-K deploys on the C5.2.8 taper (real \
+                     η(rpm, τ) machine efficiency), harvests under braking/lift/super-clip, and \
+                     enforces the per-lap Recharge budget{}",
                     if override_active {
                         " (override/Overtake enabled)"
                     } else {
                         ""
                     }
                 ));
-                Some(ErsController::new(coupling, max_brake_force_n, schedule_s))
+                Some(ErsController::new(
+                    coupling,
+                    machine,
+                    max_brake_force_n,
+                    schedule_s,
+                ))
             }
             None => None,
         }
@@ -1159,6 +1216,7 @@ pub(crate) fn prepare_transient(
         resolved_hash: hash,
         notes,
         pack,
+        machine_thermal,
         tire_stack,
         shifter,
         ers,
@@ -1290,6 +1348,7 @@ pub(crate) fn solve_transient_lap(
         resolved_hash,
         mut notes,
         pack,
+        machine_thermal,
         tire_stack,
         shifter,
         ers,
@@ -1321,6 +1380,7 @@ pub(crate) fn solve_transient_lap(
         shifter,
         lift,
         tire_stack,
+        machine_thermal,
         fuel,
     };
     // Branch on the tier ONCE (per lap, not per step) into the monomorphised generic solver.
@@ -1602,6 +1662,7 @@ pub(crate) fn solve_transient_stint(
         resolved_hash,
         mut notes,
         pack,
+        machine_thermal,
         tire_stack,
         shifter,
         ers,
@@ -1637,6 +1698,7 @@ pub(crate) fn solve_transient_stint(
         shifter,
         lift,
         tire_stack,
+        machine_thermal,
         fuel,
     };
     let (lap, lap_end_idx, diverged, provenance) = match blocks {

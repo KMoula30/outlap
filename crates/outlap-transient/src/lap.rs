@@ -40,7 +40,9 @@ use outlap_vehicle::{
     WheelGeometry,
 };
 
-use crate::control::{ErsGovernor, ErsStepInput, LiftSchedule, Shifter, SlowStack};
+use crate::control::{
+    ErsGovernor, ErsStepInput, LiftSchedule, MachineThermalStack, Shifter, SlowStack,
+};
 use crate::line_table::LineTable;
 use crate::result::TransientLap;
 use crate::tire_thermal::TireThermalStack;
@@ -619,6 +621,15 @@ pub struct TransientSolver<T, B = T2Blocks<T>> {
     // advances on the same decimated slow clock as the battery; its held grip/pressure override lives
     // on `blocks.tire`.
     tire_thermal: Option<TireThermalStack<T>>,
+    /// The governed machine's thermal LPTN (Layer 2 Phase D, D-M6-13): the fourth slow subsystem.
+    /// Absent ⇒ no machine-thermal derate. Marched on the same decimated slow clock as the battery
+    /// with the accumulated deploy loss; its winding derate caps the ERS deploy and — carried across
+    /// stint laps on the persistent solver — gives the real-time thermal continuity QSS cannot.
+    machine_thermal: Option<Box<dyn MachineThermalStack>>,
+    /// Governed-machine deploy loss accumulated since the last slow-clock fire, J.
+    machine_loss_accum: T,
+    /// The most recent governed-machine crank speed, rad/s (the LPTN cooling driver over the window).
+    machine_omega_last: T,
     /// The fuel-mass slow state (M6/PR5, §8.1). Absent ⇒ constant mass (byte-identical to the
     /// pre-fuel skeleton). Burns the ICE share each fast step; drains + fans mass/CG out on the slow
     /// clock through [`T2Blocks::apply_mass_state`].
@@ -721,6 +732,9 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
             slow_extra: Vec::new(),
             ers: None,
             tire_thermal: None,
+            machine_thermal: None,
+            machine_loss_accum: T::zero(),
+            machine_omega_last: T::zero(),
             fuel: None,
             actuation,
             torque_scale: T::one(),
@@ -802,6 +816,16 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
         self
     }
 
+    /// Attach the governed machine's thermal LPTN (consuming, Layer 2 Phase D, D-M6-13): the winding
+    /// heats from the deploy loss on the slow clock, and its derate caps the ERS deploy. Carried
+    /// across a stint's laps on the persistent solver (real-time cooling continuity). Without one the
+    /// machine runs thermally unlimited (`derate ≡ 1`).
+    #[must_use]
+    pub fn with_machine_thermal(mut self, stack: Box<dyn MachineThermalStack>) -> Self {
+        self.machine_thermal = Some(stack);
+        self
+    }
+
     /// Attach the per-wheel tire-thermal ring + wear stack (consuming, M5 PR3): the tyres warm, wear,
     /// and degrade over the lap, and their grip window + gas-law pressure feed the force call. Without
     /// one the lap runs frozen tyres (the pre-M5 behaviour). The seeded (warm) override is installed
@@ -834,6 +858,14 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
     #[must_use]
     pub fn fuel_remaining_kg(&self) -> Option<f64> {
         self.fuel.as_ref().map(|f| f.fuel_kg)
+    }
+
+    /// The governed machine's current winding temperature, °C — `None` when no machine-thermal
+    /// network is attached (Layer 2 Phase D, D-M6-13). The state a stint carries across lap
+    /// boundaries; surfaced for the loaded-model report and the stint stability gate.
+    #[must_use]
+    pub fn machine_winding_temp_c(&self) -> Option<f64> {
+        self.machine_thermal.as_ref().map(|m| m.winding_temp_c())
     }
 
     /// The assembler-produced schedule (registration index order of the block specs).
@@ -982,6 +1014,7 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
     }
 
     /// Advance the simulation by one fixed step (control update + relaxation + RK sweep + slow clock).
+    #[allow(clippy::too_many_lines)] // one sequential step: ERS boundary + machine-thermal + RK sweep
     pub fn step(&mut self) {
         let dt = self.cfg.dt;
 
@@ -1021,11 +1054,21 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
                 discharge_limit_w: self.discharge_limit_w.to_f64().unwrap_or(f64::INFINITY),
                 regen_limit_w: self.regen_limit_w.to_f64().unwrap_or(0.0),
                 mech_drive_power_w: mech_drive_power.to_f64().unwrap_or(0.0).max(0.0),
+                // The winding-thermal derate the deploy honours this step (Layer 2 Phase D): the
+                // slow-clock-refreshed value from the machine-thermal stack, else `1.0` (unlimited).
+                machine_derate: self.machine_thermal.as_ref().map_or(1.0, |m| m.derate()),
             };
             let out = ers.decide(&inp);
             self.ers_deploy_force_n = T::from(out.deploy_force_n).unwrap_or_else(T::zero);
             self.ers_deploy_power_w = T::from(out.deploy_power_w).unwrap_or_else(T::zero);
             self.ers_harvest_power_w = T::from(out.harvest_power_w).unwrap_or_else(T::zero);
+            // Accumulate the governed machine's deploy loss (energy) heating the winding on the next
+            // slow fire, and record the crank speed driving its cooling over the window (Phase D).
+            self.machine_loss_accum = self.machine_loss_accum
+                + T::from(out.deploy_loss_w * inp.dt).unwrap_or_else(T::zero);
+            if out.machine_omega_rad_s > 0.0 {
+                self.machine_omega_last = T::from(out.machine_omega_rad_s).unwrap_or_else(T::zero);
+            }
             self.ers = Some(ers);
         }
 
@@ -1149,6 +1192,19 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
             ex.stack.on_slow_step(slow_dt, p);
             ex.accum = T::zero();
         }
+        // March the governed machine's thermal LPTN over the same window (Layer 2 Phase D): the
+        // accumulated deploy loss heats the winding, the last crank speed drives cooling. The loss
+        // accumulator resets; the winding STATE persists (carried across stint laps → continuity).
+        if let Some(mt) = self.machine_thermal.as_mut() {
+            let loss_j = self.machine_loss_accum.to_f64().unwrap_or(0.0);
+            let avg_loss = if slow_dt > 0.0 { loss_j / slow_dt } else { 0.0 };
+            mt.on_slow_step(
+                slow_dt,
+                avg_loss,
+                self.machine_omega_last.to_f64().unwrap_or(0.0),
+            );
+        }
+        self.machine_loss_accum = T::zero();
         self.slow_pending_steps = 0;
         self.regen_limit_w = T::from(slow.regen_power_limit_w()).unwrap_or_else(T::zero);
         self.discharge_limit_w =
