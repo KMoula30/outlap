@@ -19,8 +19,10 @@ other project's source was consulted.
 - **FIA 2026 Formula 1 Regulations, Section C [Technical], Issue 19 (2026-06-25)** — articles
   C5.2.3–C5.2.5 (fuel-energy flow), C5.2.7 (±350 kW ERS-K electrical cap), C5.2.8 (deployment and
   override speed tapers), C5.2.9 (the 4 MJ usable SoC window), C5.2.10 (the per-lap Recharge
-  budget and the override bonus), C5.2.11 (500 Nm crank torque cap), C5.2.14 / C5.2.21 (the fixed
-  0.97 electrical↔mechanical correction), C5.12.4–C5.12.7 (the power-demand ramp-down).
+  budget and the override bonus), C5.2.11 (MGU-K crank-referenced torque management — see
+  ["The shared crank"](#the-shared-crank--one-shaft-two-sources) for what outlap does and does not
+  take from it), C5.2.14 / C5.2.21 (the fixed 0.97 electrical↔mechanical correction),
+  C5.12.4–C5.12.7 (the power-demand ramp-down).
 - **FIA 2026 Formula 1 Regulations, Section B [Sporting], Issue 07 (2026-06-25)** — B7.2
   (override activation / Detection Gap; per-event parameters).
 
@@ -53,9 +55,12 @@ Two consequences the tests pin down:
   under-count harvest by 3% and over-count deploy by 3% — a systematic error inside any ≤ 1%
   parity band.
 
-The MGU-K torque cap (C5.2.11, 500 Nm crank-referenced) binds before the power cap at low speed;
-it is carried by the MGU-K `.ptm` torque envelope (no new schema field) and min-composed on the
-mechanical side: `P ≤ τ(ω)·ω`.
+The MGU-K's **torque** limit binds before its power cap at low speed. It is carried by the
+machine's own `.ptm` peak envelope (no new schema field) and min-composed on the mechanical side,
+`P ≤ τ(ω)·ω`, with `ω` the **shared-crank** speed (below). Note what is *not* modelled: outlap
+enforces no fixed numerical crank-torque figure. The 2026 regulations manage MGU-K torque through
+homologated real-time sensing rather than a single published number, so a hard-coded value would
+be a fabricated citation; the shipped machine's own ~223 N·m envelope is the binding limit.
 
 ## Deployment tapers — evaluated piecewise-linearly (a recorded Decision #30 exception)
 
@@ -161,6 +166,67 @@ the deploy/regen fraction (scaling the budget-clipped envelope command) and the 
 station for the M6 PR4 wiring. The rule-based and scheduled policies emit the same `ErsCommand`
 type, so tier wiring and the parity gate are policy-agnostic.
 
+## The shared crank — one shaft, two sources
+
+A 2026 F1 MGU-K is **bolted to the crankshaft** through a fixed single-speed reduction. It is not a
+second drive unit with a gearbox of its own: whatever gear the car is in, the machine turns at
+whatever speed the engine turns at. outlap models a drivetrain node that is the `output` of two or
+more sources — `crank` on `f1_2026`, with the 8-speed gearbox and the LSD on the shared couplers
+below it — as a genuine shared shaft rather than a topology string.
+
+For the engaged gear `g` at road speed `v`, evaluated in **fixed source-declaration order** (the
+engine first, then the machine):
+
+```
+ω_crank = ratio(g)/r_wheel · v                     # ONE speed, both sources
+τ_crank = τ_ice(ω_crank) + τ_k(ω_crank)            # summed at the shaft
+F_wheel = τ_crank · ratio(g) · η(g) / r_wheel      # the gearbox ratio applied ONCE, to the sum
+F_wheel × torque_scale                             # a shift cut interrupts BOTH sources
+```
+
+Three consequences, and one deliberate non-consequence.
+
+1. **The machine's torque envelope binds at the true crank speed.** `τ_k` is the machine's own
+   `.ptm` peak envelope read at `ω_crank`, so below its base speed the machine is *torque*-limited:
+   a ~223 N·m MGU-K in first gear delivers `τ·ratio·η/r ≈ 11 kN` at the wheel and cannot reach its
+   rated 350 kW no matter what the manager commands. The previous model evaluated the machine at
+   whichever of the eight gears maximised `τ(ω)·ω`, which meant the *same* physical shaft was
+   modelled at 50 000 rpm for the machine and 15 000 rpm for the engine at the same instant, and
+   made the deploy force behave as `η·P/v` — unbounded towards standstill.
+2. **The gear is chosen by the engine alone.** The engaged gear is the one maximising the reference
+   (first-declared, non-governed) source's wheel force — exactly the gear the mechanical traction
+   ceiling already assumes. The machine adds its crank torque *in that gear*; it never pulls the
+   choice. The mechanical traction curve is therefore untouched, and any change in a hybrid's lap is
+   attributable to the machine.
+3. **A shift cut reaches the machine.** Because both sources sit upstream of the gearbox, the shift
+   FSM's `torque_scale` interrupts the combined crank torque. The cut is applied in exactly one
+   place — the governor — where it scales the deploy force, the pack draw and the winding loss
+   *together*. (Scaling only the force, as an earlier revision did, let a mid-shift machine drain
+   the pack and heat its winding while delivering nothing.)
+
+Because both sources share one ratio, summing at the crank and applying the ratio once is
+algebraically identical to applying that ratio to each and summing at the wheel. The additive
+force-adder structure is therefore already the crank sum — *provided* both sources are pinned to
+the same gear, which is what this formulation supplies. Both solver families evaluate it through
+one shared object, so the QSS march and the transient governor cannot drift apart (tier parity
+gate #4 measures physics, not two rule copies).
+
+**The non-consequence: no numerical crank-torque cap.** C5.2.11 governs MGU-K crank torque, but the
+2026 regulations manage it through homologated real-time sensing rather than one published figure,
+so outlap enforces **no** hard number and adds no schema field for one. The binding gear-referenced
+limit is the machine's own `.ptm` envelope at `ω_crank` — which is what a torque cap would be for
+anyway. The node is **kinematic**: crank inertia, torsional compliance and clutch state are not
+modelled (a torque sum, not a shaft-dynamics state).
+
+![The shared crank: pinning the MGU-K to the engaged gear](img/shared_crank.png)
+
+Clean-room: the shared-shaft torque summation is the standard parallel-hybrid torque-coupling
+formulation — Guzzella & Sciarretta, *Vehicle Propulsion Systems*, 3rd ed., Springer 2013, §4
+(parallel hybrid, torque addition at a common shaft); Ehsani, Gao & Emadi, *Modern Electric, Hybrid
+Electric, and Fuel Cell Vehicles*, 2nd ed., CRC 2010, ch. 7 (parallel HEV drivetrain torque
+coupling) — applied to the F1 driveline reduction of Perantoni & Limebeer, *Vehicle System
+Dynamics* 52(5), 2014.
+
 ## QSS tier wiring (M6 PR2)
 
 The quasi-steady tier consumes the manager inside its slow-state march: per station along the
@@ -174,11 +240,10 @@ electric share only, never the ICE.
 ![QSS energy-manager wiring — an f1_2026 lap](img/ers_qss_lap.png)
 
 **Deployment** (electrical → wheel force): `min(cap·taper(v), pack discharge ceiling)` → × 0.97
-(C5.2.14) → `min(machine mechanical ceiling)` → × η_driveline → `/v`. Both conversion factors
-stay distinct: 0.97 is the regulation's electrical→mechanical crank factor, η the crank→wheel
-driveline loss. The C5.2.11 crank torque cap is not separately enforced at this tier — the MGU-K
-`.ptm` is a bare-machine map with no declared reduction ratio, so the ratio-invariant machine
-power ceiling `max(τ·ω)` is the binding proxy (T2 enforces torque through the gearbox, M6 PR4).
+(C5.2.14) → `min(machine mechanical ceiling at the engaged gear)` → × η_driveline → `/v`. Both
+conversion factors stay distinct: 0.97 is the regulation's electrical→mechanical crank factor, η
+the crank→wheel driveline loss. The machine ceiling is the **gear-referenced** `τ(ω_crank)·ω_crank`
+of the shared-crank formulation below — no longer the ratio-invariant `max(τ·ω)` proxy.
 The uncoupled pedal availability runs the same rulebook curve — retiring the tier's old
 Hermite-taper, no-0.97 shortcut:
 
@@ -190,7 +255,7 @@ gaps:
 
 | # | Ceiling | QSS form |
 |---|---------|----------|
-| 1 | machine envelope | `max(τ·ω)` over the `.ptm` map (symmetric-machine fallback) |
+| 1 | machine envelope | `τ_regen(ω_crank)·ω_crank` at the engaged gear (symmetric-machine fallback) |
 | 2 | low-speed fade | linear to zero below 2 m/s (the T2 constant) |
 | 3 | pack charge acceptance | `regen_power_limit_w` — design curve × kinetic derate ∧ CV taper |
 | 4 | blend authority | `brakes.regen_blend.max_regen_frac` × the braking demand |
@@ -250,9 +315,9 @@ throttle/brake/speed and the slow-clock-refreshed pack ceilings:
 
 - **Deploy** is an ADDITIVE MGU-K wheel force on top of the mechanical (drivetrain-unit) traction
   curve — the sampled traction ceiling stays ERS-free, exactly as at T0/T1. The realize chain is the
-  same as QSS: `min(cap·taper(v), pack discharge ceiling)` → × 0.97 → machine mechanical ceiling →
-  × η / v. The pack **draw** is the manager's electrical deploy power ONLY (D-M6-10); the ICE covers
-  the rest of traction. A SoC-starved pack (`discharge_power_limit_w → 0` at the window floor) simply
+  same as QSS: `min(cap·taper(v), pack discharge ceiling)` → × 0.97 → machine mechanical ceiling at
+  the engaged gear → × η / v, then × the shift FSM's `torque_scale`. The pack **draw** is the
+  manager's electrical deploy power ONLY (D-M6-10); the ICE covers the rest of traction. A SoC-starved pack (`discharge_power_limit_w → 0` at the window floor) simply
   stops deploying — the car runs on the engine, no panic.
 - **Harvest** composes the identical five ceilings; the braking force is untouched, so the trajectory
   is regen-invariant (Decision #11) and only the banked energy differs. Full-throttle **super-clip**
@@ -271,9 +336,9 @@ physical window alone bounds the swing.
 separate rule-based mechanism), so a hybrid that deploys ~350 kW at T2 operates *outside* the
 ERS-free hull on corner exits — hull containment is therefore recorded, not asserted, for an ERS car
 (the Decision #48 pattern); the honest hybrid parity is gate #4 (fuel + ERS energy per lap, PR8). The
-C5.2.11 crank torque cap is likewise reused from the T0 ratio-invariant machine ceiling so the T2
-realization is byte-for-byte the T0 one (best for gate #4); a true through-the-gearbox torque cap
-(which only bites at low speed, where the power cap already dominates) is a recorded follow-up.
+machine torque limit is the same gear-referenced `τ(ω_crank)·ω_crank` the QSS march applies — both
+tiers evaluate it through one shared object, so the T2 realization cannot drift from the QSS one
+(that lockstep IS what makes gate #4 measure physics rather than two rule copies).
 
 **Machine efficiency seam.** Both tiers' electric-drive efficiency (regen recovery and motoring
 draw) is sampled from the machine's `.ptm` efficiency map into a speed-indexed curve at assembly
@@ -295,6 +360,12 @@ pack leaves the branch inert and is byte-identical to before.
 Recorded per §15; all are event config or stage-2 territory:
 
 - per-sector 250 kW deployment caps (C5.2.8(iii)) and the non-public low-grip curves (DOC-111);
+- **crank shaft dynamics**: the shared crank node is a kinematic torque sum, so crank inertia,
+  torsional compliance and clutch slip are absent — the engine and the machine are rigidly locked to
+  one speed. Adding a genuine shaft state (and with it engine/machine speed divergence during a
+  shift) is stage-2;
+- a numerical C5.2.11 crank-torque figure — deliberately, see
+  ["The shared crank"](#the-shared-crank--one-shaft-two-sources);
 - Boost-mode SECU detail (DOC-058); the 50 km/h standing-start rule; garage-recharge rules;
 - the override *Detection Gap* activation policy (B7.2 — press-confirmed within ≈1 s of the car
   ahead): stage-2; v1 exposes the unconditional per-run flag;
@@ -320,5 +391,8 @@ Recorded per §15; all are event config or stage-2 territory:
 ## Provenance
 
 Clean-room per CLAUDE.md rule 2: implemented from the FIA 2026 regulations cited above (primary
-sources; figures verified 2026-07-16 against Section C Issue 19 and Section B Issue 07). No
+sources; figures verified 2026-07-16 against Section C Issue 19 and Section B Issue 07), plus — for
+the shared-crank torque summation — the standard parallel-hybrid textbook treatments cited in
+["The shared crank"](#the-shared-crank--one-shaft-two-sources) (Guzzella & Sciarretta 2013 §4;
+Ehsani, Gao & Emadi 2010 ch. 7) and the F1 driveline reduction of Perantoni & Limebeer 2014. No
 external repository was consulted for this model.

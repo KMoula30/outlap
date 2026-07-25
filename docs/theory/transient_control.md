@@ -53,6 +53,13 @@ genuinely coasts through the cut and recovers drive over the clutch ramp. `f_cut
 shift in the re-engagement ramp, matching the qualitative shape of a seamless-shift race gearbox. It is
 surfaced as estimated, and `shift_time_s = 0` recovers the pre-PR6 instantaneous ideal shift exactly.
 
+**The cut reaches a crank-mounted machine too.** On a car whose energy manager governs an electrical
+machine bolted to the crank (an F1 MGU-K), the machine sits *upstream* of the gearbox, so an open
+driveline transmits neither the engine's torque nor its own. The same `torque_scale` therefore
+interrupts the electrical deploy — applied once, in the ERS governor, where it scales the deploy
+wheel force, the pack draw and the machine winding loss **together**. See
+[ers-energy-manager](ers-energy-manager.md#the-shared-crank--one-shaft-two-sources).
+
 **The engaged gear indexes no force.** The powertrain's wheel-force ceiling remains the *best-gear*
 traction envelope (the QSS tier already picks the gear at each speed), so the FSM's entire physical
 effect on the car is the torque interruption above. Gear-indexed traction curves — which would let a
