@@ -186,7 +186,11 @@ def test_energy_parity_gate4(track: Track) -> None:
     assert har0 > 1.0 and har2 > 1.0, "both tiers harvest"
     assert fuel0 > 0.0 and fuel2 > 0.0, "both tiers burn fuel"
 
-    # ASSERTED (≤1%): the per-lap Recharge budget is a shared rule → the harvest energy agrees.
+    # ASSERTED (≤1%): the per-lap Recharge budget is a shared rule → the harvest energy agrees. This
+    # survives Layer 2 (D-M6-13): the machine's REAL speed-dependent regen envelope still gives both
+    # tiers enough harvest opportunity on this braking-rich line to reach the shared per-lap Recharge
+    # budget, so they bank the same energy (T0=8.49, T2=8.50 MJ; both budget-limited, not
+    # envelope-limited). The cap is enforced identically — the shared rulebook, one source of truth.
     assert har_pct <= 1.0, (
         f"harvest energy per lap disagrees by {har_pct:.2f}% > 1% — the shared per-lap Recharge "
         "budget rule is not being enforced identically across tiers"
