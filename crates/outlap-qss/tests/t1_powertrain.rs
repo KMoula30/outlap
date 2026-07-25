@@ -339,7 +339,7 @@ fn gearbox_map_efficiency_assembles_for_t1() {
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
         suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
         tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
-        drivetrain: {units: [{id: u0, source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.2, 1.1], final_drive: 3.5, shift_time_s: 0.2, efficiency: {map: gb.parquet}}}, {diff: {type: open}}], wheels: [FL, FR]}]}\n\
+        drivetrain: {units: [{id: u0, source: ptm/u.ptm.yaml, output: crank}], couplers: [{coupler: {gearbox: {ratios: [3.2, 1.1], final_drive: 3.5, shift_time_s: 0.2, efficiency: {map: gb.parquet}}}, from: crank, to: gb_out}, {coupler: {diff: {type: open}}, from: gb_out, wheels: [FL, FR]}]}\n\
         brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
     let loader = MemLoader::new()
         .with("vehicle.yaml", veh)
@@ -464,7 +464,7 @@ fn a_declared_regen_envelope_is_used_verbatim() {
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
         suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
         tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
-        drivetrain: {units: [{id: u1, source: ptm/u.ptm.yaml, path: [{fixed_ratio: 1.0}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
+        drivetrain: {units: [{id: u1, source: ptm/u.ptm.yaml, path: [{diff: {type: open}}], wheels: [RL, RR]}]}\n\
         brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
     let loader = MemLoader::new()
         .with("vehicle.yaml", veh)
@@ -508,7 +508,7 @@ fn geared_unit_exposes_ascending_upshift_speeds() {
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 0.7, cz_front_a_m2: 0.0, cz_rear_a_m2: 0.0}}\n\
         suspension: {model: lumped_kc, front: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}, rear: {ride_rate_n_per_m: 30000.0, roll_stiffness_share: 0.5, roll_center_height_m: 0.05}}\n\
         tires: {front: tyr/slick.tyr.yaml, rear: tyr/slick.tyr.yaml}\n\
-        drivetrain: {units: [{id: u2, source: ptm/u.ptm.yaml, path: [{gearbox: {ratios: [3.5, 1.4], final_drive: 3.0, shift_time_s: 0.05, efficiency: 0.97}}, {diff: {type: open}}], wheels: [RL, RR]}]}\n\
+        drivetrain: {units: [{id: u2, source: ptm/u.ptm.yaml, output: crank}], couplers: [{coupler: {gearbox: {ratios: [3.5, 1.4], final_drive: 3.0, shift_time_s: 0.05, efficiency: 0.97}}, from: crank, to: gb_out}, {coupler: {diff: {type: open}}, from: gb_out, wheels: [RL, RR]}]}\n\
         brakes: {balance_bar: 0.6, disc: {front: {thermal_capacity_j_per_k: 30000.0, cooling_area_m2: 0.06}, rear: {thermal_capacity_j_per_k: 20000.0, cooling_area_m2: 0.04}}}\n";
     let loader = MemLoader::new()
         .with("vehicle.yaml", veh)

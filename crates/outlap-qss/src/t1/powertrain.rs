@@ -653,6 +653,8 @@ impl T1Powertrain {
     ///
     /// # Errors
     /// [`T1Error`] if a referenced `.ptm` fails to load/validate or a peak envelope cannot be fitted.
+    // One linear assembly procedure; the D-M6-13 rev-limit clamp pushed it past the pedantic cap.
+    #[allow(clippy::too_many_lines)]
     pub fn assemble(
         vehicle: &ResolvedVehicle,
         loader: &dyn SourceLoader,
@@ -665,6 +667,15 @@ impl T1Powertrain {
         // T2/T3 inherit these ceilings). `spec_to_slot` maps each spec unit index to its slot in
         // `units` (None for the governed machine) so the positional sidecar install reconciles.
         let governed = crate::graph::governed_unit_ids(spec);
+        // The regulatory engine rev limit (policy.max_engine_speed_rpm): clips every COMBUSTION
+        // unit's usable envelope at load. The engaged-gear scan then never selects a gear past it,
+        // so the crank — and transitively any machine welded to the crank — is speed-capped by
+        // regulation, not by whatever the `.ptm` happens to be authored to.
+        let rev_limit = spec
+            .policy
+            .as_ref()
+            .and_then(|p| p.max_engine_speed_rpm)
+            .map(|rpm| rpm * RPM_TO_RAD_PER_S);
         let mut units = Vec::with_capacity(spec.drivetrain.units.len());
         let mut spec_to_slot: Vec<Option<usize>> = Vec::with_capacity(spec.drivetrain.units.len());
         let mut governed_unit: Option<PtUnit> = None;
@@ -692,7 +703,7 @@ impl T1Powertrain {
                 continue;
             }
             spec_to_slot.push(Some(units.len()));
-            units.push(build_pt_unit(
+            let mut pt = build_pt_unit(
                 &spec.drivetrain,
                 unit,
                 i,
@@ -700,7 +711,18 @@ impl T1Powertrain {
                 r_rear,
                 loader,
                 &mut notes,
-            )?);
+            )?;
+            if let Some(cap) = rev_limit {
+                if pt.kind == PtmKind::Ice && cap < pt.omega_max {
+                    notes.push(format!(
+                        "drive unit {i}: the regulatory rev limit (policy.max_engine_speed_rpm) \
+                         clips the engine envelope — {:.0} rpm of authored map is unreachable",
+                        (pt.omega_max - cap) / RPM_TO_RAD_PER_S
+                    ));
+                    pt.omega_max = cap;
+                }
+            }
+            units.push(pt);
         }
         // Layer 3 (D-M6-13): flatten the governed machine's output node into a shared-crank view.
         // The reference source is the FIRST-DECLARED non-governed unit that outputs onto the same

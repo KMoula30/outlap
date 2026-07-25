@@ -78,8 +78,21 @@ pub struct DriveUnit {
     /// Optional `.emotor` thermal model — electric machines only (§9.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thermal: Option<EmotorRef>,
-    /// The source's private series reduction toward its terminus (present only for an actual
-    /// step-up/down). Empty when the source outputs directly onto a shared node.
+    /// The source's **internal** fixed reduction between the machine's own shaft and the shaft this
+    /// unit outputs onto — an F1 MGU-K's motor→crank step-up, say. This is the ONLY place a unit's
+    /// reduction is declared.
+    ///
+    /// A `.ptm` map is always read as referenced to the unit's **output shaft** (whatever `output`
+    /// or `wheels` names), regardless of what the map calls itself. Declaring `fixed_ratio` says
+    /// the map is referenced to the machine's own shaft instead, and this is the ratio between
+    /// them (machine speed ÷ output-shaft speed): the loader folds it into the unit's reduction at
+    /// load, so from then on every tier sees one consistent output-shaft frame and nothing
+    /// per-step has to know about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_ratio: Option<f64>,
+    /// The unit's **differential** (its only permitted content — enforced at load). An internal
+    /// reduction is [`Self::fixed_ratio`]; a gearbox belongs on the shared graph
+    /// [`Drivetrain::couplers`], where every source below it shares its ratios.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<Coupler>,
     /// The wheels this unit ultimately drives (the private-chain terminus). Empty when the source

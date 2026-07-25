@@ -30,6 +30,7 @@ const F1_PACK_WINDOW: [f64; 2] = [0.2, 0.9];
 /// The verified FIA Issue-19 `policy:` overlay (D-M6-5 breakpoints; knee exactly 2/7).
 fn f1_policy() -> Policy {
     Policy {
+        max_engine_speed_rpm: None,
         governs: vec!["mguk".into()],
         regulatory_window_mj: 4.0,
         deployment: Deployment {

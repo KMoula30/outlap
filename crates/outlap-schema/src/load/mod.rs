@@ -32,7 +32,6 @@ pub use merge::Overrides;
 pub use provenance::{Origin, ProvenanceMap};
 pub use report::LoadedModelReport;
 use report::ReportEntry;
-use topology::UnitSource;
 
 /// Options controlling a load.
 #[derive(Clone, Debug, Default)]
@@ -166,8 +165,23 @@ fn finish(
     // Stage 6: semantic checks.
     semantic::check_vehicle(&spec, &index, sources, root_id)?;
 
+    // Stage 6.5: fold each unit's internal `fixed_ratio` into its private reduction path.
+    //
+    // A `.ptm` map is always read as referenced to the shaft its unit outputs onto; `fixed_ratio`
+    // declares that the map is referenced to the machine's own shaft instead and supplies the ratio
+    // between the two. Folding it in HERE — once, at load — means the whole rest of the system (the
+    // topology walk, both tiers' chain flatten, the gear ladders, the shared-crank pin) sees a
+    // single consistent output-shaft frame and nothing per-step ever has to know about it. It is
+    // prepended, so it sits closest to the machine and any explicit `path` couplers follow it.
+    for unit in &mut spec.drivetrain.units {
+        if let Some(ratio) = unit.fixed_ratio.take() {
+            unit.path
+                .insert(0, crate::vehicle::Coupler::FixedRatio(ratio));
+        }
+    }
+
     // Referenced files: validate each and collect .ptm kinds for topology.
-    let unit_sources = load_referenced(
+    load_referenced(
         &spec,
         loader,
         sources,
@@ -178,7 +192,7 @@ fn finish(
     )?;
 
     // Stage 7: topology graph.
-    topology::check(&spec, &unit_sources, &index, sources, root_id)?;
+    topology::check(&spec, &index, sources, root_id)?;
 
     // Stage 8: estimation.
     estimate::estimate(&mut spec, &mut provenance, &mut report.estimated);
@@ -213,7 +227,7 @@ fn load_referenced(
     index: &SpanIndex,
     root_id: SourceId,
     options: &LoadOptions,
-) -> Result<Vec<Option<UnitSource>>> {
+) -> Result<()> {
     // Tires.
     for tyr_ref in [&spec.tires.front, &spec.tires.rear] {
         let (tyr, id, index, _) =
@@ -225,8 +239,9 @@ fn load_referenced(
     // other source — there is no longer a separate `ers.mgu_k` leg. A policy-governed unit's pack
     // must be loadable (the energy manager schedules it) — a hard error unless `allow_degraded`.
     load_battery_referenced(spec, loader, sources, report, index, root_id, options)?;
-    // Drive units: source .ptm (+ optional thermal .emotor).
-    let mut unit_sources = Vec::with_capacity(spec.drivetrain.units.len());
+    // Drive units: source .ptm (+ optional thermal .emotor). What KIND the map calls itself is
+    // deliberately not collected: the drivetrain shape is declared on the unit (`fixed_ratio`,
+    // `path`, `output`) and the load pipeline is agnostic to the map's own label (D-M6-13 Layer 3).
     for unit in &spec.drivetrain.units {
         let (ptm, id, index, _) =
             load_typed::<Ptm>(unit.source.as_str(), schema_name::PTM, loader, sources)?;
@@ -236,12 +251,8 @@ fn load_referenced(
                 load_typed::<Emotor>(thermal.as_str(), schema_name::EMOTOR, loader, sources)?;
             semantic::check_emotor(&em, &eindex, sources, eid)?;
         }
-        unit_sources.push(Some(UnitSource {
-            kind: ptm.kind,
-            upstream_ratio_applied: ptm.meta.upstream_ratio_applied.unwrap_or(true),
-        }));
     }
-    Ok(unit_sources)
+    Ok(())
 }
 
 /// The battery leg of [`load_referenced`]: validate each referenced `battery/1.x` pack in the

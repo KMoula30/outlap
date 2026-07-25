@@ -19,6 +19,7 @@ pub const GT_PACK_WINDOW: [f64; 2] = [0.3, 0.85];
 /// per C5.2.8(ii), 8.5 MJ harvest + 0.5 MJ override bonus, NO per-lap deploy budget.
 pub fn f1_policy() -> Policy {
     Policy {
+        max_engine_speed_rpm: None,
         governs: vec!["mguk".into()],
         regulatory_window_mj: 4.0,
         deployment: Deployment {

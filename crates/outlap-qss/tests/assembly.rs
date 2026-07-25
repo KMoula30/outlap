@@ -96,7 +96,7 @@ drivetrain:
   units:
     - id: du0
       source: ptm/flat.ptm.yaml
-      path: [{fixed_ratio: 8.0}]
+      fixed_ratio: 8.0
       wheels: [RL, RR]
 brakes:
   balance_bar: 0.6

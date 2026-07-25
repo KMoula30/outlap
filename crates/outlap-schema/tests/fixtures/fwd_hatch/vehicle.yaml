@@ -29,16 +29,25 @@ tires:
   front: tyr/slick.tyr.yaml
   rear: tyr/slick.tyr.yaml
 drivetrain:
+  # The gearbox lives on the shared graph (a unit's private `path` carries the diff only): the
+  # engine outputs onto `crank`, the box carries it down, the open diff terminates at the front
+  # wheels — the same shape as the f1_2026 reference, at hatchback ratios.
   units:
     - source: ptm/ice_v6.ptm.yaml
       id: ice
-      path:
-        - gearbox:
-            ratios: [3.5, 2.1, 1.4, 1.05, 0.85, 0.72]
-            final_drive: 4.06
-            shift_time_s: 0.25
-            efficiency: 0.96
-        - diff: { type: open }
+      output: crank
+  couplers:
+    - coupler:
+        gearbox:
+          ratios: [3.5, 2.1, 1.4, 1.05, 0.85, 0.72]
+          final_drive: 4.06
+          shift_time_s: 0.25
+          efficiency: 0.96
+      from: crank
+      to: gearbox_out
+    - coupler:
+        diff: { type: open }
+      from: gearbox_out
       wheels: [FL, FR]
 brakes:
   balance_bar: 0.66

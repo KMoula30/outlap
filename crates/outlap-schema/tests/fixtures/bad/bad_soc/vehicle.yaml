@@ -22,9 +22,15 @@ drivetrain:
   units:
     - id: ice
       source: ptm/ice_v6.ptm.yaml
-      path:
-        - gearbox: { ratios: [2.9, 2.2, 1.8], final_drive: 3.1, shift_time_s: 0.02 }
-        - diff: { type: lsd, preload_nm: 90.0 }
+      output: crank
+  couplers:
+    - coupler:
+        gearbox: { ratios: [2.9, 2.2, 1.8], final_drive: 3.1, shift_time_s: 0.02 }
+      from: crank
+      to: gearbox_out
+    - coupler:
+        diff: { type: lsd, preload_nm: 90.0 }
+      from: gearbox_out
       wheels: [RL, RR]
 # The bad (descending) soc_window now lives on the referenced pack document — check_battery
 # rejects it. This preserves the negative-test intent after the D-M6-13 single-source-of-truth move.

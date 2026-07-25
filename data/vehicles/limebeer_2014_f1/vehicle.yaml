@@ -41,8 +41,8 @@ drivetrain:
   units:
     - source: ptm/engine_560kw.ptm.yaml
       id: ice
+      # No `fixed_ratio`: the envelope is defined directly at the wheel shaft (R = 0.33 m).
       path:
-        - fixed_ratio: 1.0             # envelope defined directly at the wheel shaft (R = 0.33 m)
         - diff: { type: open }         # kd = 10.47 N·m·s/rad (Table 4) ~ open (kd -> 0 is open)
       wheels: [RL, RR]                 # rear-wheel drive (§2.5.2)
 brakes:

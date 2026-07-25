@@ -198,6 +198,18 @@ pub fn check_vehicle(
 /// time in [`check_policy_pack`] once the battery document is loaded. `governs`/id resolution is in
 /// [`check_drivetrain`].
 fn check_policy(policy: &crate::vehicle::Policy, s: &Spans, sources: &Sources) -> Result<()> {
+    if let Some(rpm) = policy.max_engine_speed_rpm {
+        if !rpm.is_finite() || rpm <= 0.0 {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/policy/max_engine_speed_rpm"),
+                format!(
+                    "`max_engine_speed_rpm: {rpm}` — the rev limit must be finite and positive"
+                ),
+                Some("the FIA 2026 V6 limit is 15000".into()),
+            ));
+        }
+    }
     positive(
         policy.regulatory_window_mj,
         "regulatory_window_mj",
@@ -468,6 +480,56 @@ fn check_drivetrain(spec: &Vehicle, s: &Spans, sources: &Sources) -> Result<()> 
         Ok(())
     };
     for (ui, unit) in spec.drivetrain.units.iter().enumerate() {
+        // A unit's private `path` carries its DIFFERENTIAL only (D-M6-13 Layer 3). There is exactly
+        // one way to declare each thing, regardless of what the `.ptm` calls itself: an internal
+        // reduction is the unit's `fixed_ratio` field (applied at load), and a gearbox belongs on
+        // the shared drivetrain graph (`drivetrain.couplers`), where every source below it — engine
+        // or machine — shares its ratios. Two spellings for one reduction would drift; a private
+        // gearbox would hide shift state from the graph.
+        for (pi, coupler) in unit.path.iter().enumerate() {
+            let (bad, fix) = match coupler {
+                Coupler::Diff(_) => continue,
+                Coupler::FixedRatio(_) => (
+                    "a `fixed_ratio` coupler",
+                    "declare the reduction as the unit's own `fixed_ratio:` field",
+                ),
+                Coupler::Gearbox(_) => (
+                    "a `gearbox` coupler",
+                    "move the gearbox to the shared graph: give this unit `output: <node>` and \
+                     carry the gearbox on `drivetrain.couplers` from that node",
+                ),
+            };
+            return Err(SchemaError::semantic(
+                sources,
+                s.at(&format!("/drivetrain/units/{ui}/path/{pi}")),
+                format!(
+                    "drive unit `{}` carries {bad} on its private `path` — `path` holds the \
+                     differential only",
+                    unit.id
+                ),
+                Some(fix.into()),
+            ));
+        }
+        // The unit's internal machine→output-shaft reduction must be a real, usable ratio: it
+        // divides the map's speed axis and multiplies its torque, so zero or negative is meaningless.
+        if let Some(ratio) = unit.fixed_ratio {
+            if !ratio.is_finite() || ratio <= 0.0 {
+                return Err(SchemaError::semantic(
+                    sources,
+                    s.at(&format!("/drivetrain/units/{ui}/fixed_ratio")),
+                    format!(
+                        "drive unit `{}` declares `fixed_ratio: {ratio}` — an internal reduction \
+                         must be a finite, positive ratio",
+                        unit.id
+                    ),
+                    Some(
+                        "use the machine-shaft-to-output-shaft ratio, e.g. `fixed_ratio: 3.333` \
+                         for a motor turning 3.333x the shaft it drives"
+                            .into(),
+                    ),
+                ));
+            }
+        }
         for (pi, coupler) in unit.path.iter().enumerate() {
             if let Coupler::Diff(diff) = coupler {
                 check_diff(diff, &format!("/drivetrain/units/{ui}/path/{pi}/diff"))?;

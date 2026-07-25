@@ -231,6 +231,12 @@ impl T0Vehicle {
         // --- Drive units (mechanical sources only; a policy-governed machine is excluded here and
         // force-added by the ERS block below — the D-M6-13 T0 de-dup) ---
         let governed = crate::graph::governed_unit_ids(spec);
+        // The regulatory engine rev limit (see the T1 twin in `t1/powertrain.rs::assemble`).
+        let rev_limit = spec
+            .policy
+            .as_ref()
+            .and_then(|p| p.max_engine_speed_rpm)
+            .map(|rpm| rpm * RPM_TO_RAD_PER_S);
         let mut units = Vec::with_capacity(spec.drivetrain.units.len());
         // The drivetrain node each mechanical unit outputs onto, parallel to `units` — the Layer-3
         // shared-crank lookup reads it to find the governed machine's reference source.
@@ -245,7 +251,12 @@ impl T0Vehicle {
             let r_wheel = driven_radius(&wheels, r_front, r_rear, i, &mut notes);
             let (base_ratio, base_eff, gearbox) = fold_path(&chain, i, &mut notes)?;
             let torque_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
-            let omega_max = torque_env.domain().1;
+            let mut omega_max = torque_env.domain().1;
+            if let Some(cap) = rev_limit {
+                if ptm.kind == outlap_schema::ptm::PtmKind::Ice && cap < omega_max {
+                    omega_max = cap; // the T1 twin records the note; T0 clamps identically
+                }
+            }
             let gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
             units.push(T0Unit {
                 torque_env,

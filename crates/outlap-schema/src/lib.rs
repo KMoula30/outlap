@@ -122,7 +122,10 @@ pub fn current_major(name: &str) -> u16 {
 /// minor). Additive/forward-compatible within a MAJOR; an unknown key in a file that declares a
 /// newer MINOR than this table is flagged as possibly-newer-schema.
 ///
-/// Per-document history — `vehicle`: **2.0** is the D-M6-13 ERS/drivetrain-restructure baseline
+/// Per-document history — `vehicle`: **2.1** adds `drivetrain.units[].fixed_ratio` (the unit's
+/// internal machine→output-shaft reduction — the ONLY way to declare one; `path` carries the diff
+/// only) and `policy.max_engine_speed_rpm` (the regulatory rev limit, applied as a load-time clamp
+/// on combustion envelopes). **2.0** is the D-M6-13 ERS/drivetrain-restructure baseline
 /// (MAJOR, no back-compat, no `outlap migrate`): the singleton `ers:` block and singleton
 /// `battery:` are replaced by an optional generic `policy:` overlay + an id-keyed `batteries:` map,
 /// and `drivetrain` gains a first-class graph (unit `id`/`output`, top-level `couplers`) with the
@@ -152,7 +155,7 @@ pub fn current_major(name: &str) -> u16 {
 pub fn current_minor(name: &str) -> u16 {
     match name {
         schema_name::PTM | schema_name::BATTERY | schema_name::TYR => 2,
-        schema_name::SIM => 1,
+        schema_name::SIM | schema_name::VEHICLE => 1,
         // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/track/conditions
         // (and anything unknown) have had no additive change since their `.0`.
         _ => 0,
