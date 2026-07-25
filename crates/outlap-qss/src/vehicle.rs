@@ -13,6 +13,7 @@ use outlap_schema::conditions::Conditions;
 use outlap_schema::io::SourceLoader;
 use outlap_schema::load::{load_ptm, load_tyr};
 use outlap_schema::ptm::TorqueCurve;
+use outlap_schema::refs::NodeId;
 use outlap_schema::tyr::Tyr;
 use outlap_schema::vehicle::{Coupler, Efficiency, Gearbox, Wheel};
 use outlap_schema::ResolvedVehicle;
@@ -104,15 +105,74 @@ struct T0Gear {
 struct T0Ers {
     /// The shared FIA-style rulebook (electrical caps, piecewise-linear tapers, 0.97 seam).
     rulebook: ErsRulebook<f64>,
-    /// Machine mechanical power ceiling `max(τ·ω)` over the map, W (ratio-invariant).
-    ///
-    /// The C5.2.11 crank torque cap is NOT separately enforced at T0: the MGU-K `.ptm` is a
-    /// bare-machine map with no declared ratio, so a crank-ω torque query would be wrong by the
-    /// (unknown) reduction; this ratio-invariant power ceiling is the binding proxy. T2 (M6 PR4)
-    /// enforces torque properly through the gearbox.
+    /// Machine mechanical power ceiling `max(τ·ω)` over the map, W (ratio-invariant) — the
+    /// speed-independent upper bound. It remains the reported machine ceiling and the regen proxy;
+    /// the **binding** deploy ceiling is now the gear-referenced [`Self::crank`] envelope below.
     p_mech_max_w: f64,
+    /// The shared-crank torque limit (D-M6-13 Layer 3): the governed machine's own `τ(ω)` envelope
+    /// evaluated at the **engaged** gear's crank speed. Layer 2 and earlier capped the T0 deploy by
+    /// the ratio-invariant `p_mech_max_w` alone, which let a torque-limited machine deliver its rated
+    /// power at every speed; pinning it to the crank makes the pedal-availability curve agree with
+    /// what the march actually realizes (so `driver_demand` stops mis-classifying deploy as
+    /// part-throttle harvest). `None` for a governed machine with no reachable crank node.
+    crank: Option<T0Crank>,
     /// Driveline (crank→wheel) efficiency applied to the ERS force.
     eta: f64,
+}
+
+/// The T0 view of a shared drivetrain node (D-M6-13 Layer 3) — the mirror of the T1 `CrankNode`,
+/// built from the point-mass gear ladders so both tiers pin the machine to the same engaged gear.
+///
+/// The engaged gear is chosen by the **reference source alone** (the first-declared non-governed
+/// unit on the node — the ICE), exactly as [`T0Vehicle::mech_tractive_force`] already picks it, so
+/// the mechanical traction curve is untouched.
+#[derive(Clone, Debug)]
+struct T0Crank {
+    /// The reference source's gear ladder, in file-declaration order.
+    ref_gears: Vec<T0Gear>,
+    /// The reference source's peak-torque envelope `τ(ω)`.
+    ref_torque_env: MonotoneCubic<f64>,
+    /// Highest shaft speed the reference envelope covers, rad/s.
+    ref_omega_max: f64,
+    /// The governed machine's own peak-torque envelope `τ(ω)`, N·m on its shaft.
+    machine_env: MonotoneCubic<f64>,
+    /// Highest shaft speed the machine's envelope covers, rad/s.
+    machine_omega_max: f64,
+    /// Governed-machine shaft speed per unit reference-source shaft speed (`1.0` when both sit
+    /// directly on the node — the `f1_2026` case).
+    machine_per_ref: f64,
+}
+
+impl T0Crank {
+    /// The governed machine's shaft speed (rad/s) in the engaged gear at vehicle speed `v` — the
+    /// gear maximising the reference source's wheel force. `None` when no gear is on-envelope.
+    /// Zero-allocation, fixed-order.
+    fn engaged_omega(&self, v: f64) -> Option<f64> {
+        let mut best: Option<(f64, f64)> = None; // (reference wheel force, reference shaft speed)
+        for g in &self.ref_gears {
+            let omega = g.omega_per_v * v;
+            if omega > self.ref_omega_max {
+                continue;
+            }
+            let avail = self.ref_torque_env.eval(omega) * g.force_per_torque;
+            if best.is_none_or(|(b, _)| avail > b) {
+                best = Some((avail, omega));
+            }
+        }
+        best.map(|(_, omega)| omega * self.machine_per_ref)
+    }
+
+    /// The machine's mechanical power ceiling at the engaged gear's crank speed, W — `τ(ω)·ω`. `0`
+    /// when no gear is on-envelope, or when the crank turns faster than the machine's own envelope.
+    fn engaged_mech_cap_w(&self, v: f64) -> f64 {
+        let Some(omega) = self.engaged_omega(v) else {
+            return 0.0;
+        };
+        if !omega.is_finite() || omega > self.machine_omega_max {
+            return 0.0;
+        }
+        (self.machine_env.eval(omega) * omega).max(0.0)
+    }
 }
 
 impl T0Vehicle {
@@ -172,6 +232,9 @@ impl T0Vehicle {
         // force-added by the ERS block below — the D-M6-13 T0 de-dup) ---
         let governed = crate::graph::governed_unit_ids(spec);
         let mut units = Vec::with_capacity(spec.drivetrain.units.len());
+        // The drivetrain node each mechanical unit outputs onto, parallel to `units` — the Layer-3
+        // shared-crank lookup reads it to find the governed machine's reference source.
+        let mut unit_nodes: Vec<Option<&str>> = Vec::with_capacity(spec.drivetrain.units.len());
         for (i, unit) in spec.drivetrain.units.iter().enumerate() {
             if governed.contains(unit.id.as_str()) {
                 continue;
@@ -189,6 +252,7 @@ impl T0Vehicle {
                 omega_max,
                 gears,
             });
+            unit_nodes.push(unit.output.as_ref().map(NodeId::as_str));
         }
 
         // --- ERS (rulebook-governed force from the policy-governed machine unit) ---
@@ -212,11 +276,22 @@ impl T0Vehicle {
                     .zip(&curve.torque_nm)
                     .map(|(rpm, t)| (rpm * RPM_TO_RAD_PER_S) * t.abs())
                     .fold(0.0_f64, f64::max);
-                // The C5.2.11 crank torque cap stays proxied by `p_mech_max_w` (no declared
-                // machine→crank ratio at T0 — see the `T0Ers` doc); the rulebook carries the
-                // electrical caps + piecewise-linear tapers + the 0.97 conversion seam.
+                // The rulebook carries the electrical caps + piecewise-linear tapers + the 0.97
+                // conversion seam; the gear-referenced crank torque limit is the `T0Crank` below.
                 let rulebook = ErsRulebook::from_schema(policy, [0.0, 1.0], None)?;
                 let eta = single_gearbox_eff(spec).unwrap_or(1.0);
+                // Layer 3 (D-M6-13): the machine's own `τ(ω)` envelope on its gear ladder, pinned to
+                // the gear the reference source on its output node engages.
+                let crank = build_t0_crank(
+                    spec,
+                    gov_unit,
+                    &ptm.limits.max_torque_nm_vs_speed,
+                    &units,
+                    &unit_nodes,
+                    r_front,
+                    r_rear,
+                    &mut notes,
+                )?;
                 notes.push(
                     "ERS folded into the T0 pedal-availability force as the greedy, budget-free \
                      regulation-curve adder (piecewise-linear taper × the 0.97 crank factor); the \
@@ -225,9 +300,20 @@ impl T0Vehicle {
                      governs, this greedy adder is the deployment"
                         .to_owned(),
                 );
+                if crank.is_some() {
+                    notes.push(
+                        "the ERS adder is capped by the governed machine's own torque envelope at \
+                         the ENGAGED gear's crank speed (D-M6-13 Layer 3), not by its \
+                         ratio-invariant peak power: a torque-limited machine can no longer deliver \
+                         its rated deploy at every speed, and the T0 pedal availability now agrees \
+                         with what the energy-manager march realizes"
+                            .to_owned(),
+                    );
+                }
                 Some(T0Ers {
                     rulebook,
                     p_mech_max_w,
+                    crank,
                     eta,
                 })
             }
@@ -300,16 +386,16 @@ impl T0Vehicle {
 
     /// The wheel-force contribution of an ELECTRICAL ERS deploy power `p_elec_w` (W at the CU-K DC
     /// bus) at speed `v`, N: `p_elec × 0.97 (C5.2.14, the rulebook seam) → min(machine mechanical
-    /// ceiling) → × η_driveline / v`. Both conversion factors stay distinct: 0.97 is the
-    /// regulation's electrical→mechanical crank factor, `eta` the crank→wheel driveline loss.
-    /// Returns 0 for a car without an `ers:` block. Allocation-free.
+    /// ceiling at the engaged gear) → × η_driveline / v`. Both conversion factors stay distinct:
+    /// 0.97 is the regulation's electrical→mechanical crank factor, `eta` the crank→wheel driveline
+    /// loss. Returns 0 for a car without an `ers:` block. Allocation-free.
     pub fn ers_deploy_force_n(&self, v: f64, p_elec_w: f64) -> f64 {
         match &self.ers {
             Some(e) => {
                 let p_mech = e
                     .rulebook
                     .mech_deploy_w(p_elec_w)
-                    .min(e.p_mech_max_w)
+                    .min(self.ers_mech_cap_w(v))
                     .max(0.0);
                 e.eta * p_mech / v.max(ERS_V_FLOOR_MPS)
             }
@@ -317,19 +403,17 @@ impl T0Vehicle {
         }
     }
 
-    /// The mechanical crank power the ERS can realize for an electrical deploy `p_elec_w`, W —
-    /// `min(0.97·p_elec, machine ceiling)` — plus the electrical power actually drawn once the
-    /// machine ceiling binds (`p_mech / 0.97`: the pack never pays for power the machine cannot
-    /// convert). Returns `(p_mech_w, p_elec_realized_w)`; `(0, 0)` without an `ers:` block.
-    pub fn ers_realized_deploy_w(&self, p_elec_w: f64) -> (f64, f64) {
+    /// The mechanical crank power the ERS can realize at speed `v` for an electrical deploy
+    /// `p_elec_w`, W — `min(0.97·p_elec, machine ceiling at the engaged gear)` — plus the electrical
+    /// power actually drawn once the machine ceiling binds (`p_mech / 0.97`: the pack never pays for
+    /// power the machine cannot convert). Returns `(p_mech_w, p_elec_realized_w)`; `(0, 0)` without
+    /// an `ers:` block.
+    pub fn ers_realized_deploy_w(&self, v: f64, p_elec_w: f64) -> (f64, f64) {
         match &self.ers {
             Some(e) => {
-                let p_mech = e
-                    .rulebook
-                    .mech_deploy_w(p_elec_w)
-                    .min(e.p_mech_max_w)
-                    .max(0.0);
-                let p_elec = if e.rulebook.mech_deploy_w(p_elec_w) > e.p_mech_max_w {
+                let cap = self.ers_mech_cap_w(v);
+                let p_mech = e.rulebook.mech_deploy_w(p_elec_w).min(cap).max(0.0);
+                let p_elec = if e.rulebook.mech_deploy_w(p_elec_w) > cap {
                     e.rulebook.mech_harvest_w(p_mech) // p_mech / 0.97 — machine-bound draw
                 } else {
                     p_elec_w.max(0.0)
@@ -338,6 +422,29 @@ impl T0Vehicle {
             }
             None => (0.0, 0.0),
         }
+    }
+
+    /// The **binding** ERS machine mechanical ceiling at speed `v`, W: the machine's own `τ(ω)`
+    /// envelope at the engaged gear's crank speed (D-M6-13 Layer 3). Falls back to the
+    /// ratio-invariant `max(τ·ω)` over its map only when no crank view could be built at all. `0`
+    /// without a `policy:` overlay. Allocation-free.
+    pub fn ers_mech_cap_w(&self, v: f64) -> f64 {
+        self.ers.as_ref().map_or(0.0, |e| match &e.crank {
+            Some(c) => c.engaged_mech_cap_w(v),
+            None => e.p_mech_max_w,
+        })
+    }
+
+    /// The governed machine's shaft speed at speed `v`, rad/s — the engaged gear's crank speed
+    /// (D-M6-13 Layer 3). `None` without a `policy:` overlay, or when no gear is on-envelope.
+    ///
+    /// The T0 point-mass tier builds its crank view from its OWN gear ladder
+    /// (`T0Gear{omega_per_v, force_per_torque}`), independently of the T1 `CrankNode`. The two must
+    /// select the same gear: `ers_decide` normalises the driver demand by the T0 pedal availability
+    /// but realises the deploy through the T1 march, so a disagreement would mis-classify deploy as
+    /// part-throttle harvest. Exposed so the property test can assert they agree.
+    pub fn ers_crank_omega(&self, v: f64) -> Option<f64> {
+        self.ers.as_ref()?.crank.as_ref()?.engaged_omega(v)
     }
 
     /// The ERS machine's ratio-invariant mechanical power ceiling `max(τ·ω)` over its `.ptm` map,
@@ -466,6 +573,74 @@ fn build_gears(
             force_per_torque: base_ratio * base_eff / r_wheel,
         }],
     }
+}
+
+/// Build the T0 shared-crank view for the policy-governed machine (D-M6-13 Layer 3).
+///
+/// The machine's gear ladder comes from its own flattened chain (private path ++ the shared couplers
+/// below its output node); the **reference** source — the first-declared mechanical unit on the same
+/// node — supplies the gear selection. `None` when the machine declares no output node, when no
+/// mechanical source shares it, or when the two ladders are not index-aligned (the machine sits on a
+/// gearbox of its own): the T0 adder then keeps the ratio-invariant power ceiling, and the note
+/// records it.
+#[allow(clippy::too_many_arguments)] // one cold assembly helper: spec + unit + envelope + ladders
+fn build_t0_crank(
+    spec: &outlap_schema::Vehicle,
+    gov_unit: &outlap_schema::vehicle::DriveUnit,
+    curve: &TorqueCurve,
+    units: &[T0Unit],
+    unit_nodes: &[Option<&str>],
+    r_front: f64,
+    r_rear: f64,
+    notes: &mut Vec<String>,
+) -> Result<Option<T0Crank>, T0Error> {
+    // The machine's own ladder, folded exactly like a mechanical unit's.
+    let (chain, wheels) = crate::graph::flatten_chain(&spec.drivetrain, gov_unit);
+    let idx = spec.drivetrain.units.len(); // note index: the governed unit sits past `units`
+    let r_wheel = driven_radius(&wheels, r_front, r_rear, idx, notes);
+    let (base_ratio, base_eff, gearbox) = fold_path(&chain, idx, notes)?;
+    let machine_gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
+    let machine_env = torque_env(curve)?;
+    let machine_omega_max = machine_env.domain().1;
+    // The reference source: the FIRST-DECLARED mechanical unit that outputs onto the machine's own
+    // node. Its ladder alone selects the engaged gear (locked decision: the engine chooses), and it
+    // must be index-aligned with the machine's — which holds exactly when both flatten through the
+    // same shared gearbox. Anything else (no node, no co-located source, a private gearbox) means
+    // the machine is alone on its shaft: it then selects its OWN maximum-wheel-force gear, mirroring
+    // the T1 `CrankNode` so the two tiers cannot classify the same car differently.
+    let node = gov_unit.output.as_ref().map(NodeId::as_str);
+    let reference = node
+        .and_then(|node| unit_nodes.iter().position(|n| *n == Some(node)))
+        .map(|i| &units[i])
+        .filter(|r| r.gears.len() == machine_gears.len());
+    if reference.is_none() {
+        notes.push(
+            "the policy-governed machine shares its output node with no mechanical source (or sits \
+             on a gearbox of its own): its ERS adder is capped by its own torque envelope at its \
+             own maximum-force gear rather than at an engine-selected crank speed"
+                .to_owned(),
+        );
+    }
+    // ω_machine / ω_reference — constant across a shared ladder, so gear 0 fixes it; 1 when the
+    // machine references itself.
+    let (ref_gears, ref_torque_env, ref_omega_max, machine_per_ref) = match reference {
+        Some(r) => {
+            let per_ref = match (machine_gears.first(), r.gears.first()) {
+                (Some(m), Some(rg)) if rg.omega_per_v.abs() > 0.0 => m.omega_per_v / rg.omega_per_v,
+                _ => 1.0,
+            };
+            (r.gears.clone(), r.torque_env.clone(), r.omega_max, per_ref)
+        }
+        None => (machine_gears, machine_env.clone(), machine_omega_max, 1.0),
+    };
+    Ok(Some(T0Crank {
+        ref_gears,
+        ref_torque_env,
+        ref_omega_max,
+        machine_env,
+        machine_omega_max,
+        machine_per_ref,
+    }))
 }
 
 /// Fit a peak-torque envelope `τ(ω)` from a speed/torque curve (rpm → rad/s at the boundary).

@@ -31,6 +31,7 @@ use outlap_core::{GriddedMapN, GriddedTable, MonotoneCubic, OutOfDomain};
 use outlap_schema::io::SourceLoader;
 use outlap_schema::load::load_ptm;
 use outlap_schema::ptm::{PtmKind, TorqueCurve};
+use outlap_schema::refs::NodeId;
 use outlap_schema::vehicle::{Coupler, DiffKind, Efficiency, Gearbox, Wheel};
 use outlap_schema::ResolvedVehicle;
 
@@ -334,36 +335,25 @@ impl PtUnit {
         best.map(|(_, rpm, tau)| (rpm, tau))
     }
 
-    /// Best-gear crank shaft speed (rad/s) for the machine at vehicle speed `v` — the gear that
-    /// maximises deliverable mechanical power `peak_env(ω)·ω`. `None` if no gear is on-envelope.
-    fn best_deploy_omega(&self, v: f64) -> Option<f64> {
-        let mut best: Option<(f64, f64)> = None; // (mech power, omega)
-        for g in &self.gears {
-            let omega = g.ratio / self.r_wheel * v;
-            if omega <= self.omega_max {
-                let p = self.peak_env.eval(omega) * omega;
-                if best.is_none_or(|(bp, _)| p > bp) {
-                    best = Some((p, omega));
-                }
-            }
-        }
-        best.map(|(_, omega)| omega)
-    }
-
-    /// The machine deploy at bus power `p_elec` (W) and speed `v` (m/s), with the winding-thermal
-    /// `derate` (0..1) capping the deliverable torque (Layer 2, D-M6-13). Resolves the operating
-    /// point through the efficiency map (a short fixed point in torque — `η(rpm, τ)` replaces the
-    /// flat regulatory 0.97), caps the mechanical power by the derated machine envelope, and returns
+    /// The machine deploy at bus power `p_elec` (W) with the machine turning at `omega` (rad/s) — the
+    /// shared-crank operating point (D-M6-13 Layer 3; Layer 2 argmaxed the machine's *own* best gear
+    /// here, which is wrong for a machine welded to the crank) — and the winding-thermal `derate`
+    /// (0..1) capping the deliverable torque. Resolves the operating point through the efficiency map
+    /// (a short fixed point in torque — `η(rpm, τ)` replaces the flat regulatory 0.97), caps the
+    /// mechanical power by the derated machine envelope **at that speed**, and returns
     /// `(p_mech_w, p_elec_used_w, loss_w, omega_rad_s)`. `p_elec_used ≤ p_elec` when the machine
-    /// envelope binds (the pack never pays for power the machine cannot convert). Zero-allocation.
+    /// envelope binds (the pack never pays for power the machine cannot convert). `None` when
+    /// `omega` is past the machine's own envelope (it cannot turn that fast). Zero-allocation.
     fn machine_deploy(
         &self,
-        v: f64,
+        omega: f64,
         p_elec: f64,
         vdc: Option<f64>,
         derate: f64,
     ) -> Option<(f64, f64, f64, f64)> {
-        let omega = self.best_deploy_omega(v)?;
+        if !omega.is_finite() || omega > self.omega_max {
+            return None; // past the machine's rev limit (or NaN) — no deploy at this crank speed
+        }
         let rpm = omega / RPM_TO_RAD_PER_S;
         // Derated machine peak mechanical power at this speed (the thermal derate scales torque).
         let p_cap = (self.peak_env.eval(omega) * omega * derate.clamp(0.0, 1.0)).max(0.0);
@@ -388,19 +378,107 @@ impl PtUnit {
         Some((p_mech, p_elec_used, loss_w, omega))
     }
 
-    /// The machine's best-gear regen mechanical-power envelope at `v`, W (positive). Layer 2 replaces
-    /// the ratio-invariant scalar `p_mech_max_w` proxy with the machine's real regen envelope.
-    fn machine_regen_envelope_w(&self, v: f64) -> Option<f64> {
-        let mut best = 0.0_f64;
-        let mut any = false;
-        for g in &self.gears {
-            let omega = g.ratio / self.r_wheel * v;
-            if omega <= self.regen_omega_max {
-                best = best.max(self.regen_env.eval(omega) * omega);
-                any = true;
+    /// The machine's regen mechanical-power envelope at shaft speed `omega` (rad/s), W (positive).
+    /// Layer 2 replaced the ratio-invariant scalar `p_mech_max_w` proxy with the machine's real regen
+    /// envelope; Layer 3 (D-M6-13) evaluates it at the **shared-crank** speed instead of the
+    /// machine's own best gear. `None` past the regen envelope's rev limit.
+    fn machine_regen_envelope_w(&self, omega: f64) -> Option<f64> {
+        if !omega.is_finite() || omega > self.regen_omega_max {
+            return None;
+        }
+        Some((self.regen_env.eval(omega) * omega).max(0.0))
+    }
+}
+
+/// A drivetrain node that is the `output` of ≥2 torque sources — a genuine **shared shaft**
+/// (D-M6-13 Layer 3). On `f1_2026` that node is the `crank`: the ICE and the MGU-K are welded to it
+/// and the 8-speed gearbox sits below, so ONE gear sets BOTH sources' operating point.
+///
+/// The gear is chosen by the **reference source alone** — the first-declared non-governed source on
+/// the node (the ICE) — exactly the gear its traction ceiling
+/// ([`PtUnit::max_wheel_force`]/[`PtUnit::source_op`]) already assumes. The governed machine then
+/// adds its crank torque *in that gear* instead of picking a gear of its own. Two consequences:
+/// the machine's `.ptm` torque envelope binds at the **true** crank speed (so the ~223 N·m machine
+/// is torque-limited at low crank speed rather than delivering its rated power everywhere), and the
+/// shared node is real state rather than a topology string.
+///
+/// Summing at the node and applying the gearbox ratio once is algebraically identical to applying
+/// the (same) ratio to each source and summing at the wheel — `(τ_ice + τ_k)·ratio·η/r` — so the
+/// existing force-adder structure *is* the crank sum once both sources share the gear. The node is
+/// kinematic: no crank inertia or torsional state (deferred, design §4/§8).
+///
+/// Flattened once at assembly; the per-step query is a bounded scan over the gear ladder in
+/// declaration order (fixed-order, zero-allocation).
+#[derive(Clone, Debug)]
+struct CrankNode {
+    /// The reference source's gear ladder (source shaft → wheel) in file-declaration order.
+    ref_gears: Vec<Gear>,
+    /// The reference source's peak-torque envelope `τ(ω)` — it alone selects the gear, so the
+    /// mechanical traction ceiling stays byte-identical (locked decision: shared gear = ENGINE ALONE).
+    ref_peak_env: MonotoneCubic<f64>,
+    /// Highest shaft speed the reference envelope covers, rad/s.
+    ref_omega_max: f64,
+    /// The reference source's driven-wheel rolling radius, m.
+    ref_r_wheel: f64,
+    /// Governed-machine shaft speed per unit reference-source shaft speed — the fixed reduction
+    /// between the two shafts. `1.0` when both sources sit directly on the node (the `f1_2026` case:
+    /// the MGU-K's `.ptm` is authored at the crank, 223 N·m × 15 000 rpm = the 350 kW deploy).
+    machine_per_ref: f64,
+    /// Whether the node genuinely carries ≥2 sources (recorded in the assembly notes; `false` means
+    /// the governed machine is alone on its node and references itself).
+    shared: bool,
+}
+
+impl CrankNode {
+    /// Build the node view for a governed machine, given the reference source it shares its output
+    /// node with (`None` when it is alone on that node — it then selects its own gear).
+    fn new(machine: &PtUnit, reference: Option<&PtUnit>) -> Self {
+        // The ladders are index-aligned only when both sources flatten through the SAME shared
+        // gearbox (the shared-node case); a differing gear count means the machine sits on its own
+        // box, so it references itself rather than an unrelated ladder.
+        let reference = reference.filter(|r| r.gears.len() == machine.gears.len());
+        let (source, shared) = match reference {
+            Some(r) => (r, true),
+            None => (machine, false),
+        };
+        // ω_machine / ω_reference — constant across the shared ladder (both scale with the same
+        // gearbox ratio), so gear 0 fixes it.
+        let per_ref = match (machine.gears.first(), source.gears.first()) {
+            (Some(m), Some(s)) if s.ratio.abs() > 0.0 && source.r_wheel.abs() > 0.0 => {
+                (m.ratio / machine.r_wheel) / (s.ratio / source.r_wheel)
+            }
+            _ => 1.0,
+        };
+        Self {
+            ref_gears: source.gears.clone(),
+            ref_peak_env: source.peak_env.clone(),
+            ref_omega_max: source.omega_max,
+            ref_r_wheel: source.r_wheel,
+            machine_per_ref: if shared { per_ref } else { 1.0 },
+            shared,
+        }
+    }
+
+    /// The governed machine's shaft speed (rad/s) in the **engaged** gear at vehicle speed `v`.
+    ///
+    /// The engaged gear is the one that maximises the reference source's available wheel force — the
+    /// identical argmax (and identical first-max tie-break, in declaration order) that
+    /// [`PtUnit::source_op`] and [`T1Powertrain::ice_crank_rpm`] already use, so the machine is
+    /// pinned to precisely the gear the traction ceiling assumes. `None` when no gear is on-envelope
+    /// at this speed. Zero-allocation, fixed-order.
+    fn engaged_omega(&self, v: f64) -> Option<f64> {
+        let mut best: Option<(f64, f64)> = None; // (reference wheel force, reference shaft speed)
+        for g in &self.ref_gears {
+            let omega = g.ratio / self.ref_r_wheel * v;
+            if omega > self.ref_omega_max {
+                continue;
+            }
+            let avail = self.ref_peak_env.eval(omega) * g.ratio * g.eff / self.ref_r_wheel;
+            if best.is_none_or(|(b, _)| avail > b) {
+                best = Some((avail, omega));
             }
         }
-        any.then_some(best)
+        best.map(|(_, omega)| omega * self.machine_per_ref)
     }
 }
 
@@ -411,12 +489,17 @@ impl PtUnit {
 #[derive(Clone, Debug)]
 pub struct GovernedMachine {
     unit: PtUnit,
+    /// The shared-crank node view (D-M6-13 Layer 3) — a clone of the `T1Powertrain`'s, so the
+    /// transient governor pins the machine to the SAME engaged gear as the QSS march (tier parity is
+    /// a merge blocker: both tiers must consume one shared-crank rule, not two copies).
+    crank: CrankNode,
 }
 
 impl GovernedMachine {
     /// The machine deploy at bus power `p_elec` (W), speed `v` (m/s), pack voltage `vdc`, driveline
     /// efficiency `eta`, and winding-thermal `derate` (0..1) — the real `η(rpm, τ)` deploy (force,
-    /// electrical draw, loss, shaft speed). `None` when no on-envelope gear at this speed.
+    /// electrical draw, loss, shaft speed) at the **shared-crank** operating point (Layer 3).
+    /// `None` when no gear is on-envelope at this speed.
     #[must_use]
     pub fn deploy(
         &self,
@@ -426,8 +509,9 @@ impl GovernedMachine {
         eta: f64,
         derate: f64,
     ) -> Option<GovernedDeploy> {
+        let omega = self.crank.engaged_omega(v)?;
         let (p_mech, p_elec_used, loss_w, omega) =
-            self.unit.machine_deploy(v, p_elec, vdc, derate)?;
+            self.unit.machine_deploy(omega, p_elec, vdc, derate)?;
         Some(GovernedDeploy {
             force_n: eta * p_mech / v.max(crate::vehicle::ERS_V_FLOOR_MPS),
             p_elec_used_w: p_elec_used,
@@ -436,11 +520,12 @@ impl GovernedMachine {
         })
     }
 
-    /// The machine's best-gear regen mechanical-power envelope at `v`, W (positive). `None` when no
-    /// on-envelope gear at this speed.
+    /// The machine's regen mechanical-power envelope at the shared-crank speed for `v`, W (positive).
+    /// `None` when no gear is on-envelope at this speed.
     #[must_use]
     pub fn regen_envelope_w(&self, v: f64) -> Option<f64> {
-        self.unit.machine_regen_envelope_w(v)
+        let omega = self.crank.engaged_omega(v)?;
+        self.unit.machine_regen_envelope_w(omega)
     }
 }
 
@@ -546,6 +631,11 @@ pub struct T1Powertrain {
     governed: Option<PtUnit>,
     /// The spec unit index of the governed machine (routes its late sidecar install to `governed`).
     governed_spec_idx: Option<usize>,
+    /// The shared-crank node the governed machine sits on (Layer 3, D-M6-13) — flattened once at
+    /// assembly, it pins the machine to the gear the reference source (the ICE) engages. `None`
+    /// exactly when there is no governed machine, so a car without a `policy:` overlay never touches
+    /// this path and stays byte-identical.
+    crank: Option<CrankNode>,
     /// Static front-axle torque share (from `control.split.front`), if declared.
     split_front: Option<f64>,
     /// Static left-side torque share (from `control.split.left`), if declared.
@@ -612,6 +702,43 @@ impl T1Powertrain {
                 &mut notes,
             )?);
         }
+        // Layer 3 (D-M6-13): flatten the governed machine's output node into a shared-crank view.
+        // The reference source is the FIRST-DECLARED non-governed unit that outputs onto the same
+        // node (the ICE on `f1_2026`); it alone selects the engaged gear, so the mechanical traction
+        // ceiling is untouched and the whole delta is the machine becoming crank-referenced.
+        let crank = governed_unit.as_ref().map(|machine| {
+            let node = governed_spec_idx
+                .and_then(|i| spec.drivetrain.units.get(i))
+                .and_then(|u| u.output.as_ref());
+            let reference = node.and_then(|node| {
+                spec.drivetrain
+                    .units
+                    .iter()
+                    .enumerate()
+                    .find(|(_, u)| {
+                        !governed.contains(u.id.as_str())
+                            && u.output.as_ref().map(NodeId::as_str) == Some(node.as_str())
+                    })
+                    .and_then(|(i, _)| spec_to_slot.get(i).copied().flatten())
+                    .and_then(|slot| units.get(slot))
+            });
+            CrankNode::new(machine, reference)
+        });
+        if let Some(c) = crank.as_ref() {
+            notes.push(if c.shared {
+                "shared crank (D-M6-13 Layer 3): the governed machine and the reference engine are \
+                 both welded to one drivetrain node, so the machine deploys in the ENGAGED gear — \
+                 the gear the engine's traction ceiling selects. Its `.ptm` torque envelope \
+                 therefore binds at the true crank speed (torque-limited at low speed, not at its \
+                 own most favourable ratio), and a gearbox torque cut interrupts both sources \
+                 together. The engine's traction curve is unchanged."
+                    .to_owned()
+            } else {
+                "the policy-governed machine is the only source on its output node: it selects its \
+                 own gear by maximum wheel force (no shared crank to pin it to)."
+                    .to_owned()
+            });
+        }
         let split_front = spec.drivetrain.control.split.front;
         let split_left = spec.drivetrain.control.split.left;
         notes.push(
@@ -633,6 +760,7 @@ impl T1Powertrain {
             spec_to_slot,
             governed: governed_unit,
             governed_spec_idx,
+            crank,
             split_front,
             split_left,
             notes,
@@ -758,9 +886,9 @@ impl T1Powertrain {
 
     /// The governed machine's deploy at bus power `p_elec` (W), speed `v` (m/s), pack voltage `vdc`,
     /// and winding-thermal `derate` (0..1), through the driveline efficiency `eta` — Layer 2's real
-    /// `η(rpm, τ)` deploy (force, electrical draw, loss, shaft speed). `None` when there is no
-    /// governed machine map or no on-envelope gear at this speed (the caller falls back to the T0
-    /// scalar/0.97 path). Cold-map-free; zero-allocation.
+    /// `η(rpm, τ)` deploy (force, electrical draw, loss, shaft speed), evaluated at the Layer-3
+    /// **shared-crank** operating point (the gear the reference engine engages). `None` when there is
+    /// no governed machine or no gear is on-envelope at this speed. Cold-map-free; zero-allocation.
     #[must_use]
     pub fn governed_deploy(
         &self,
@@ -771,7 +899,8 @@ impl T1Powertrain {
         derate: f64,
     ) -> Option<GovernedDeploy> {
         let g = self.governed.as_ref()?;
-        let (p_mech, p_elec_used, loss_w, omega) = g.machine_deploy(v, p_elec, vdc, derate)?;
+        let omega = self.crank.as_ref()?.engaged_omega(v)?;
+        let (p_mech, p_elec_used, loss_w, omega) = g.machine_deploy(omega, p_elec, vdc, derate)?;
         Some(GovernedDeploy {
             force_n: eta * p_mech / v.max(crate::vehicle::ERS_V_FLOOR_MPS),
             p_elec_used_w: p_elec_used,
@@ -781,23 +910,35 @@ impl T1Powertrain {
     }
 
     /// The governed machine's regen mechanical-power envelope at `v`, W (positive) — Layer 2's real
-    /// regen ceiling replacing the ratio-invariant `p_mech_max_w` proxy. `None` when there is no
-    /// governed machine or no on-envelope gear.
+    /// regen ceiling (replacing the ratio-invariant `p_mech_max_w` proxy) evaluated at the Layer-3
+    /// shared-crank speed. `None` when there is no governed machine or no on-envelope gear.
     #[must_use]
     pub fn governed_regen_envelope_w(&self, v: f64) -> Option<f64> {
-        self.governed.as_ref()?.machine_regen_envelope_w(v)
+        let omega = self.crank.as_ref()?.engaged_omega(v)?;
+        self.governed.as_ref()?.machine_regen_envelope_w(omega)
+    }
+
+    /// The governed machine's shared-crank shaft speed at vehicle speed `v`, rad/s — the engaged
+    /// gear's crank speed (Layer 3, D-M6-13). `None` when there is no governed machine or no gear is
+    /// on-envelope. Exposed for the tier-parity / shared-crank property tests.
+    #[must_use]
+    pub fn governed_crank_omega(&self, v: f64) -> Option<f64> {
+        self.crank.as_ref()?.engaged_omega(v)
     }
 
     /// An owned [`GovernedMachine`] handle (Layer 2, D-M6-13) for consumers that outlive the
-    /// `T1Powertrain` borrow — the transient tier's step-boundary ERS governor. `None` when the
-    /// governed machine's efficiency map is not ingested (a pre-Layer-2 car).
+    /// `T1Powertrain` borrow — the transient tier's step-boundary ERS governor. Carries the
+    /// shared-crank node by value so the transient tier pins the machine to the same engaged gear the
+    /// QSS march does. `None` when the governed machine's efficiency map is not ingested (a
+    /// pre-Layer-2 car).
     #[must_use]
     pub fn governed_machine(&self) -> Option<GovernedMachine> {
+        let crank = self.crank.clone()?;
         self.governed
             .as_ref()
             .filter(|g| g.eff_map.is_some())
             .cloned()
-            .map(|unit| GovernedMachine { unit })
+            .map(|unit| GovernedMachine { unit, crank })
     }
 
     /// Whether ANY drive unit has an installed efficiency map — the assembly-time fact that the

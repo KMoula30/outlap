@@ -12,9 +12,12 @@
 //! QSS braking harvest composes the same ceilings the transient blend enforces, in the same
 //! order, so parity gate #4 measures physics rather than modelling gaps:
 //!
-//! 1. **Machine envelope** — the MGU-K's ratio-invariant mechanical ceiling
-//!    ([`T0Vehicle::ers_p_mech_max_w`]; the `.ptm` schema treats an absent regen curve as a
-//!    symmetric machine).
+//! 1. **Machine envelope** — the MGU-K's own regen torque envelope evaluated at the ENGAGED gear's
+//!    shaft speed, `τ_regen(ω_crank)·ω_crank` (`T1Powertrain::governed_regen_envelope_w`; the
+//!    `.ptm` schema treats an absent regen curve as a symmetric machine). Before D-M6-13 Layer 3
+//!    this was the ratio-invariant `max(τ·ω)` over the whole map
+//!    ([`T0Vehicle::ers_p_mech_max_w`]), which a crank-mounted machine can only reach at its base
+//!    speed; that scalar survives as the reported ceiling and the no-crank fallback.
 //! 2. **Low-speed fade** — linear to zero below [`REGEN_FADE_SPEED_MPS`] (the same constant the
 //!    transient blend uses; real controllers hand braking back to the calipers at walking pace).
 //! 3. **Pack charge acceptance** — `Pack::regen_power_limit_w` (design curve × kinetic derate ∧
@@ -63,8 +66,12 @@ pub struct ErsCoupling {
     /// Driveline (crank→wheel) efficiency for the deploy force (distinct from the rulebook's
     /// 0.97 electrical→mechanical factor).
     pub eta: f64,
-    /// MGU-K ratio-invariant mechanical power ceiling, W (deploy cap AND the symmetric-machine
-    /// regen envelope of harvest ceiling 1).
+    /// MGU-K ratio-invariant mechanical power ceiling `max(τ·ω)` over its map, W — the
+    /// speed-independent upper bound the machine could reach at its base speed.
+    ///
+    /// Since D-M6-13 Layer 3 this is NOT what binds: both the deploy cap and harvest ceiling 1 are
+    /// the machine's envelope read at the engaged gear's crank speed. It survives as the reported
+    /// ceiling and as the fallback for a governed machine with no crank node to pin to.
     pub p_mech_max_w: f64,
     /// The driven axle(s)' share of the commanded braking force (balance bar over the axles that
     /// carry driven wheels) — harvest ceiling 5.
