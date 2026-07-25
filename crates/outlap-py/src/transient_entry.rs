@@ -214,21 +214,29 @@ impl outlap_transient::ErsGovernor for ErsController {
         // 4 MJ reg — so f1 (and gate #4) are unaffected. A pack physically LARGER than the reg would
         // see QSS clip at the reg while T2 clips at the larger physical window: a recorded follow-up,
         // matching the QSS side's own "oversized pack" flag; no committed vehicle triggers it.
+        // The shift FSM's torque cut (Layer 3, D-M6-13). The machine sits on the crank, upstream of
+        // the gearbox, so a cut interrupts it exactly as it interrupts the engine. This is the ONE
+        // place the cut is applied — the powertrain block no longer re-scales the deploy force (that
+        // would square it) — and it now reaches the pack draw and the winding loss as well as the
+        // wheel force, so a mid-shift MGU-K neither drains the pack nor heats its winding for nothing.
+        let cut = inp.shift_torque_scale.clamp(0.0, 1.0);
         if cmd.deploy_w > 0.0 {
             let p_elec = cmd.deploy_w.min(inp.discharge_limit_w.max(0.0));
             // Layer 2 (D-M6-13): the governed machine's real η(rpm, τ) deploy, derated by the
             // winding-thermal state — force, electrical draw, loss, shaft speed. No flat-0.97
             // fallback (assembly guarantees the map); a `None` (no on-envelope gear) means no deploy.
+            // Layer 3 evaluates it at the SHARED-CRANK operating point: the gear the engine engages.
             if let Some(dep) = self
                 .machine
                 .as_ref()
                 .and_then(|m| m.deploy(inp.v, p_elec, None, self.coupling.eta, inp.machine_derate))
             {
-                out.deploy_force_n = dep.force_n;
-                out.deploy_power_w = dep.p_elec_used_w;
-                out.deploy_loss_w = dep.loss_w;
+                out.deploy_force_n = dep.force_n * cut;
+                out.deploy_power_w = dep.p_elec_used_w * cut;
+                out.deploy_loss_w = dep.loss_w * cut;
+                // The crank keeps turning through a cut (the LPTN cooling driver is unscaled).
                 out.machine_omega_rad_s = dep.omega_rad_s;
-                realized.deploy_w = dep.p_elec_used_w;
+                realized.deploy_w = dep.p_elec_used_w * cut;
             }
         } else if cmd.harvest_w > 0.0 {
             let p_elec = cmd.harvest_w.min(inp.regen_limit_w.max(0.0));
@@ -236,9 +244,12 @@ impl outlap_transient::ErsGovernor for ErsController {
             realized.harvest_w = p_elec;
             if cmd.mode == ErsMode::HarvestStraight {
                 // Super-clip: the K back-drives against the ICE, cutting net wheel force by the
-                // absorbed mechanical share (driveline η skipped on the harvest side).
+                // absorbed mechanical share (driveline η skipped on the harvest side). The wheel
+                // slice is cut with the gearbox — an open driveline transmits no back-drive either —
+                // while the harvest itself is unchanged (braking regen flows wheels→crank and is a
+                // separate energy-closure question, deliberately left alone in Layer 3).
                 let p_mech_abs = e.manager.rulebook().mech_harvest_w(p_elec);
-                out.deploy_force_n = -p_mech_abs / inp.v.max(ERS_V_FLOOR_MPS);
+                out.deploy_force_n = -p_mech_abs / inp.v.max(ERS_V_FLOOR_MPS) * cut;
             }
         }
         self.ledger.record(&realized, inp.dt);
@@ -364,6 +375,7 @@ pub struct TransientLap {
     yaw_moment_nm: Vec<f64>,
     regen_power_w: Vec<f64>,
     traction_power_w: Vec<f64>,
+    ers_deploy_force_n: Vec<f64>,
     regen_torque_front_nm: Vec<f64>,
     regen_torque_rear_nm: Vec<f64>,
     // Per-wheel channels, row-major `n × 4` (FL/FR/RL/RR).
@@ -531,6 +543,12 @@ impl TransientLap {
     /// charge power (negative under drive, positive under braking).
     fn traction_power_w<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
         self.traction_power_w.clone().into_pyarray(py)
+    }
+
+    /// The governed machine's additive wheel deploy force, N (`+` deploy, `−` super-clip back-drive),
+    /// already cut by the shift torque interruption (D-M6-13 Layer 3). `0` on a car with no manager.
+    fn ers_deploy_force_n<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        self.ers_deploy_force_n.clone().into_pyarray(py)
     }
 
     /// Front-axle machine braking torque, N·m (≥ 0); the calipers supplied the rest.
@@ -1432,6 +1450,7 @@ pub(crate) fn solve_transient_lap(
         yaw_moment_nm: lap.yaw_moment_nm,
         regen_power_w: lap.regen_power_w,
         traction_power_w: lap.traction_power_w,
+        ers_deploy_force_n: lap.ers_deploy_force_n,
         regen_torque_front_nm: lap.regen_torque_front_nm,
         regen_torque_rear_nm: lap.regen_torque_rear_nm,
         omega: flat4(&lap.omega),

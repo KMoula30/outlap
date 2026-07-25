@@ -1057,6 +1057,9 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
                 // The winding-thermal derate the deploy honours this step (Layer 2 Phase D): the
                 // slow-clock-refreshed value from the machine-thermal stack, else `1.0` (unlimited).
                 machine_derate: self.machine_thermal.as_ref().map_or(1.0, |m| m.derate()),
+                // The shift FSM's torque cut, resolved in phase (0) just above and frozen across the
+                // RK sweep — the crank-mounted machine is interrupted by it too (Layer 3, D-M6-13).
+                shift_torque_scale: self.torque_scale.to_f64().unwrap_or(1.0),
             };
             let out = ers.decide(&inp);
             self.ers_deploy_force_n = T::from(out.deploy_force_n).unwrap_or_else(T::zero);
@@ -1339,6 +1342,8 @@ impl<T: Float, B: TierBlocks<T>> TransientSolver<T, B> {
             .push(self.bus.get_channel(self.actuation.regen_power_w, 0));
         lap.traction_power_w
             .push(self.bus.get_channel(self.actuation.traction_power_w, 0));
+        lap.ers_deploy_force_n
+            .push(self.bus.get_channel(self.actuation.ers_deploy_force_n, 0));
         lap.regen_torque_front_nm.push(
             self.bus
                 .get_channel(self.actuation.regen_torque_front_nm, 0),

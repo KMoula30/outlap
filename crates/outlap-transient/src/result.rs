@@ -70,6 +70,12 @@ pub struct TransientLap<T> {
     /// Electrical traction power drawn from the pack, W (≥ 0) — the drive power the electric machines
     /// put down over their motoring efficiency. `regen_power_w − this` is the net pack charge power.
     pub traction_power_w: Vec<T>,
+    /// The policy-governed machine's additive wheel deploy force this step, N (`+` deploy under
+    /// power, `−` super-clip back-drive; `0` on a car with no energy manager). It is published
+    /// ALREADY cut by the shift torque interruption — the machine sits on the crank upstream of the
+    /// gearbox — so a gear change zeroes this, the pack draw and the winding loss together
+    /// (D-M6-13 Layer 3).
+    pub ers_deploy_force_n: Vec<T>,
     /// Front-axle machine braking torque, N·m (≥ 0) — the share of the front axle's commanded brake
     /// torque the machine took. `front_axle_brake_torque − this` is what the front calipers supplied.
     pub regen_torque_front_nm: Vec<T>,
@@ -137,6 +143,7 @@ impl<T: Float> Default for TransientLap<T> {
             yaw_moment_nm: Vec::new(),
             regen_power_w: Vec::new(),
             traction_power_w: Vec::new(),
+            ers_deploy_force_n: Vec::new(),
             regen_torque_front_nm: Vec::new(),
             regen_torque_rear_nm: Vec::new(),
             state_of_charge: Vec::new(),

@@ -122,6 +122,10 @@ CHANNEL_ATTRS: dict[str, dict[str, str]] = {
         "units": "W",
         "long_name": "electrical traction power drawn from the pack",
     },
+    "ers_deploy_force_n": {
+        "units": "N",
+        "long_name": "governed-machine deploy wheel force (shift-cut applied)",
+    },
     "regen_torque_front_nm": {
         "units": "N·m",
         "long_name": "front-axle machine braking torque",
@@ -455,6 +459,11 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
             "time",
             lap.traction_power_w(),
             _attrs("traction_power_w"),
+        ),
+        "ers_deploy_force_n": (
+            "time",
+            lap.ers_deploy_force_n(),
+            _attrs("ers_deploy_force_n"),
         ),
         "regen_torque_front_nm": (
             "time",

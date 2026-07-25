@@ -416,6 +416,16 @@ pub struct ErsStepInput {
     /// present; the solver sets it explicitly every step (the derived `Default` `0.0` is never used
     /// by a governed run).
     pub machine_derate: f64,
+    /// The shift FSM's drive-torque scale this step, `0..1` — `0` through a gear-change torque cut,
+    /// ramping to `1` on re-engagement (the same value the powertrain block scales the mechanical
+    /// force by, resolved in phase 0 and frozen across the RK sweep).
+    ///
+    /// The governed machine is welded to the crank **upstream** of the gearbox, so a cut interrupts
+    /// it too. Layer 3 (D-M6-13) moves that cut here, into the governor, so the deploy force, the
+    /// pack draw AND the winding loss are cut **together** — before, only the force was scaled (at
+    /// the block), so a mid-shift MGU-K drained the pack and heated its winding for zero wheel force.
+    /// Assembled to `1.0` for a car with no gearbox; the solver sets it explicitly every step.
+    pub shift_torque_scale: f64,
 }
 
 /// What a boundary [`ErsGovernor`] publishes for the powertrain block and the per-lap ledger.
