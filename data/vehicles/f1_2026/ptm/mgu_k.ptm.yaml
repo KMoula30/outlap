@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# SYNTHETIC MGU-K electric machine map (bare machine; a downstream ratio may apply).
+# SYNTHETIC MGU-K map. This is a `drive_unit`: the rotor (which spins to the regulatory ~50 000 rpm)
+# PLUS its fixed step-up reduction, lumped together and expressed at the shaft the unit declares as
+# its `output` — the crank. Every axis below is therefore OUTPUT-SHAFT referenced, and that shaft is
+# the V6's, so it stops at the 15 000 rpm redline. Declaring this a bare `electric_machine` (as it
+# was) would mean these axes are the ROTOR's and the topology owes a `fixed_ratio` on the unit's
+# `path` — see docs/theory/ers-energy-manager.md, "The shared crank".
 schema: ptm/1.0
-kind: electric_machine
+kind: drive_unit
 axes:
-  speed_rpm: [0, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000, 22000, 24000, 26000, 28000, 30000, 32000, 34000, 36000, 38000, 40000, 42000, 44000, 46000, 48000, 50000]
+  speed_rpm: [0, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000]
   load_axis:
     load_fraction: [-1, -0.916667, -0.833333, -0.75, -0.666667, -0.583333, -0.5, -0.416667, -0.333333, -0.25, -0.166667, -0.0833333, 0, 0.0833333, 0.166667, 0.25, 0.333333, 0.416667, 0.5, 0.583333, 0.666667, 0.75, 0.833333, 0.916667, 1]
   torque_nm: [-223.0, -204.4167, -185.8333, -167.25, -148.6667, -130.0833, -111.5, -92.9167, -74.3333, -55.75, -37.1667, -18.5833, 0.0, 18.5833, 37.1667, 55.75, 74.3333, 92.9167, 111.5, 130.0833, 148.6667, 167.25, 185.8333, 204.4167, 223.0]
@@ -11,18 +16,18 @@ tables:
   file: tables/mgu_k.parquet
   loss_w: true
 limits:
-  # Peak torque 223 N·m: the MGU-K sits on the crank (≤ 15 000 rpm redline), so this is the torque that
-  # delivers the FIA 350 kW deploy there (τ = P/ω). Constant torque to the 15 000 rpm base speed, then a
-  # constant-power (350 kW) taper — 139 N·m @ 24 krpm, 67 N·m @ 50 krpm. (Was 120 N·m, which topped out
-  # near 188 kW at the redline and left the machine unable to put down its rated deploy — D-M6-13 L2.)
+  # Peak torque 223 N·m at the OUTPUT SHAFT (the crank), constant to its 15 000 rpm redline where
+  # τ·ω = 350 kW — the FIA C5.2.7 deploy ceiling. (Was 120 N·m, which topped out near 188 kW there and
+  # left the machine unable to put down its rated deploy — D-M6-13 L2.) The rotor's constant-power
+  # taper sits above the lumped reduction's base speed and is not reachable through this shaft;
+  # carrying it here implied the crank could turn to 50 000 rpm — D-M6-13 L3.
   max_torque_nm_vs_speed:
-    speed_rpm: [0.0, 15000.0, 24000.0, 50000.0]
-    torque_nm: [223.0, 223.0, 139.0, 67.0]
-  # Regen envelope confirmed symmetric with drive by the 6Et_730V reference (peak ratio 1.0);
-  # follows the same constant-power taper (both voltage-limited) — D-M6-13 Layer 2.
+    speed_rpm: [0.0, 15000.0]
+    torque_nm: [223.0, 223.0]
+  # Regen envelope confirmed symmetric with drive by the 6Et_730V reference (peak ratio 1.0).
   max_regen_torque_nm_vs_speed:
-    speed_rpm: [0.0, 15000.0, 24000.0, 50000.0]
-    torque_nm: [223.0, 223.0, 139.0, 67.0]
+    speed_rpm: [0.0, 15000.0]
+    torque_nm: [223.0, 223.0]
   # Continuous (thermal) rating — a validation reference only; the `.emotor` computes the real derate.
   # Unchanged from the 120 N·m machine: raising PEAK torque does not raise the sustained thermal duty.
   cont_torque_nm_vs_speed:
