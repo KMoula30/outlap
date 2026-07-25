@@ -48,7 +48,9 @@ use crate::fuel::FuelCoupling;
 use crate::path::T0Path;
 use crate::result::{LapResult, LineDescriptor, T0Workspace};
 use crate::solver::{derive_ax, lap_result_from_ws, solve_into_ggv, solve_into_ggv_coupled};
-use crate::t1::{GgvEnvelope, MachineThermal, Pack, PackState, T1Vehicle, TrimInput, TrimOutcome};
+use crate::t1::{
+    GgvEnvelope, MachineThermal, Pack, PackState, T1Powertrain, T1Vehicle, TrimInput, TrimOutcome,
+};
 use crate::tire::{tire_slow_log, TireSlowLog, TireThermalMarch};
 use crate::vehicle::T0Vehicle;
 use crate::G;
@@ -353,6 +355,16 @@ pub enum QssError {
          nothing to bank deployment/harvest into"
     )]
     ErsCouplingWithoutPack,
+    /// A policy-governed car reached the ERS march without its machine efficiency map installed —
+    /// a pre-Layer-2 (D-M6-13) car. The deploy must read the machine's real `η(rpm, τ)`; there is
+    /// no flat-0.97 fallback. Add the governed unit's `.ptm` efficiency/loss sidecar (parquet) and
+    /// install it, or drop the `policy:` overlay for an unmanaged car.
+    #[error(
+        "the policy-governed machine has no installed efficiency map — Layer 2 (D-M6-13) needs its \
+         real η(rpm, τ); author + install the governed `.ptm` efficiency/loss sidecar (there is no \
+         flat-0.97 fallback)"
+    )]
+    GovernedMachineNotIngested,
     /// A transient tier was requested — it is not implemented in this milestone.
     #[error(
         "solver tier `{tier}` is not implemented yet (the transient tiers arrive in milestone \
@@ -494,8 +506,15 @@ fn march_slow_states(
         // Signed wheel force demanded: F = m·(a_x + drag_accel + g·sinθ_g); > 0 drive, < 0 brake.
         let f_req = m * (ax[i] + env.drag_accel(vi) + G * path.sin_g[i]);
         if let Some(e) = ers {
+            // Pack terminal voltage (governed pack) for the machine's η(rpm, τ, vdc) lookup, and the
+            // entry-state winding-thermal derate that caps the machine's deliverable power this step
+            // (Layer 2 / D-M6-13: the governed MGU-K's LPTN now marches UNDER the manager and its
+            // derate binds the electric deploy share — the deliberate D-M6-10 reversal).
+            let vdc = c.packs[gp].terminal_voltage_v(&states[gp]);
+            let entry_derate = thermal.as_ref().map_or(1.0, MachineThermal::derate);
             let cmd = ers_decide(
                 t0,
+                pt,
                 e,
                 &states[gp],
                 f_req,
@@ -514,7 +533,7 @@ fn march_slow_states(
                 swing_soc: e.swing_limit_j / c.packs[gp].total_energy_j(),
             };
             let realized = ers_realize(
-                t0,
+                pt,
                 e,
                 &c.packs[gp],
                 &mut states[gp],
@@ -525,11 +544,27 @@ fn march_slow_states(
                 band,
                 bufs,
                 i,
+                vdc,
+                entry_derate,
             );
-            ledger.record(&realized, dt);
+            // Advance the governed machine's LPTN with the deploy loss just realized (Phase C): the
+            // derate above bound THIS step, and this heat sets the NEXT step's derate — negative
+            // feedback (hotter → less deploy → less loss). Under a manager the mechanical `scale`
+            // stays 1 (the ICE covers the rest); the derate rides the deploy only.
+            if let Some(th) = thermal.as_mut() {
+                if realized.machine_loss_w > 0.0 {
+                    let _ = th.step(
+                        realized.machine_loss_w,
+                        |_| None,
+                        realized.machine_omega_rad_s,
+                        dt,
+                    );
+                }
+            }
+            ledger.record(&realized.cmd, dt);
             // Ramp episode accounting (the manager_trace idiom): reductions accumulate while the
             // signed K power falls, and the episode resets the moment it rises.
-            let k_now = realized.deploy_w - realized.harvest_w;
+            let k_now = realized.cmd.deploy_w - realized.cmd.harvest_w;
             if k_now < prev_k_power_w {
                 ramp_reduced_w += prev_k_power_w - k_now;
             } else {
@@ -632,6 +667,7 @@ fn march_slow_states(
 #[allow(clippy::too_many_arguments)]
 fn ers_decide(
     t0: &T0Vehicle,
+    pt: &T1Powertrain,
     e: &ErsCoupling,
     st: &PackState,
     f_req: f64,
@@ -674,8 +710,11 @@ fn ers_decide(
             e.max_regen_frac * e.regen_axle_share * braking_power.max(0.0),
         )
     };
-    // Harvest ceilings 1 (machine envelope, symmetric-machine proxy) + 2 (low-speed fade).
-    let mech_regen_envelope_w = e.p_mech_max_w * ErsCoupling::fade(vi);
+    // Harvest ceilings 1 (machine envelope) + 2 (low-speed fade). Layer 2 (D-M6-13): the real
+    // per-speed regen mechanical envelope from the governed machine map (no scalar fallback —
+    // `check_couplings` guarantees the map; `None` means no on-envelope gear ⇒ no regen this speed).
+    let mech_regen_envelope_w =
+        pt.governed_regen_envelope_w(vi).unwrap_or(0.0) * ErsCoupling::fade(vi);
     let inp = DecideInput {
         v: vi,
         driver_demand,
@@ -695,9 +734,17 @@ fn ers_decide(
 /// Apply the downstream ceilings the tier owns to a manager command — the pack has the final
 /// word — advance the pack, and fill the station's buffers. Returns the REALIZED command (what
 /// the ledger banks).
+/// The realized ERS command plus the governed machine's deploy heat (Layer 2, D-M6-13): the loss
+/// that advances the LPTN winding and the crank speed that drives its cooling this step.
+struct Realized {
+    cmd: ErsCommand<f64>,
+    machine_loss_w: f64,
+    machine_omega_rad_s: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ers_realize(
-    t0: &T0Vehicle,
+    pt: &T1Powertrain,
     e: &ErsCoupling,
     pack: &Pack,
     st: &mut PackState,
@@ -708,12 +755,16 @@ fn ers_realize(
     band: SwingBand,
     bufs: &mut SlowMarchBuffers,
     i: usize,
-) -> ErsCommand<f64> {
+    vdc: f64,
+    entry_derate: f64,
+) -> Realized {
     let mut realized = ErsCommand {
         deploy_w: 0.0,
         harvest_w: 0.0,
         mode: cmd.mode,
     };
+    let mut machine_loss_w = 0.0_f64;
+    let mut machine_omega_rad_s = 0.0_f64;
     // The SoC floor/ceiling this step must respect: the PHYSICAL usable window intersected with the
     // REGULATORY C5.2.9 swing band (running-band clip — see `SwingBand`). The two are independent:
     // for a pack sized to the reg they coincide; for a physically larger pack the reg band bites
@@ -733,10 +784,21 @@ fn ers_realize(
         if soc_floor > phys_lo {
             p_elec = p_elec.min((st.soc - soc_floor).max(0.0) * e_total / dt);
         }
-        let (_p_mech, p_elec_real) = t0.ers_realized_deploy_w(p_elec);
-        pack.step_power(st, p_elec_real, dt);
-        bufs.deploy_force_n[i] = t0.ers_deploy_force_n(vi, p_elec_real);
-        realized.deploy_w = p_elec_real;
+        // Layer 2 (D-M6-13): route the deploy through the governed machine's real η(rpm, τ) map
+        // (derated by the winding-thermal state), draining the pack by the electrical power the
+        // machine actually uses and recording the loss/shaft-speed for the LPTN. `check_couplings`
+        // guarantees the map is ingested for a governed car (there is NO flat-0.97 fallback); a
+        // `None` here means no on-envelope gear at this speed, so the machine cannot deploy this
+        // station — no force, and the pack merely idles (relaxes) this segment.
+        if let Some(dep) = pt.governed_deploy(vi, p_elec, Some(vdc), e.eta, entry_derate) {
+            pack.step_power(st, dep.p_elec_used_w, dt);
+            bufs.deploy_force_n[i] = dep.force_n;
+            realized.deploy_w = dep.p_elec_used_w;
+            machine_loss_w = dep.loss_w;
+            machine_omega_rad_s = dep.omega_rad_s;
+        } else {
+            pack.step_power(st, 0.0, dt);
+        }
     } else if cmd.harvest_w > 0.0 {
         // Harvest ceiling 3: pack charge acceptance (design curve × kinetic derate ∧ CV taper),
         // then — only if the reg ceiling sits BELOW the physical ceiling — the reg headroom.
@@ -765,7 +827,11 @@ fn ers_realize(
     st.soc = st.soc.clamp(soc_floor, soc_ceil);
     bufs.deploy_w[i] = realized.deploy_w;
     bufs.harvest_w[i] = realized.harvest_w;
-    realized
+    Realized {
+        cmd: realized,
+        machine_loss_w,
+        machine_omega_rad_s,
+    }
 }
 
 /// The FIA C5.2.9 regulatory swing band for the current step: the running SoC min/max seen so far
@@ -1107,6 +1173,16 @@ fn check_couplings(couplings: &Couplings<'_>) -> Result<(), QssError> {
     if couplings.ers.is_some() && couplings.electro.is_none() {
         return Err(QssError::ErsCouplingWithoutPack);
     }
+    // Layer 2 (D-M6-13): a policy-governed car deploys through the machine's real η(rpm, τ) map —
+    // there is no flat-0.97 fallback. If the manager is active but the governed machine's efficiency
+    // map was never installed (a pre-Layer-2 car), crash with a clear error rather than mis-deploy.
+    if couplings.ers.is_some() {
+        if let Some(electro) = couplings.electro {
+            if !electro.vehicle.powertrain().governed_machine_ingested() {
+                return Err(QssError::GovernedMachineNotIngested);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1402,15 +1478,15 @@ pub fn solve_stint(
         // Carry the terminal fuel mass into the next lap (a lighter car ⇒ a faster lap, D-M6-4). A
         // `None` terminal keeps the prior seed rather than resetting to the full tank.
         fuel_seed = qss.slow_terminal.fuel_kg.or(fuel_seed);
-        // The machine-thermal network is NOT carried across the QSS lap boundary — it re-seeds each
-        // lap (the terminal is still surfaced as an end-of-lap diagnostic). Coupling a near-limit
-        // winding temperature into the quasi-steady DISTANCE march creates a derate↔slowdown
-        // positive feedback (a slower lap integrates MORE heating over its longer time, so the
-        // winding gets hotter, derates harder, slows further) with no inter-lap cooling to arrest
-        // it — an artifact of the QSS march, not real thermal behaviour. Inter-lap machine-thermal
-        // continuity is the transient tier's job (T2, with real-time cooling); this QSS EV-stint
-        // asymmetry is recorded (§13 validation). Under an energy manager the machine is not marched
-        // at all (D-M6-10), so this only affects mapped-EV stints.
+        // The machine-thermal network marches WITHIN a lap (Layer 2, D-M6-13: under a manager its
+        // derate binds the deploy; on a mapped-EV lap it binds traction) but is NOT carried across the
+        // QSS lap boundary — it re-seeds each lap (the terminal is still surfaced as an end-of-lap
+        // diagnostic). Coupling a near-limit winding temperature into the quasi-steady DISTANCE march
+        // creates a derate↔slowdown positive feedback (a slower lap integrates MORE heating over its
+        // longer time, so the winding gets hotter, derates harder, slows further) with no inter-lap
+        // cooling to arrest it — an artifact of the QSS march, not real thermal behaviour. Full
+        // inter-lap machine-thermal continuity is the transient tier's job (T2/T3, with real-time
+        // cooling — D-M6-13 Layer 2); this QSS asymmetry is recorded (§13 validation).
         laps.push(StintLap {
             lap_time_s: qss.lap.lap_time_s,
             v: qss.lap.v,

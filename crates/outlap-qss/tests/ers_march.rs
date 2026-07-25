@@ -106,6 +106,31 @@ struct Hybrid {
     state: PackState,
 }
 
+/// Install each drive unit's `.ptm` efficiency/loss sidecar into `t1` (mirrors the Python assembly
+/// edge). Layer 2 (D-M6-13) needs the governed machine's real η(rpm, τ) map, and `solve_*` now
+/// hard-errors a policy-governed car whose machine map was never installed (no flat-0.97 fallback).
+fn install_maps(t1: &mut T1Vehicle, resolved: &ResolvedVehicle, loader: &FsLoader) {
+    for (idx, unit) in resolved.spec.drivetrain.units.iter().enumerate() {
+        let Ok(ptm) = outlap_schema::load::load_ptm(unit.source.as_str(), loader) else {
+            continue;
+        };
+        let sidecar = match unit.source.as_str().rsplit_once('/') {
+            Some((parent, _)) => format!("{parent}/{}", ptm.tables.file.as_str()),
+            None => ptm.tables.file.as_str().to_owned(),
+        };
+        let Ok(bytes) = loader.load_bytes(&sidecar) else {
+            continue;
+        };
+        let table = if ptm.axes.vdc_v.is_some() {
+            read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names_vdc())
+        } else {
+            read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names())
+        }
+        .unwrap();
+        t1.install_powertrain_maps(idx, &table).unwrap();
+    }
+}
+
 fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
     let loader = fixtures();
     let resolved = load_vehicle(
@@ -115,7 +140,8 @@ fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
     )
     .expect("fixture hybrid resolves (incl. the ers↔battery cross-check)");
     // allow_degraded: the gt_hybrid fixture has no constant-aero block (zero-aero fallback).
-    let t1 = T1Vehicle::assemble(&resolved, &Conditions::default(), &loader, true).unwrap();
+    let mut t1 = T1Vehicle::assemble(&resolved, &Conditions::default(), &loader, true).unwrap();
+    install_maps(&mut t1, &resolved, &loader);
     let res = EnvelopeRes {
         v_points: 6,
         ax_points: 5,
@@ -372,6 +398,10 @@ fn pack_soc_closes_against_the_ledger_over_the_lap() {
     .unwrap()
     .unwrap();
     let mut st = h.state;
+    // Layer 2 (D-M6-13): the oracle deploys through the SAME governed-machine η(rpm, τ) path the
+    // production march uses (no thermal here — `managed_lap` builds the coupling with `thermal: None`,
+    // so the derate is 1.0). This keeps the independent re-march an honest cross-check of the ledger.
+    let pt = h.t1.powertrain();
     let mut ledger = LapEnergyLedger::<f64>::new();
     let mut ax = vec![0.0; path.len()];
     derive_ax_like(&path, &lap.lap.v, &mut ax);
@@ -404,7 +434,8 @@ fn pack_soc_closes_against_the_ledger_over_the_lap() {
             v: vi,
             driver_demand: dem,
             brake_demand_w: brake,
-            mech_regen_envelope_w: e.p_mech_max_w * ErsCoupling::fade(vi),
+            mech_regen_envelope_w: pt.governed_regen_envelope_w(vi).unwrap_or(e.p_mech_max_w)
+                * ErsCoupling::fade(vi),
             ice_surplus_w: surplus,
             soc: st.soc,
             override_active: false,
@@ -417,7 +448,10 @@ fn pack_soc_closes_against_the_ledger_over_the_lap() {
         // Realize against the pack exactly as the march does.
         let (dw, hw) = if cmd.deploy_w > 0.0 {
             let p = cmd.deploy_w.min(h.pack.discharge_power_limit_w(&st));
-            let (_pm, pe) = h.t0.ers_realized_deploy_w(p);
+            let vdc = h.pack.terminal_voltage_v(&st);
+            let pe = pt
+                .governed_deploy(vi, p, Some(vdc), e.eta, 1.0)
+                .map_or_else(|| h.t0.ers_realized_deploy_w(p).1, |d| d.p_elec_used_w);
             h.pack.step_power(&mut st, pe, dt);
             (pe, 0.0)
         } else if cmd.harvest_w > 0.0 {
@@ -624,12 +658,17 @@ fn override_extends_the_envelope_and_the_harvest_bonus() {
     };
     let normal = solve(false);
     let over = solve(true);
-    // The override envelope holds full power to a higher speed: the lap can only get faster.
+    // The override envelope holds full deploy power to a HIGHER speed (C5.2.11), so the car reaches a
+    // higher top speed on the straight — the direct signature of the wider envelope. Net lap time is
+    // NOT a clean proxy: with the MGU-K sized to deploy its rated 350 kW (223 N·m at the crank
+    // redline, D-M6-13 L2), override drains the pack sooner, so the extra super-clip "power limited"
+    // running can make the lap legitimately SLOWER — the real cost of Overtake overuse. So we assert
+    // the envelope extension itself: override reaches at least the normal top speed.
+    let v_max = |r: &QssLap| r.lap.v.iter().copied().fold(f64::MIN, f64::max);
+    let (v_over, v_normal) = (v_max(&over), v_max(&normal));
     assert!(
-        over.lap.lap_time_s <= normal.lap.lap_time_s + 1e-9,
-        "override lap {:.4} s slower than normal {:.4} s",
-        over.lap.lap_time_s,
-        normal.lap.lap_time_s
+        v_over >= v_normal - 1e-6,
+        "override top speed {v_over:.2} m/s below normal {v_normal:.2} m/s — envelope did not extend"
     );
     // And the Recharge ledger may use the +0.5 MJ bonus (C5.2.10iii) — never exceeded.
     let rb: ErsRulebook<f64> = ErsRulebook::from_schema(

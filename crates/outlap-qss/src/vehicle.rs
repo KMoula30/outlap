@@ -26,7 +26,7 @@ const RPM_TO_RAD_PER_S: f64 = std::f64::consts::PI / 30.0;
 /// Specific gas constant for dry air, J/(kg·K).
 const DRY_AIR_R: f64 = 287.05;
 /// Speed floor for the ERS power→force conversion (the friction ellipse caps launch force anyway).
-const ERS_V_FLOOR_MPS: f64 = 1.0;
+pub(crate) const ERS_V_FLOOR_MPS: f64 = 1.0;
 
 /// Options controlling T0 assembly and solving.
 #[derive(Clone, Debug)]
