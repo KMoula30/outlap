@@ -63,8 +63,17 @@ def test_qss_stint_surfaces_soc_channels(f1_stint: xr.Dataset) -> None:
     assert ds["pack_temp_c"].dims == ("lap",)
     soc = ds["state_of_charge"].values
     assert np.all((soc >= 0.0) & (soc <= 1.0)), "SoC stays in [0, 1]"
-    # No machine-thermal network on the f1 ES stack (relaxed pairing) → no machine channel.
-    assert "machine_temp_c" not in ds
+    # Layer 2 (D-M6-13): the f1 MGU-K now carries an `.emotor`, so its winding-thermal channel is
+    # surfaced (marched WITHIN a QSS lap under the manager; re-seeded each lap — not carried, the
+    # distance-march runaway artifact). It must be present and physical (finite, below the derate
+    # limit — the derate self-caps the winding at T_max).
+    assert "machine_temp_c" in ds, (
+        "the governed MGU-K's winding channel is surfaced (Layer 2)"
+    )
+    winding = ds["machine_temp_c"].values
+    assert np.all(np.isfinite(winding)) and np.all(winding < 200.0), (
+        "winding temperature is finite and thermally bounded (no runaway)"
+    )
 
 
 def test_qss_stint_soc_is_continuous_across_lap_boundaries(
@@ -168,8 +177,11 @@ def test_stint_soc_10lap_both_tiers_consumption_and_regeneration(
     boundaries, and is never re-seeded per lap. (f1_2026 is a hard-deploying, SoC-starved car: it
     cycles its whole usable window every lap and charge-sustains at the floor — so "consumption AND
     regeneration" shows as the full within-lap swing, and the carry shows as the pack sitting at the
-    physics-driven floor from lap 2 on, NOT back at the mid-window seed.) The exact charge closure is
-    the Rust companion `crates/outlap-qss/tests/stint.rs`.
+    physics-driven floor from lap 2 on, NOT back at the mid-window seed. Layer 2 (D-M6-13): the MGU-K
+    now runs through its real η / torque envelope / regen / winding-thermal derate, and its peak torque
+    is sized (223 N·m) to deliver the FIA 350 kW deploy at the 15 000 rpm crank redline — so it deploys
+    hard and drains to the floor, both tiers alike.) The exact charge closure is the Rust companion
+    `crates/outlap-qss/tests/stint.rs`.
     """
     q, t2 = f1_10lap_qss, f1_10lap_t2
     assert q.sizes["lap"] == 10, "QSS stint ran all 10 laps"
@@ -218,7 +230,9 @@ def test_stint_soc_10lap_both_tiers_consumption_and_regeneration(
     )
 
     # (5) Cross-tier agreement: both tiers cycle the same usable window (harvest toward the ceiling)
-    #     and settle to the same end-of-lap SoC (both charge-sustain at the floor).
+    #     and settle to the same end-of-lap SoC (both charge-sustain at the floor). With the MGU-K
+    #     sized to deploy its rated 350 kW (223 N·m at the crank redline, D-M6-13 L2), the deploy
+    #     out-paces the harvest and BOTH tiers drain to the window floor and hold there.
     assert (q["soc_max"].values > 0.8).all(), "QSS recharges toward the window ceiling"
     assert (t2["soc_max"].values > 0.8).all(), "T2 recharges toward the window ceiling"
     assert np.allclose(qsoc[:, -1], t2["state_of_charge"].values, atol=0.06), (
