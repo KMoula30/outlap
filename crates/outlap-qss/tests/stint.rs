@@ -96,6 +96,31 @@ struct Hybrid {
     state: PackState,
 }
 
+/// Install each drive unit's `.ptm` efficiency/loss sidecar into `t1` (mirrors the Python edge) —
+/// Layer 2 (D-M6-13) needs the governed machine's η(rpm, τ) map; `solve_stint` hard-errors a managed
+/// car without it (no flat-0.97 fallback).
+fn install_maps(t1: &mut T1Vehicle, resolved: &outlap_schema::ResolvedVehicle, loader: &FsLoader) {
+    for (idx, unit) in resolved.spec.drivetrain.units.iter().enumerate() {
+        let Ok(ptm) = outlap_schema::load::load_ptm(unit.source.as_str(), loader) else {
+            continue;
+        };
+        let sidecar = match unit.source.as_str().rsplit_once('/') {
+            Some((parent, _)) => format!("{parent}/{}", ptm.tables.file.as_str()),
+            None => ptm.tables.file.as_str().to_owned(),
+        };
+        let Ok(bytes) = loader.load_bytes(&sidecar) else {
+            continue;
+        };
+        let table = if ptm.axes.vdc_v.is_some() {
+            read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names_vdc())
+        } else {
+            read_gridded_table(&bytes, &outlap_qss::T1Powertrain::map_axis_names())
+        }
+        .unwrap();
+        t1.install_powertrain_maps(idx, &table).unwrap();
+    }
+}
+
 fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
     let loader = fixtures();
     let resolved = load_vehicle(
@@ -104,7 +129,8 @@ fn hybrid(dir: &str, initial_soc: Option<f64>) -> Hybrid {
         &LoadOptions::default(),
     )
     .expect("fixture hybrid resolves");
-    let t1 = T1Vehicle::assemble(&resolved, &Conditions::default(), &loader, true).unwrap();
+    let mut t1 = T1Vehicle::assemble(&resolved, &Conditions::default(), &loader, true).unwrap();
+    install_maps(&mut t1, &resolved, &loader);
     let res = EnvelopeRes {
         v_points: 6,
         ax_points: 5,

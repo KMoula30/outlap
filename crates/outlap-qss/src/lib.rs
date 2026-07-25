@@ -63,8 +63,9 @@ pub use solver::{
 pub use stack::{plan_slow_stack, SlowStackPlan, ThermalPairing};
 pub use t1::{
     load_transfer, split_axle, AeroCoeffs, AeroLumped, AeroMap, DiffModel, EnergyPoint,
-    GgvEnvelope, LoadTransferGeometry, MachineThermal, Pack, PackState, PrimaryDiff, StepOut,
-    T1Powertrain, T1Vehicle, TireStateRes, TrimInput, TrimOutcome, TrimState,
+    GgvEnvelope, GovernedDeploy, GovernedMachine, LoadTransferGeometry, MachineThermal, Pack,
+    PackState, PrimaryDiff, StepOut, T1Powertrain, T1Vehicle, TireStateRes, TrimInput, TrimOutcome,
+    TrimState,
 };
 pub use tire::{TireSlowLog, TireThermalMarch};
 pub use vehicle::{T0Options, T0Vehicle};

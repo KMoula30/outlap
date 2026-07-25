@@ -333,6 +333,201 @@ impl PtUnit {
         }
         best.map(|(_, rpm, tau)| (rpm, tau))
     }
+
+    /// Best-gear crank shaft speed (rad/s) for the machine at vehicle speed `v` — the gear that
+    /// maximises deliverable mechanical power `peak_env(ω)·ω`. `None` if no gear is on-envelope.
+    fn best_deploy_omega(&self, v: f64) -> Option<f64> {
+        let mut best: Option<(f64, f64)> = None; // (mech power, omega)
+        for g in &self.gears {
+            let omega = g.ratio / self.r_wheel * v;
+            if omega <= self.omega_max {
+                let p = self.peak_env.eval(omega) * omega;
+                if best.is_none_or(|(bp, _)| p > bp) {
+                    best = Some((p, omega));
+                }
+            }
+        }
+        best.map(|(_, omega)| omega)
+    }
+
+    /// The machine deploy at bus power `p_elec` (W) and speed `v` (m/s), with the winding-thermal
+    /// `derate` (0..1) capping the deliverable torque (Layer 2, D-M6-13). Resolves the operating
+    /// point through the efficiency map (a short fixed point in torque — `η(rpm, τ)` replaces the
+    /// flat regulatory 0.97), caps the mechanical power by the derated machine envelope, and returns
+    /// `(p_mech_w, p_elec_used_w, loss_w, omega_rad_s)`. `p_elec_used ≤ p_elec` when the machine
+    /// envelope binds (the pack never pays for power the machine cannot convert). Zero-allocation.
+    fn machine_deploy(
+        &self,
+        v: f64,
+        p_elec: f64,
+        vdc: Option<f64>,
+        derate: f64,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let omega = self.best_deploy_omega(v)?;
+        let rpm = omega / RPM_TO_RAD_PER_S;
+        // Derated machine peak mechanical power at this speed (the thermal derate scales torque).
+        let p_cap = (self.peak_env.eval(omega) * omega * derate.clamp(0.0, 1.0)).max(0.0);
+        // Fixed point: p_mech = p_elec · η(rpm, p_mech/ω). η is smooth ⇒ a few iterations converge.
+        let mut eta = 0.9_f64;
+        let mut p_mech = (p_elec * eta).max(0.0);
+        for _ in 0..3 {
+            let tau = if omega > 1e-6 { p_mech / omega } else { 0.0 };
+            eta = self
+                .eff_map
+                .as_ref()
+                .map_or(0.97, |m| self.eval_map(m, rpm, tau, vdc).clamp(1e-3, 1.0));
+            p_mech = (p_elec * eta).max(0.0);
+        }
+        // Cap by the (derated) machine envelope; when it binds, back-solve the electrical draw.
+        let (p_mech, p_elec_used) = if p_mech > p_cap {
+            (p_cap, p_cap / eta.max(1e-3))
+        } else {
+            (p_mech, p_elec)
+        };
+        let loss_w = (p_elec_used - p_mech).max(0.0);
+        Some((p_mech, p_elec_used, loss_w, omega))
+    }
+
+    /// The machine's best-gear regen mechanical-power envelope at `v`, W (positive). Layer 2 replaces
+    /// the ratio-invariant scalar `p_mech_max_w` proxy with the machine's real regen envelope.
+    fn machine_regen_envelope_w(&self, v: f64) -> Option<f64> {
+        let mut best = 0.0_f64;
+        let mut any = false;
+        for g in &self.gears {
+            let omega = g.ratio / self.r_wheel * v;
+            if omega <= self.regen_omega_max {
+                best = best.max(self.regen_env.eval(omega) * omega);
+                any = true;
+            }
+        }
+        any.then_some(best)
+    }
+}
+
+/// An owned, self-contained handle on the policy-governed machine (Layer 2, D-M6-13) for consumers
+/// that outlive the [`T1Powertrain`] borrow — notably the transient tier's step-boundary ERS
+/// governor. Carries the machine's gear ladder + efficiency/loss/regen maps by value, so a single
+/// clone at assembly serves the whole run (no per-step allocation).
+#[derive(Clone, Debug)]
+pub struct GovernedMachine {
+    unit: PtUnit,
+}
+
+impl GovernedMachine {
+    /// The machine deploy at bus power `p_elec` (W), speed `v` (m/s), pack voltage `vdc`, driveline
+    /// efficiency `eta`, and winding-thermal `derate` (0..1) — the real `η(rpm, τ)` deploy (force,
+    /// electrical draw, loss, shaft speed). `None` when no on-envelope gear at this speed.
+    #[must_use]
+    pub fn deploy(
+        &self,
+        v: f64,
+        p_elec: f64,
+        vdc: Option<f64>,
+        eta: f64,
+        derate: f64,
+    ) -> Option<GovernedDeploy> {
+        let (p_mech, p_elec_used, loss_w, omega) =
+            self.unit.machine_deploy(v, p_elec, vdc, derate)?;
+        Some(GovernedDeploy {
+            force_n: eta * p_mech / v.max(crate::vehicle::ERS_V_FLOOR_MPS),
+            p_elec_used_w: p_elec_used,
+            loss_w,
+            omega_rad_s: omega,
+        })
+    }
+
+    /// The machine's best-gear regen mechanical-power envelope at `v`, W (positive). `None` when no
+    /// on-envelope gear at this speed.
+    #[must_use]
+    pub fn regen_envelope_w(&self, v: f64) -> Option<f64> {
+        self.unit.machine_regen_envelope_w(v)
+    }
+}
+
+/// The policy-governed machine's deploy at an operating point (Layer 2, D-M6-13): the wheel force
+/// (through the driveline efficiency), the electrical bus power actually drawn, the machine loss
+/// heating the LPTN, and the crank shaft speed (the LPTN cooling driver).
+#[derive(Clone, Copy, Debug)]
+pub struct GovernedDeploy {
+    /// Wheel deploy force, N (`η_driveline · p_mech / v`).
+    pub force_n: f64,
+    /// Electrical bus power drawn from the pack, W (≤ the commanded `p_elec`).
+    pub p_elec_used_w: f64,
+    /// Machine electrical→mechanical loss at this operating point, W (heats the winding).
+    pub loss_w: f64,
+    /// Crank shaft speed, rad/s (the machine-thermal cooling driver).
+    pub omega_rad_s: f64,
+}
+
+/// Build one [`PtUnit`] from a drive unit's `.ptm` + flattened graph chain (gears, peak/regen
+/// envelopes, differential). The efficiency/loss maps are installed later. Shared by the mechanical
+/// units loop and the Layer-2 governed-machine ingestion so both flow through identical math.
+fn build_pt_unit(
+    drivetrain: &outlap_schema::vehicle::Drivetrain,
+    unit: &outlap_schema::vehicle::DriveUnit,
+    i: usize,
+    r_front: f64,
+    r_rear: f64,
+    loader: &dyn SourceLoader,
+    notes: &mut Vec<String>,
+) -> Result<PtUnit, T1Error> {
+    let ptm = load_ptm(unit.source.as_str(), loader)?;
+    // Flatten the shared graph: private path ++ couplers from the source's output node.
+    let (chain, wheels) = crate::graph::flatten_chain(drivetrain, unit);
+    let mut driven = [false; 4];
+    for w in &wheels {
+        driven[wheel_index(*w)] = true;
+    }
+    let r_wheel = driven_radius(driven, r_front, r_rear);
+    let (base_ratio, base_eff, gearbox, has_eff_map) = fold_path(&chain);
+    if has_eff_map {
+        notes.push(format!(
+            "drive unit {i} gearbox uses a map efficiency; a constant proxy carries the \
+             traction force until the efficiency map is installed"
+        ));
+    }
+    let gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
+    let shift_time_s = gearbox.map_or(0.0, |g| g.shift_time_s);
+    let peak_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
+    let omega_max = peak_env.domain().1;
+    // The regen (negative-quadrant) envelope. An ICE recovers nothing; an electric machine with no
+    // declared envelope is assumed symmetric with its drive envelope (estimated, surfaced #41).
+    let regen_env = match (&ptm.kind, &ptm.limits.max_regen_torque_nm_vs_speed) {
+        (PtmKind::Ice, _) => {
+            notes.push(format!(
+                "drive unit {i} is an internal-combustion engine: it recovers no braking \
+                 energy (regen envelope zero; overrun drag is not commandable regen)"
+            ));
+            zero_env(&peak_env)?
+        }
+        (_, Some(curve)) => torque_env(curve)?,
+        (_, None) => {
+            notes.push(format!(
+                "drive unit {i} declares no `max_regen_torque_nm_vs_speed`; its regen \
+                 braking envelope is assumed symmetric with the drive envelope (estimated)"
+            ));
+            peak_env.clone()
+        }
+    };
+    let regen_omega_max = regen_env.domain().1;
+    let diff = diff_model(&chain);
+    Ok(PtUnit {
+        kind: ptm.kind,
+        peak_env,
+        regen_env,
+        regen_omega_max,
+        omega_max,
+        r_wheel,
+        gears,
+        shift_time_s,
+        diff,
+        driven,
+        axle_pair: axle_pair(driven),
+        eff_map: None,
+        loss_map: None,
+        ref_vdc: ptm.meta.dc_voltage_v.unwrap_or(0.0),
+        has_vdc: false,
+    })
 }
 
 /// The drivetrain graph reduced for the T1 quasi-steady-state trim.
@@ -343,6 +538,14 @@ pub struct T1Powertrain {
     /// policy-governed machine excluded from the ceilings) — reconciles the positional sidecar
     /// install with the de-duped unit list (D-M6-13).
     spec_to_slot: Vec<Option<usize>>,
+    /// The policy-governed machine (the MGU-K), ingested as a full [`PtUnit`] (gears from its
+    /// flattened chain, peak/regen envelopes, efficiency/loss maps) but **kept out of the mechanical
+    /// traction/regen sums** — it is force-added by the energy manager, not a mechanical ceiling
+    /// contributor. Layer 2 (D-M6-13) reads its real η(rpm, τ) map here so the ERS deploy stops
+    /// using the flat regulatory 0.97 as if it were the machine loss. `None` when there is no policy.
+    governed: Option<PtUnit>,
+    /// The spec unit index of the governed machine (routes its late sidecar install to `governed`).
+    governed_spec_idx: Option<usize>,
     /// Static front-axle torque share (from `control.split.front`), if declared.
     split_front: Option<f64>,
     /// Static left-side torque share (from `control.split.left`), if declared.
@@ -374,77 +577,40 @@ impl T1Powertrain {
         let governed = crate::graph::governed_unit_ids(spec);
         let mut units = Vec::with_capacity(spec.drivetrain.units.len());
         let mut spec_to_slot: Vec<Option<usize>> = Vec::with_capacity(spec.drivetrain.units.len());
+        let mut governed_unit: Option<PtUnit> = None;
+        let mut governed_spec_idx: Option<usize> = None;
         let mut notes = Vec::new();
         for (i, unit) in spec.drivetrain.units.iter().enumerate() {
             if governed.contains(unit.id.as_str()) {
+                // Layer 2 (D-M6-13): ingest the governed machine as a full `PtUnit` (its gears from
+                // the flattened crank chain, envelopes, and — after `install_maps` — its η/loss maps)
+                // so the ERS deploy can read its real η(rpm, τ). It is NOT pushed into `units`, so it
+                // never enters the mechanical traction/regen ceiling (still force-added by the
+                // manager). Its incidental build notes are discarded (the deploy path adds its own).
+                let mut gnotes = Vec::new();
+                governed_unit = Some(build_pt_unit(
+                    &spec.drivetrain,
+                    unit,
+                    i,
+                    r_front,
+                    r_rear,
+                    loader,
+                    &mut gnotes,
+                )?);
+                governed_spec_idx = Some(i);
                 spec_to_slot.push(None);
                 continue;
             }
             spec_to_slot.push(Some(units.len()));
-            let ptm = load_ptm(unit.source.as_str(), loader)?;
-            // Flatten the shared graph: private path ++ couplers from the source's output node.
-            let (chain, wheels) = crate::graph::flatten_chain(&spec.drivetrain, unit);
-            let mut driven = [false; 4];
-            for w in &wheels {
-                driven[wheel_index(*w)] = true;
-            }
-            let r_wheel = driven_radius(driven, r_front, r_rear);
-            let (base_ratio, base_eff, gearbox, has_eff_map) = fold_path(&chain);
-            if has_eff_map {
-                notes.push(format!(
-                    "drive unit {i} gearbox uses a map efficiency; a constant proxy carries the \
-                     traction force until the efficiency map is installed"
-                ));
-            }
-            let gears = build_gears(base_ratio, base_eff, gearbox, r_wheel);
-            let shift_time_s = gearbox.map_or(0.0, |g| g.shift_time_s);
-            let peak_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
-            let omega_max = peak_env.domain().1;
-            // The regen (negative-quadrant) envelope.
-            //
-            // An internal-combustion engine cannot regenerate: it has no negative quadrant to
-            // command. Its overrun braking is parasitic drag (`drag_torque_nm_vs_speed`), not
-            // recoverable energy, so its regen envelope is identically zero.
-            //
-            // An electric machine that declares no envelope is assumed **symmetric** with its drive
-            // envelope — the usual first-order truth when inverter current sets the limit. That is an
-            // estimate, so it is surfaced, never silent (#41).
-            let regen_env = match (&ptm.kind, &ptm.limits.max_regen_torque_nm_vs_speed) {
-                (PtmKind::Ice, _) => {
-                    notes.push(format!(
-                        "drive unit {i} is an internal-combustion engine: it recovers no braking \
-                         energy (regen envelope zero; overrun drag is not commandable regen)"
-                    ));
-                    zero_env(&peak_env)?
-                }
-                (_, Some(curve)) => torque_env(curve)?,
-                (_, None) => {
-                    notes.push(format!(
-                        "drive unit {i} declares no `max_regen_torque_nm_vs_speed`; its regen \
-                         braking envelope is assumed symmetric with the drive envelope (estimated)"
-                    ));
-                    peak_env.clone()
-                }
-            };
-            let regen_omega_max = regen_env.domain().1;
-            let diff = diff_model(&chain);
-            units.push(PtUnit {
-                kind: ptm.kind,
-                peak_env,
-                regen_env,
-                regen_omega_max,
-                omega_max,
-                r_wheel,
-                gears,
-                shift_time_s,
-                diff,
-                driven,
-                axle_pair: axle_pair(driven),
-                eff_map: None,
-                loss_map: None,
-                ref_vdc: ptm.meta.dc_voltage_v.unwrap_or(0.0),
-                has_vdc: false,
-            });
+            units.push(build_pt_unit(
+                &spec.drivetrain,
+                unit,
+                i,
+                r_front,
+                r_rear,
+                loader,
+                &mut notes,
+            )?);
         }
         let split_front = spec.drivetrain.control.split.front;
         let split_left = spec.drivetrain.control.split.left;
@@ -465,6 +631,8 @@ impl T1Powertrain {
         Ok(Self {
             units,
             spec_to_slot,
+            governed: governed_unit,
+            governed_spec_idx,
             split_front,
             split_left,
             notes,
@@ -492,22 +660,29 @@ impl T1Powertrain {
         // to the de-duped `units` slot; a policy-governed machine maps to `None` and its map is a
         // no-op here (the MGU-K is force-added, never a T1 energy unit — byte-identical to pre-2.0
         // where it was not a drivetrain unit at all).
-        let Some(slot) = self
+        let slot = *self
             .spec_to_slot
             .get(unit_idx)
-            .ok_or(T1Error::UnknownDriveUnit { unit: unit_idx })?
-        else {
+            .ok_or(T1Error::UnknownDriveUnit { unit: unit_idx })?;
+        let is_governed = self.governed_spec_idx == Some(unit_idx);
+        // Resolve the `PtUnit` the table installs into: a mechanical `units` slot, or — Layer 2
+        // (D-M6-13) — the governed machine itself so the ERS deploy reads its real η(rpm, τ)/loss
+        // map rather than the flat regulatory 0.97. A non-governed unit with no slot is a no-op.
+        let unit = if let Some(slot) = slot {
+            self.units
+                .get_mut(slot)
+                .ok_or(T1Error::UnknownDriveUnit { unit: slot })?
+        } else if is_governed {
+            self.governed
+                .as_mut()
+                .ok_or(T1Error::UnknownDriveUnit { unit: unit_idx })?
+        } else {
             self.notes.push(format!(
-                "spec drive unit {unit_idx} is the policy-governed machine — its efficiency/loss \
-                 map is not installed into the T1 ceiling (force-added by the energy manager)"
+                "spec drive unit {unit_idx} has no installable slot — efficiency/loss map not \
+                 installed"
             ));
             return Ok(());
         };
-        let slot = *slot;
-        let unit = self
-            .units
-            .get_mut(slot)
-            .ok_or(T1Error::UnknownDriveUnit { unit: slot })?;
         // A Vdc axis (ptm/1.1) makes the maps 3-D and enables the coupling; extrapolate on Vdc only.
         // The Linear mode and `eval_map` both attach positionally to axis index 2, so the decode must
         // put Vdc last (it does — decode with `map_axis_names_vdc`); assert that contract.
@@ -572,6 +747,57 @@ impl T1Powertrain {
     #[must_use]
     pub fn has_vdc_axis(&self, unit_idx: usize) -> bool {
         self.units.get(unit_idx).is_some_and(|u| u.has_vdc)
+    }
+
+    /// Whether the policy-governed machine has an installed efficiency map — i.e. the Layer-2
+    /// (D-M6-13) deploy path can read its real `η(rpm, τ)` rather than the flat regulatory 0.97.
+    #[must_use]
+    pub fn governed_machine_ingested(&self) -> bool {
+        self.governed.as_ref().is_some_and(|g| g.eff_map.is_some())
+    }
+
+    /// The governed machine's deploy at bus power `p_elec` (W), speed `v` (m/s), pack voltage `vdc`,
+    /// and winding-thermal `derate` (0..1), through the driveline efficiency `eta` — Layer 2's real
+    /// `η(rpm, τ)` deploy (force, electrical draw, loss, shaft speed). `None` when there is no
+    /// governed machine map or no on-envelope gear at this speed (the caller falls back to the T0
+    /// scalar/0.97 path). Cold-map-free; zero-allocation.
+    #[must_use]
+    pub fn governed_deploy(
+        &self,
+        v: f64,
+        p_elec: f64,
+        vdc: Option<f64>,
+        eta: f64,
+        derate: f64,
+    ) -> Option<GovernedDeploy> {
+        let g = self.governed.as_ref()?;
+        let (p_mech, p_elec_used, loss_w, omega) = g.machine_deploy(v, p_elec, vdc, derate)?;
+        Some(GovernedDeploy {
+            force_n: eta * p_mech / v.max(crate::vehicle::ERS_V_FLOOR_MPS),
+            p_elec_used_w: p_elec_used,
+            loss_w,
+            omega_rad_s: omega,
+        })
+    }
+
+    /// The governed machine's regen mechanical-power envelope at `v`, W (positive) — Layer 2's real
+    /// regen ceiling replacing the ratio-invariant `p_mech_max_w` proxy. `None` when there is no
+    /// governed machine or no on-envelope gear.
+    #[must_use]
+    pub fn governed_regen_envelope_w(&self, v: f64) -> Option<f64> {
+        self.governed.as_ref()?.machine_regen_envelope_w(v)
+    }
+
+    /// An owned [`GovernedMachine`] handle (Layer 2, D-M6-13) for consumers that outlive the
+    /// `T1Powertrain` borrow — the transient tier's step-boundary ERS governor. `None` when the
+    /// governed machine's efficiency map is not ingested (a pre-Layer-2 car).
+    #[must_use]
+    pub fn governed_machine(&self) -> Option<GovernedMachine> {
+        self.governed
+            .as_ref()
+            .filter(|g| g.eff_map.is_some())
+            .cloned()
+            .map(|unit| GovernedMachine { unit })
     }
 
     /// Whether ANY drive unit has an installed efficiency map — the assembly-time fact that the
