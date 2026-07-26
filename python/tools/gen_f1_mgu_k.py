@@ -37,13 +37,13 @@ from outlap.importers.pdt_h5.edrive import convert_edrive
 
 # The synthetic MGU-K's authored axes (must match data/vehicles/f1_2026/ptm/mgu_k.ptm.yaml).
 #
-# SPEED IS THE UNIT'S **OUTPUT SHAFT** (D-M6-13 Layer 3). The MGU-K is a `drive_unit`: a bare rotor
+# SPEED IS THE UNIT'S **OUTPUT SHAFT** (D-M6-13 Layer 3). The MGU-K map is a lumped unit: a bare rotor
 # spinning to the regulatory ~50 000 rpm PLUS its fixed step-up reduction, lumped together and
 # expressed at the shaft the unit declares as its `output` — the crank. That shaft is the V6's, so it
 # redlines at 15 000 rpm and the axis stops just past it. (Layer 2 authored a 0–50 000 rpm axis here,
 # which is the ROTOR's range: two thirds of it was unreachable by any solver query AND extrapolated
-# past the 20 000 rpm reference. If a future car declares the machine as a bare `electric_machine`
-# with a `fixed_ratio` on its `path`, THAT map's axis is the rotor's and would run to 50 000.)
+# past the 20 000 rpm reference. If a future car declares the reduction as a `fixed_ratio`
+# on the unit, THAT map's axis is the rotor's and would run to 50 000.)
 #
 # A dense grid (10 speeds × 25 torques) so the efficiency/loss map interpolates smoothly; the whole
 # axis now sits INSIDE the reference sweep's 20 000 rpm domain, so no speed extrapolation remains.

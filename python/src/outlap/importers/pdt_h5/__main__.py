@@ -25,8 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    pe = sub.add_parser("edrive", help="EDrive .h5 → electric_machine .ptm")
-    pd = sub.add_parser("driveunit", help="DriveUnit .h5 → drive_unit .ptm")
+    pe = sub.add_parser("edrive", help="EDrive .h5 → electric .ptm")
+    pd = sub.add_parser("driveunit", help="DriveUnit .h5 → electric .ptm")
     pb = sub.add_parser(
         "batterypack", help="BatteryPack .h5 → provisional battery.yaml"
     )

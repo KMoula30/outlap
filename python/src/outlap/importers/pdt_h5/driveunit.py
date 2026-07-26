@@ -155,7 +155,13 @@ def convert_driveunit(
         git = c.find_git_hash(f, "DriveUnit")
 
     limits: dict[str, Any] = {
-        "max_torque_nm_vs_speed": c.torque_curve(speed_rpm, torque_drive)
+        "max_torque_nm_vs_speed": c.torque_curve(speed_rpm, torque_drive),
+        # The MEASURED regen (negative-quadrant) capability, |peak_op/torque_regen| at the selected
+        # Vdc slice. Writing it means the loader never falls back to the symmetric-machine
+        # assumption for an imported unit — the data carries its own 4th-quadrant boundary.
+        "max_regen_torque_nm_vs_speed": c.torque_curve(
+            speed_rpm, np.abs(np.asarray(torque_regen, dtype=np.float64))
+        ),
     }
     if cont is not None:
         limits["cont_torque_nm_vs_speed"] = c.torque_curve(speed_rpm, cont.reshape(-1))
@@ -181,8 +187,8 @@ def convert_driveunit(
     if regrid_stack is not None:
         axes["vdc_v"] = [round(float(v), 4) for v in regrid_stack.vdc]
     doc: dict[str, Any] = {
-        "schema": "ptm/1.1" if regrid_stack is not None else "ptm/1.0",
-        "kind": "drive_unit",
+        "schema": "ptm/2.0",
+        "kind": "electric",
         "axes": axes,
         "tables": {"file": maps_path.name, "efficiency": True, "loss_w": True},
         "limits": limits,
@@ -191,7 +197,6 @@ def convert_driveunit(
         "meta": {
             "source": f"PDT DriveUnit {alias} {git}{ratio_note}",
             "dc_voltage_v": choice.value,
-            "upstream_ratio_applied": True,
         },
     }
 

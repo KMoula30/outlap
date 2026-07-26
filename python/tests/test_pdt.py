@@ -43,8 +43,8 @@ def test_edrive_converts_and_validates(tmp_path: Path):
     summary = convert_edrive(src, out, vdc=400.0)
     assert out.exists() and Path(summary["maps"]).exists()
     doc = yaml.safe_load(out.read_text())
-    assert doc["schema"] == "ptm/1.0"
-    assert doc["kind"] == "electric_machine"
+    assert doc["schema"] == "ptm/2.0"
+    assert doc["kind"] == "electric"
     # load_axis torque grid == the axes torque grid (schema requires both).
     assert doc["axes"]["load_axis"]["torque_nm"] == doc["axes"]["torque_nm"]
     # Speed axis strictly ascending; meta carries alias + hash + vdc.
@@ -127,8 +127,10 @@ def test_driveunit_handles_capital_t_thermal(tmp_path: Path, thermal_name: str):
     out = tmp_path / "du.ptm.yaml"
     convert_driveunit(src, out, vdc=48.0)
     doc = yaml.safe_load(out.read_text())
-    assert doc["kind"] == "drive_unit"
-    assert doc["meta"]["upstream_ratio_applied"] is True
+    assert doc["kind"] == "electric"
+    assert "upstream_ratio_applied" not in doc["meta"]
+    # The measured 4th-quadrant boundary rides along — no symmetric fallback for imported units.
+    assert "max_regen_torque_nm_vs_speed" in doc["limits"]
     assert "16.24" in doc["meta"]["source"]  # gear ratio recorded in the source string
     assert doc["inertia_kgm2"] == 0.021  # at_output, not at_input
     assert "cont_torque_nm_vs_speed" in doc["limits"]  # thermal group was found
@@ -141,7 +143,7 @@ def test_driveunit_emits_full_vdc_stack_by_default(tmp_path: Path):
     out = tmp_path / "du.ptm.yaml"
     summary = convert_driveunit(src, out)  # default: stack
     doc = yaml.safe_load(out.read_text())
-    assert doc["schema"] == "ptm/1.1"
+    assert doc["schema"] == "ptm/2.0"
     assert doc["axes"]["vdc_v"] == [48.0, 60.0]
     assert summary["vdc_stack"] == [48.0, 60.0]
     cols = pq.read_table(out.with_suffix(".maps.parquet")).column_names
@@ -162,7 +164,7 @@ def test_driveunit_single_vdc_stays_ptm_1_0(tmp_path: Path):
     out = tmp_path / "du.ptm.yaml"
     summary = convert_driveunit(src, out, vdc=48.0)
     doc = yaml.safe_load(out.read_text())
-    assert doc["schema"] == "ptm/1.0"
+    assert doc["schema"] == "ptm/2.0"
     assert "vdc_v" not in doc["axes"]
     assert summary["vdc_stack"] is None
 
