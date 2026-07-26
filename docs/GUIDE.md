@@ -1421,11 +1421,16 @@ limits:
   max_torque_nm_vs_speed:
     speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
     torque_nm: [2765.000, 2765.000, 2765.000, 1935.500, 1455.263, 1165.964, 972.613]
+  # Symmetric by construction — declared explicitly so the data carries its own
+  # 4th-quadrant boundary instead of leaning on the loader's symmetric-machine fallback.
+  max_regen_torque_nm_vs_speed:
+    speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
+    torque_nm: [2765.000, 2765.000, 2765.000, 1935.500, 1455.263, 1165.964, 972.613]
 inertia_kgm2: 1.4
 mass_kg: 82.0
 meta:
+  source: synthetic Model-3-scale drive unit (gen_model3_powertrain.py) — ESTIMATED
   dc_voltage_v: 790.0
-  upstream_ratio_applied: true
 ```
 
 Field by field:
@@ -1433,7 +1438,7 @@ Field by field:
 - **`kind`** is the unit's ENERGY SOURCE and nothing else (`ptm/2.0`): `combustion` (burns fuel — no regenerative quadrant, fuel-mass accounting applies) or `electric` (may regenerate, draws from / harvests into a pack). Where the map is referenced is not the kind's business: every map is read at the shaft its drive unit outputs onto, and a map authored at the machine's own shaft declares the reduction as the unit's `fixed_ratio:` (vehicle/2.1).
 - **`axes`** declares the grid. `speed_rpm` is the shaft-speed axis (rpm is a file-format boundary unit; internally everything is rad/s). `load_axis` is written as either `{torque_nm: [...]}` or `{load_fraction: [...]}` — a load fraction runs −1..1 where negative is the regeneration (braking-recovery) quadrant. `vdc_v` is the optional **DC-link voltage axis** (a 1.x-era feature carried into `ptm/2.0`): when present, the sidecar tables become a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor and the solver evaluates them at the battery's state-of-charge-dependent terminal voltage (Chapter 9). It needs at least two strictly ascending breakpoints. When absent the map is single-voltage, measured at the scalar `meta.dc_voltage_v`.
 - **`tables`** points at the numeric sidecar (§5.8) and declares its columns: `efficiency` (default `true`; values 0..1 covering drive *and* regen quadrants) and `loss_w` (default `false`; a total power-loss column in watts, which must be consistent with efficiency if both are given). The shipped `du_medium.maps.parquet` is a long/tidy table of 210 rows = 7 speeds × 10 torques × 3 voltages with columns exactly `[speed_rpm, torque_nm, vdc_v, efficiency, loss_w]`. Per-component loss columns (winding loss vs iron loss, say) are a hook in the format — the `.emotor` loss routing can name a component column — but in v0.2 the lap loop only consumes total `loss_w`.
-- **`limits`**: only `max_torque_nm_vs_speed` (the peak torque envelope, paired equal-length arrays) is required — it is what caps traction. `cont_torque_nm_vs_speed`, `overload`, and `drag_torque_nm_vs_speed` are optional *validation references*, not the derating mechanism: sustained thermal capability is computed by the `.emotor` model from the loss tables.
+- **`limits`**: only `max_torque_nm_vs_speed` (the peak torque envelope, paired equal-length arrays) is required — it is what caps traction. `max_regen_torque_nm_vs_speed` is the measured **regen (4th-quadrant) envelope**, a positive-magnitude curve on electric maps only (the loader hard-errors on a combustion map declaring one); when an electric map omits it a symmetric envelope is assumed and surfaced as *estimated* in the loaded-model report. `cont_torque_nm_vs_speed`, `overload`, and `drag_torque_nm_vs_speed` are optional *validation references*, not the derating mechanism: sustained thermal capability is computed by the `.emotor` model from the loss tables.
 - **`inertia_kgm2` / `mass_kg`**: rotational inertia referred to this map's shaft, and the mass attributed to the unit (which also feeds the `.emotor` mass heuristics, §5.4).
 
 **The ICE variant** is supported from day one with the same schema. `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml` is a synthetic 1.6 L V6 (`kind: combustion`, `schema: ptm/2.0`) with a torque-axis load and a negative `drag_torque_nm_vs_speed` curve for engine braking. For an ICE the sidecar `efficiency` column is brake thermal efficiency, and the runtime converts source power to a fuel-mass rate using a lower heating value of 43 MJ/kg (see Chapter 9).
@@ -2979,7 +2984,7 @@ $$F_{\max}(v) \;=\; \sum_{\text{units}}\ \max_{g\,:\,\omega_g \le \omega_\text{m
 
 with $\tau_\text{peak}(\omega)$ the `.ptm` peak envelope fitted with the project's one shared monotone cubic Hermite interpolant (Fritsch–Carlson construction; see Chapter 5) and gears whose shaft speed exceeds the envelope's top simply rev-limited out (`PtUnit::max_wheel_force`, `T1Powertrain::max_drive_force` — allocation-free, per the hot-loop rules of Chapter 6).
 
-**A worked example.** The Model 3's medium drive unit is `kind: drive_unit` with the ratio already applied, so its "shaft" *is* the wheel-side shaft (that is why its speed axis only runs 10–1990 rpm) and the path contributes ratio 1, efficiency 1 (a differential is 1:1 at the power level). The rear road tyre's unloaded radius is 0.313 m (`UNLOADED_RADIUS` in `data/vehicles/tesla_model3_rwd/tyr/road.tyr.yaml`). Below 670 rpm the envelope holds its 2765 N·m plateau, so
+**A worked example.** The Model 3's medium drive unit is `kind: electric`, its map lumped at the output shaft (the unit declares no `fixed_ratio:`), so its "shaft" *is* the wheel-side shaft (that is why its speed axis only runs 10–1990 rpm) and the path contributes ratio 1, efficiency 1 (a differential is 1:1 at the power level). The rear road tyre's unloaded radius is 0.313 m (`UNLOADED_RADIUS` in `data/vehicles/tesla_model3_rwd/tyr/road.tyr.yaml`). Below 670 rpm the envelope holds its 2765 N·m plateau, so
 
 $$F_{\max} = \frac{2765\ \mathrm{N\,m} \times 1 \times 1}{0.313\ \mathrm{m}} \approx 8834\ \mathrm{N} \quad\Rightarrow\quad a_x \approx \frac{8834}{1765\ \mathrm{kg}} \approx 5.0\ \mathrm{m/s^2} \approx 0.51\,g,$$
 
@@ -3199,7 +3204,7 @@ Here is where the battery and the motor maps meet, and it is the reason `ptm/1.1
 
 | Battery block | `.ptm` `vdc_v` axis | Behaviour |
 |---|---|---|
-| present | present (`ptm/1.1`) | **Coupled**: the 3-D $(\text{speed}, \text{torque}, V_\text{dc})$ efficiency/loss maps are evaluated at the pack's live terminal voltage $V_\text{term}$ each segment |
+| present | present (the `vdc_v` axis, a 1.x-era feature carried into `ptm/2.0`) | **Coupled**: the 3-D $(\text{speed}, \text{torque}, V_\text{dc})$ efficiency/loss maps are evaluated at the pack's live terminal voltage $V_\text{term}$ each segment |
 | present | absent | Single-voltage: the map ignores the pack voltage |
 | absent | present | Single-voltage at the map's reference voltage `meta.dc_voltage_v` (if that is missing or ≤ 0 on a Vdc-stacked map, the fallback reference is the *middle of the Vdc grid*, not 0 V) |
 | absent | absent | Single-voltage (the pre-1.1 world) |
@@ -4035,15 +4040,15 @@ On success it prints `wrote <out>` plus a summary (grid sizes, `nan_fraction`, t
 
 PDT efficiency maps are gridded over DC-link voltage (*Vdc* — the voltage the battery presents to the inverter). The importer's behaviour is deliberately asymmetric:
 
-- **No `--vdc`, multi-voltage grid** (the default): the importer emits the **full Vdc stack** — a `ptm/1.1` document with a third `vdc_v` axis. This is what the Vdc–SoC coupling wants: at run time the Rust core evaluates the map at the pack's state-of-charge-dependent terminal voltage (Chapter 9, Physics III).
-- **`--vdc <V>` given**: the importer picks the **single nearest grid slice** (no cross-voltage interpolation — the thermal envelopes in the file are single-voltage) and emits a legacy single-voltage `ptm/1.0` map. If your requested voltage is more than **2 %** off the grid, you get a warning: `requested vdc X V snapped to grid Y V` (`common.py`, `select_vdc`).
+- **No `--vdc`, multi-voltage grid** (the default): the importer emits the **full Vdc stack** — a `ptm/2.0` document with a third `vdc_v` axis. This is what the Vdc–SoC coupling wants: at run time the Rust core evaluates the map at the pack's state-of-charge-dependent terminal voltage (Chapter 9, Physics III).
+- **`--vdc <V>` given**: the importer picks the **single nearest grid slice** (no cross-voltage interpolation — the thermal envelopes in the file are single-voltage) and emits a single-voltage `ptm/2.0` map (no `vdc_v` axis). If your requested voltage is more than **2 %** off the grid, you get a warning: `requested vdc X V snapped to grid Y V` (`common.py`, `select_vdc`).
 - **No `--vdc`, and the file's thermal data names no voltage either**: the importer defaults to the **maximum** grid voltage and warns about it.
 
 #### What each subcommand emits
 
 **`edrive`** (electric machine + inverter) writes up to three files:
 
-1. `machine.ptm.yaml` — `kind: electric_machine`, `schema: ptm/1.1` when a Vdc stack was emitted, else `ptm/1.0`. The `limits:` block carries peak/continuous torque-vs-speed curves, overload curves for 10/20/30 s holds, and drag torque. Provenance lands in `meta.source` ("PDT EDrive `<alias>` `<git hash>`").
+1. `machine.ptm.yaml` — `schema: ptm/2.0`, `kind: electric` (with a `vdc_v` axis when a Vdc stack was emitted). The `limits:` block carries the peak torque-vs-speed envelope, the **measured regen envelope** (`max_regen_torque_nm_vs_speed` ← \|`peak_capability/torque_regen`\| — an imported machine never leans on the symmetric-machine fallback), continuous/overload curves for 10/20/30 s holds, and drag torque. Provenance lands in `meta.source` ("PDT EDrive `<alias>` `<git hash>`").
 2. `<out>.maps.parquet` — the efficiency/loss sidecar. Long/tidy float64 columns `speed_rpm, torque_nm, efficiency, loss_w`, plus `vdc_v` for a stack (one row per grid cell, `NaN` where a cell is beyond that voltage's feasible envelope; the speed axis is in RPM because file formats are a display boundary — everything is converted to rad/s inside the solver).
 3. `<out>.emotor.yaml` — a thermal model of the machine (skipped with `--no-emotor`; see below).
 
@@ -4051,7 +4056,7 @@ Two physics decisions worth knowing (module docstring of `edrive.py`): the syste
 
 The raw maps sit on a "load ratio" axis, so the importer inverts each speed row onto a regular torque grid (`--torque-points` nodes, exact zero node, asymmetric drive/regen bounds), masks cells beyond the per-speed peak torque as `NaN`, and keeps the zero-torque column at efficiency 0 (the "spin point"). The `nan_fraction` in the summary tells you how much of the rectangle is masked.
 
-**`driveunit`** (motor + inverter + gearbox as one unit) writes `du.ptm.yaml` (`kind: drive_unit`) + the maps sidecar, with the same Vdc-stack logic. Differences: the map is at the **output shaft** (gear ratio already applied, recorded as `upstream_ratio_applied: true`; the ratio itself only appears in `meta.source`), drag torque comes from the no-load test resampled onto the map's speed axis, and there is no `.emotor.yaml` (drive-unit thermal data is envelope-only). Mass resolution tries four dataset names in order and finally your `--mass-kg` override — the Rust loader requires `mass_kg > 0`, so a file without a mass group and no override is a hard error. The importer also absorbs two real PDT export quirks: the drive-unit thermal group is spelled with a capital T (`Thermal`), and node names can arrive doubly-bytes-encoded (`b"b'ambient'"`).
+**`driveunit`** (motor + inverter + gearbox as one unit) writes `du.ptm.yaml` (`schema: ptm/2.0`, `kind: electric`) + the maps sidecar, with the same Vdc-stack logic. Differences: the map is at the **output shaft** (gear ratio already applied; the ratio only appears in `meta.source`), the measured regen envelope comes from `peak_op/torque_regen`, drag torque comes from the no-load test resampled onto the map's speed axis, and there is no `.emotor.yaml` (drive-unit thermal data is envelope-only). Mass resolution tries four dataset names in order and finally your `--mass-kg` override — the Rust loader requires `mass_kg > 0`, so a file without a mass group and no override is a hard error. The importer also absorbs two real PDT export quirks: the drive-unit thermal group is spelled with a capital T (`Thermal`), and node names can arrive doubly-bytes-encoded (`b"b'ambient'"`).
 
 **`batterypack`** writes `battery.yaml` (`schema: battery/1.0`, `model: rc_pairs` — a one-RC-pair Thevenin *equivalent-circuit model*, i.e. an open-circuit voltage source behind resistances; see Chapter 9) plus `<out>.tables.parquet` with the cell-level columns `soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k` on the (state-of-charge, temperature) grid. The YAML carries the pack topology (`ns` series × `np` parallel), capacity, SoC window, power limits vs SoC, and a lumped thermal block. (Three mentions inside `battery.py` still call the format "provisional" — stale wording: the Rust `BatteryDoc` type and `schemas/battery.json` exist and are enforced.)
 
@@ -4157,7 +4162,7 @@ python -m outlap.tirefit synth <in.tyr.yaml> -o out.csv [--seed 0] [--noise 0.01
 Two generators author committed synthetic data (both run from anywhere; they anchor paths off their own file location):
 
 - **`gen_f1_aero.py`** writes `data/vehicles/f1_2026/aero/f1_2026.parquet` — the ride-height/yaw/DRS aero map of the F1 reference car: a 5×5×5×2 grid over `ride_height_f_mm, ride_height_r_mm, yaw_deg, drs_flag` with value columns `cz_front_a_m2, cz_rear_a_m2, cx_a_m2`. It is **anchored** so that at the reference ride heights (30 mm front / 70 mm rear) the map reproduces the car's constant-aero fallback exactly (1.9 / 2.6 / 1.25 m²) — asserted at generation time — and every grid-aligned fibre is monotone or single-peaked, safe for the one shared monotone cubic Hermite interpolant (Fritsch–Carlson). All sensitivities are estimated; the file is synthetic and says so.
-- **`gen_model3_powertrain.py`** writes the Tesla Model 3 study's entire committed powertrain (Section 12.2): three Vdc-stacked `ptm/1.1` drive-unit maps + sidecars (`ptm/du_{small,medium,large}.*`) and the synthetic 800 V-class pack (`battery/pack_800v.*`). Its design choices are deliberate teaching devices: efficiency/loss pairs are emitted consistently so energy closure holds exactly at grid nodes (drive loss $= P_{mech}(1/\eta - 1)$, regen loss $= |P_{mech}|(1 - \eta)$); efficiency is *linear* in Vdc so the shared interpolant reproduces and extrapolates that axis exactly; and the 730/790/850 V grid is deliberately narrower than the pack's voltage swing so a low-SoC lap exercises the documented below-grid extrapolation.
+- **`gen_model3_powertrain.py`** writes the Tesla Model 3 study's entire committed powertrain (Section 12.2): three Vdc-stacked `ptm/2.0` (`kind: electric`) drive-unit maps + sidecars (`ptm/du_{small,medium,large}.*`) and the synthetic 800 V-class pack (`battery/pack_800v.*`). Its design choices are deliberate teaching devices: efficiency/loss pairs are emitted consistently so energy closure holds exactly at grid nodes (drive loss $= P_{mech}(1/\eta - 1)$, regen loss $= |P_{mech}|(1 - \eta)$); efficiency is *linear* in Vdc so the shared interpolant reproduces and extrapolates that axis exactly; and the 730/790/850 V grid is deliberately narrower than the pack's voltage swing so a low-SoC lap exercises the documented below-grid extrapolation.
 
 Seven `plot_*.py` scripts render the documentation figures (`docs/theory/img/`, `docs/validation/img/`, `docs/vehicles/model3/img/`). Four of them shell out to committed Rust examples (`cargo run -p outlap-qss --example battery_coupling | ggv_traces | thermal_traces | limebeer_lap`) and plot the CSV those examples print — so every theory figure is driven by the actual model, not a re-implementation. `plot_model3.py` instead drives the public Python API (`vehicle_report`, `solve_lap_dataset`, `min_curvature`; Chapter 10). None of these run in CI.
 

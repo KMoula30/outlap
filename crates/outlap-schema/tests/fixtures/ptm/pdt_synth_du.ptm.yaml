@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# Synthetic PDT-importer output (regenerate: python -m outlap.importers.pdt_h5 …). NOT real PDT data.
+# Synthetic PDT-importer output — NOT real PDT data. Regenerate: build d.h5 with
+# python/tests/pdt_fixtures.py::make_driveunit (defaults), then
+# `python -m outlap.importers.pdt_h5 driveunit d.h5 -o d.ptm.yaml --vdc 48 --torque-points 9`.
 # Imported by outlap.importers.pdt_h5 from d.h5 (§10.3)
-# drive_unit map
+# electric drive-unit map (output shaft)
 schema: ptm/2.0
 kind: electric
 axes:
@@ -53,6 +55,21 @@ limits:
     - 168.0
     - 168.0
     - 168.0
+  max_regen_torque_nm_vs_speed:
+    speed_rpm:
+    - 10.0
+    - 81.8
+    - 153.6
+    - 225.4
+    - 297.2
+    - 369.0
+    torque_nm:
+    - 150.0
+    - 150.0
+    - 150.0
+    - 150.0
+    - 150.0
+    - 150.0
   cont_torque_nm_vs_speed:
     speed_rpm:
     - 10.0

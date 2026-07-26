@@ -921,7 +921,10 @@ performance/                    # summary scalars — DO NOT TRUST UNITS (§10.1
 2. Re-grid from `load_ratio` to torque: for each speed, `shaft_torque[vdc, n, :]` is monotone in
    load_ratio → invert to get efficiency(τ, n) on a regular torque axis (both quadrants).
 3. `max_torque_Nm_vs_speed` ← `peak_capability/torque_drive[vdc_idx]`;
-   `cont_torque` ← `thermal/continuous/torque`; overload curves ← `thermal/peak/torque`.
+   `max_regen_torque_nm_vs_speed` ← `|peak_capability/torque_regen[vdc_idx]|` (the MEASURED
+   4th-quadrant envelope, ptm/2.0 — an imported machine never falls back to the
+   symmetric-machine assumption); `cont_torque` ← `thermal/continuous/torque`;
+   overload curves ← `thermal/peak/torque`.
 4. Mask infeasible cells (efficiency == 0 AND |torque| > envelope) as NaN in the parquet table.
 5. Emit `machine.ptm.yaml` + `maps.parquet`; stamp `meta.source: "PDT EDrive <alias> <git hash from
    compute/EDrive>"`, `meta.dc_voltage_V`.
@@ -970,9 +973,11 @@ inertia/
 ```
 
 **Conversion**: same re-grid recipe as §10.2 but on `opt_op/torque` + `du_eff`, output-shaft side.
-Set `kind: electric`, `inertia_kgm2` ← `at_output_j_kgm2`, record `info/gearbox/gear_ratio` in
-`meta` (informational — ratio already applied), `drag_torque` ← `no_load/torque_drag` interpolated
-onto the speed axis. In a race car this block maps to a hub/corner drive or a whole e-axle.
+Set `kind: electric`, `max_regen_torque_nm_vs_speed` ← `|peak_op/torque_regen[vdc_idx]|` (the
+MEASURED 4th-quadrant envelope, ptm/2.0), `inertia_kgm2` ← `at_output_j_kgm2`, record
+`info/gearbox/gear_ratio` in `meta` (informational — ratio already applied), `drag_torque` ←
+`no_load/torque_drag` interpolated onto the speed axis. In a race car this block maps to a
+hub/corner drive or a whole e-axle.
 
 ### 10.4 BatteryPack stage file → battery block params
 

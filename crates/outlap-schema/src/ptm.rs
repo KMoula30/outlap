@@ -19,7 +19,7 @@ pub struct Ptm {
     /// Schema version, e.g. `ptm/2.0` (the Vdc axis and the regen envelope are 1.x-era
     /// features carried into 2.0 — see the version history in `lib.rs`).
     pub schema: SchemaVersion,
-    /// Source kind — determines how the topology consumes this map.
+    /// The unit's energy source (`combustion` | `electric`) and nothing else — see [`PtmKind`].
     pub kind: PtmKind,
     /// Map axes.
     pub axes: PtmAxes,

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""DriveUnit stage file → ``du.ptm.yaml`` (+ ``maps.parquet``), kind ``drive_unit`` (§10.3).
+"""DriveUnit stage file → ``du.ptm.yaml`` (+ ``maps.parquet``), kind ``electric`` (§10.3).
 
 Output-shaft side: ``opt_op/torque`` + ``opt_op/du_eff`` (combined motor+inverter+gearbox), thermal
-under the capital-T ``peak_op/Thermal`` group, drag from ``no_load``, inertia ``at_output_j_kgm2``.
-The gear ratio is already applied at the output shaft (``upstream_ratio_applied: true``); it is only
-recorded in ``meta.source``.
+under the capital-T ``peak_op/Thermal`` group, drag from ``no_load``, inertia ``at_output_j_kgm2``,
+and the measured regen envelope from ``peak_op/torque_regen``. The gear ratio is already applied at
+the output shaft; it is only recorded in ``meta.source``.
 """
 
 from __future__ import annotations
@@ -210,7 +210,7 @@ def convert_driveunit(
         doc,
         [
             f"Imported by outlap.importers.pdt_h5 from {src.name} (§10.3)",
-            "drive_unit map",
+            "electric drive-unit map (output shaft)",
         ],
     )
     return {
