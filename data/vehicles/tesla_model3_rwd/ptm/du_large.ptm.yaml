@@ -3,8 +3,8 @@
 # output shaft) — one of the three sizing-sensitivity variants of the HV (800 V-class) study.
 # NOT measured data and NOT derived from any PDT export (firewall; M3 user decision #7).
 # Regenerate with: python python/tools/gen_model3_powertrain.py
-schema: ptm/1.1
-kind: drive_unit
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
   load_axis:
@@ -20,9 +20,14 @@ limits:
   max_torque_nm_vs_speed:
     speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
     torque_nm: [3381.000, 3381.000, 3381.000, 2366.700, 1779.474, 1425.723, 1189.296]
+  # Symmetric by construction (a synthetic PMSM-like machine, inverter-current-limited in both
+  # quadrants) — declared explicitly so the data carries its own 4th-quadrant boundary instead of
+  # leaning on the loader's symmetric-machine fallback.
+  max_regen_torque_nm_vs_speed:
+    speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
+    torque_nm: [3381.000, 3381.000, 3381.000, 2366.700, 1779.474, 1425.723, 1189.296]
 inertia_kgm2: 1.6
 mass_kg: 90.0
 meta:
   source: synthetic Model-3-scale drive unit (gen_model3_powertrain.py) — ESTIMATED
   dc_voltage_v: 790.0
-  upstream_ratio_applied: true
