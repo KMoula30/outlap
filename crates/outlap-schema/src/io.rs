@@ -195,14 +195,14 @@ mod tests {
     #[test]
     fn memloader_serves_bytes_and_text_fallback() {
         let loader = MemLoader::new()
-            .with("doc.yaml", "schema: ptm/1.0")
+            .with("doc.yaml", "schema: ptm/2.0")
             .with_bytes("maps.parquet", vec![1u8, 2, 3]);
         // Explicit binary sidecar.
         assert_eq!(loader.load_bytes("maps.parquet").unwrap(), vec![1, 2, 3]);
         // A text file is also readable as its UTF-8 bytes.
         assert_eq!(
             loader.load_bytes("doc.yaml").unwrap(),
-            b"schema: ptm/1.0".to_vec()
+            b"schema: ptm/2.0".to_vec()
         );
         // Missing paths still error.
         assert!(matches!(

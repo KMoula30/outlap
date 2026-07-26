@@ -171,7 +171,7 @@ lap-loop hook (wired in PR8), each a zero-allocation, deterministic step:
   the decay term (A-stable, matching §11's slow-state integrator).
 
 **Vdc–SoC coupling (user decision, 2026-07-05).** A machine/drive-unit `.ptm` used with a battery
-is checked for a **Vdc axis** (`ptm/1.1`). If present, its efficiency/loss maps are 3-D
+is checked for a **Vdc axis** (`vdc_v`). If present, its efficiency/loss maps are 3-D
 `(speed, torque, vdc)` and are evaluated at the pack's SoC-dependent terminal voltage `V_term` — so
 a low-SoC (low-voltage) point shifts **both** the traction efficiency and the machine-heating loss
 injected into PR5's `.emotor` network. If absent, the map is single-voltage. No battery ⇒

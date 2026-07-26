@@ -112,7 +112,7 @@ def _drive_unit_eta_vdc(speed: float, tau: float, vdc: float) -> float:
 
 
 def _emit_vdc(path: Path, speed_axis, torque_axis, vdc_axis, eta_fn) -> None:
-    """Emit a 3-D (speed, torque, vdc) long/tidy table with a `vdc_v` axis column (ptm/1.1)."""
+    """Emit a 3-D (speed, torque, vdc) long/tidy table with a `vdc_v` axis column (the Vdc-stacked form)."""
     ns, nt, nvdc = speed_axis.size, torque_axis.size, vdc_axis.size
     speed = np.repeat(speed_axis, nt * nvdc)
     torque = np.tile(np.repeat(torque_axis, nvdc), ns)

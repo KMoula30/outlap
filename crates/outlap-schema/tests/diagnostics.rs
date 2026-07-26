@@ -329,7 +329,7 @@ fn same_major_minor_is_accepted_but_new_major_is_rejected() {
     );
 
     // Wrong document kind is rejected.
-    let l = MemLoader::new().with("v.yaml", base("ptm/1.0"));
+    let l = MemLoader::new().with("v.yaml", base("ptm/2.0"));
     let err = load_vehicle("v.yaml", &l, &LoadOptions::default()).unwrap_err();
     assert!(
         matches!(err, SchemaError::SchemaVersionMismatch { .. }),

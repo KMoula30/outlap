@@ -59,7 +59,7 @@ def convert_edrive(
         tr_all = c.arr(f, "peak_capability/torque_regen")
         drag = c.opt_arr(f, "peak_capability/torque_drag")
 
-        # Emit the FULL Vdc stack by default (ptm/1.1 vdc_v axis, Vdc–SoC coupling); `--vdc` forces
+        # Emit the FULL Vdc stack by default (`vdc_v` axis, Vdc–SoC coupling); `--vdc` forces
         # the single nearest slice.
         stack_vdc = vdc is None and vdc_grid.size > 1
         tau = tau_all[iv]
