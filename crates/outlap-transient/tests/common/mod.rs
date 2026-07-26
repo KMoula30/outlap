@@ -49,6 +49,16 @@ pub fn limebeer() -> (T1Vehicle, Vehicle) {
     assemble_car("limebeer_2014_f1")
 }
 
+/// The `tesla_model3_rwd` reference EV + its vehicle document — the car the regen / pack
+/// energy-closure tests run on. Its drive unit is `kind: electric` with a declared regen envelope
+/// (a combustion car recovers nothing; limebeer, which these tests historically ran on, only
+/// "worked" while its petrol engine was mislabelled `drive_unit` and silently inherited a
+/// symmetric-machine regen envelope — ptm/2.0 killed that).
+#[must_use]
+pub fn model3() -> (T1Vehicle, Vehicle) {
+    assemble_car("tesla_model3_rwd")
+}
+
 /// The `f1_2026` reference car (carries the T3 suspension block) + its vehicle document. The aero
 /// map sidecar is NOT installed here (the test harness does not read parquets), so its T3 aero uses
 /// the constant lumped coefficients — fine for the schedule/alloc/throughput gates.
