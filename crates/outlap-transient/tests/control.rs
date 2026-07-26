@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{build_blocks, limebeer, line};
+use common::{build_blocks, limebeer, line, model3};
 use outlap_core::bus::ChannelInterner;
 use outlap_transient::{SimConfig, SlowStack, TransientLap, TransientSolver};
 
@@ -40,10 +40,13 @@ impl SlowStack for EnergyDouble {
     }
 }
 
-/// A decelerating straight: the driver tracks a `v_ref` that ramps 70 → 25 m/s, so it brakes hard —
-/// the regen window.
+/// A hold-then-brake straight: the driver holds 55 m/s against drag for the first 600 m (the
+/// traction window — an EV's drag is far too small to slow it to a falling reference on its own,
+/// unlike the draggy F1 this harness historically ran on), then tracks a 55 → 25 m/s ramp (the
+/// regen window). Both windows matter: the net-energy identity must be a genuine
+/// regen-minus-traction difference, not a single term.
 fn braking_lap(regen: bool, attach_stack: bool) -> (TransientLap<f64>, f64) {
-    let (t1, spec) = limebeer();
+    let (t1, spec) = model3();
     let mut it = ChannelInterner::new();
     let mut blocks = build_blocks(&t1, &spec, &mut it);
     // 0.6 blend authority, 0.9 machine+inverter recovery, from the vehicle's own regen envelope.
@@ -55,7 +58,17 @@ fn braking_lap(regen: bool, attach_stack: bool) -> (TransientLap<f64>, f64) {
     let s: Vec<f64> = (0..stations)
         .map(|i| i as f64 * len / (stations as f64 - 1.0))
         .collect();
-    let v_ref: Vec<f64> = s.iter().map(|&si| 70.0 - 45.0 * (si / len)).collect();
+    let v_ref: Vec<f64> = s
+        .iter()
+        .map(|&si| {
+            let hold = 0.4 * len;
+            if si < hold {
+                55.0
+            } else {
+                55.0 - 30.0 * (si - hold) / (len - hold)
+            }
+        })
+        .collect();
     let mk = |v: f64| vec![v; stations];
     let table = outlap_transient::LineTable::new(&outlap_transient::LineSamples {
         s: s.clone(),
@@ -151,10 +164,10 @@ fn slow_stack_soc_closes_with_the_net_energy() {
     );
 }
 
-/// An accelerating straight: the driver tracks a `v_ref` that ramps 20 → 70 m/s, so it drives hard —
-/// the traction-draw window. Returns the lap and the drawn electrical energy.
+/// An accelerating straight: the driver tracks a `v_ref` that ramps 20 → 60 m/s (inside the EV's
+/// wheel-shaft envelope throughout), so it drives hard — the traction-draw window. Returns the lap and the drawn electrical energy.
 fn driving_lap() -> (TransientLap<f64>, f64) {
-    let (t1, spec) = limebeer();
+    let (t1, spec) = model3();
     let mut it = ChannelInterner::new();
     let mut blocks = build_blocks(&t1, &spec, &mut it);
     blocks.powertrain.regen = common::regen_params(&t1, 0.6, 0.9);
@@ -165,7 +178,7 @@ fn driving_lap() -> (TransientLap<f64>, f64) {
     let s: Vec<f64> = (0..stations)
         .map(|i| i as f64 * len / (stations as f64 - 1.0))
         .collect();
-    let v_ref: Vec<f64> = s.iter().map(|&si| 20.0 + 50.0 * (si / len)).collect();
+    let v_ref: Vec<f64> = s.iter().map(|&si| 20.0 + 40.0 * (si / len)).collect();
     let mk = |v: f64| vec![v; stations];
     let table = outlap_transient::LineTable::new(&outlap_transient::LineSamples {
         s: s.clone(),
@@ -300,7 +313,7 @@ impl SlowStack for SharedStack {
 /// other tests in this file pin.
 #[test]
 fn two_packs_split_the_net_power_by_weight() {
-    let (t1, spec) = limebeer();
+    let (t1, spec) = model3();
     let mut it = ChannelInterner::new();
     let mut blocks = build_blocks(&t1, &spec, &mut it);
     blocks.powertrain.regen = common::regen_params(&t1, 0.6, 0.9);
