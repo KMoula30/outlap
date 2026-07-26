@@ -329,7 +329,7 @@ fn traction_ceiling_is_positive_and_falls_with_speed() {
 fn gearbox_map_efficiency_assembles_for_t1() {
     // T0 errors on a gearbox map efficiency (UnsupportedEfficiencyMap); T1 accepts it — a constant
     // proxy carries the traction force until the map is installed — retiring that error for T1.
-    let ptm = "schema: ptm/1.0\nkind: ice\n\
+    let ptm = "schema: ptm/2.0\nkind: combustion\n\
         axes: {speed_rpm: [1000.0, 8000.0], load_axis: {torque_nm: [0.0, 300.0]}, torque_nm: [0.0, 300.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [1000.0, 8000.0], torque_nm: [280.0, 300.0]}}\n\
@@ -454,7 +454,7 @@ fn regen_envelope_is_finite_and_non_negative_across_the_speed_range() {
 #[test]
 fn a_declared_regen_envelope_is_used_verbatim() {
     // Drive envelope 300 N·m, regen envelope 120 N·m, straight through to the wheel (ratio 1, r=0.33).
-    let ptm = "schema: ptm/1.2\nkind: electric_machine\n\
+    let ptm = "schema: ptm/2.0\nkind: electric\n\
         axes: {speed_rpm: [0.0, 8000.0], load_axis: {torque_nm: [-300.0, 300.0]}, torque_nm: [-300.0, 300.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}, max_regen_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [120.0, 120.0]}}\n\
@@ -498,7 +498,7 @@ fn a_declared_regen_envelope_is_used_verbatim() {
 #[test]
 fn geared_unit_exposes_ascending_upshift_speeds() {
     // The inline 2-ratio gearbox car (from `gearbox_map_efficiency_assembles_for_t1`) has 2 gears.
-    let ptm = "schema: ptm/1.0\nkind: electric_machine\n\
+    let ptm = "schema: ptm/2.0\nkind: electric\n\
         axes: {speed_rpm: [0.0, 12000.0], load_axis: {torque_nm: [0.0, 300.0]}, torque_nm: [0.0, 300.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 6000.0, 12000.0], torque_nm: [300.0, 300.0, 150.0]}}\n\

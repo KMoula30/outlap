@@ -253,7 +253,7 @@ impl T0Vehicle {
             let torque_env = torque_env(&ptm.limits.max_torque_nm_vs_speed)?;
             let mut omega_max = torque_env.domain().1;
             if let Some(cap) = rev_limit {
-                if ptm.kind == outlap_schema::ptm::PtmKind::Ice && cap < omega_max {
+                if ptm.kind == outlap_schema::ptm::PtmKind::Combustion && cap < omega_max {
                     omega_max = cap; // the T1 twin records the note; T0 clamps identically
                 }
             }

@@ -2,8 +2,8 @@
 # Synthetic PDT-importer output (regenerate: python -m outlap.importers.pdt_h5 …). NOT real PDT data.
 # Imported by outlap.importers.pdt_h5 from e.h5 (§10.2)
 # electric_machine map
-schema: ptm/1.0
-kind: electric_machine
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm:
   - 100.0

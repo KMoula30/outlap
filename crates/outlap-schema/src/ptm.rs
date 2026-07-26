@@ -35,17 +35,25 @@ pub struct Ptm {
     pub meta: PtmMeta,
 }
 
-/// Source kind of a powertrain map.
+/// The unit's ENERGY SOURCE — the only thing a map's kind declares (`ptm/2.0`).
+///
+/// Where the map is referenced is NOT the kind's business: every map is read at the shaft its
+/// drive unit outputs onto, and a unit whose map is authored at the machine's own shaft declares
+/// the reduction as its `fixed_ratio` (vehicle/2.1). The pre-2.0 kinds conflated the two — a
+/// packaging label (`drive_unit` = "lumped at the wheel-side shaft") sat beside an energy label
+/// (`ice`), and real files picked the wrong one: two petrol engines shipped as `drive_unit` and
+/// silently inherited an electric machine's symmetric REGEN envelope. There are no aliases for the
+/// old names — mapping `drive_unit` automatically to either side would repeat that mislabel; the
+/// loader rejects them with the two candidates named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PtmKind {
-    /// A bare electric machine (torque available at its own shaft; a downstream ratio may apply).
-    ElectricMachine,
-    /// An internal-combustion engine.
-    Ice,
-    /// A machine+inverter+gearbox lumped at the wheel-side shaft. The topology must **not** apply
-    /// another gear ratio unless [`PtmMeta::upstream_ratio_applied`] is `false`.
-    DriveUnit,
+    /// Burns fuel: no regenerative quadrant (overrun drag is not commandable regen), and the
+    /// fuel-mass accounting applies.
+    Combustion,
+    /// An electric machine, whatever its packaging (bare motor or lumped drive unit): may
+    /// regenerate, draws from / harvests into a pack.
+    Electric,
 }
 
 /// The axes of a powertrain map.
@@ -160,8 +168,4 @@ pub struct PtmMeta {
     /// DC bus voltage the map was measured at, V (electric machines).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dc_voltage_v: Option<f64>,
-    /// For `drive_unit` maps: whether the internal gear ratio is already applied (default `true`).
-    /// When `false`, the topology may apply one downstream ratio.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream_ratio_applied: Option<bool>,
 }

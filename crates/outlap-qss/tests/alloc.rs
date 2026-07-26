@@ -30,11 +30,11 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 const SLICK: &str = include_str!("../../outlap-schema/tests/fixtures/tyr/slick.tyr.yaml");
 
 fn setup() -> (T0Vehicle, T0Path) {
-    let ptm = "schema: ptm/1.0\nkind: drive_unit\n\
+    let ptm = "schema: ptm/2.0\nkind: electric\n\
         axes: {speed_rpm: [0.0, 30000.0], load_axis: {torque_nm: [0.0, 800.0]}, torque_nm: [0.0, 800.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 30000.0], torque_nm: [800.0, 800.0]}}\n\
-        inertia_kgm2: 0.05\nmass_kg: 60.0\nmeta: {upstream_ratio_applied: false}\n";
+        inertia_kgm2: 0.05\nmass_kg: 60.0\n";
     let veh = "schema: vehicle/2.0\nname: t\n\
         chassis: {mass_kg: 1000.0, cg: [1.4, 0.0, 0.3], inertia: [100.0, 400.0, 450.0], wheelbase_m: 2.8, track_m: [1.6, 1.6]}\n\
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 1.0, cz_front_a_m2: 0.0, cz_rear_a_m2: 3.0}}\n\
@@ -82,11 +82,11 @@ fn setup() -> (T0Vehicle, T0Path) {
 
 /// Assemble a T1 vehicle from the same in-memory fixture as [`setup`].
 fn setup_t1() -> T1Vehicle {
-    let ptm = "schema: ptm/1.0\nkind: drive_unit\n\
+    let ptm = "schema: ptm/2.0\nkind: electric\n\
         axes: {speed_rpm: [0.0, 30000.0], load_axis: {torque_nm: [0.0, 800.0]}, torque_nm: [0.0, 800.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 30000.0], torque_nm: [800.0, 800.0]}}\n\
-        inertia_kgm2: 0.05\nmass_kg: 60.0\nmeta: {upstream_ratio_applied: false}\n";
+        inertia_kgm2: 0.05\nmass_kg: 60.0\n";
     let veh = "schema: vehicle/2.0\nname: t\n\
         chassis: {mass_kg: 1000.0, cg: [1.4, 0.0, 0.3], inertia: [100.0, 400.0, 450.0], wheelbase_m: 2.8, track_m: [1.6, 1.6]}\n\
         aero: {map: a.parquet, axes: [], constant: {cx_a_m2: 1.0, cz_front_a_m2: 0.0, cz_rear_a_m2: 3.0}}\n\

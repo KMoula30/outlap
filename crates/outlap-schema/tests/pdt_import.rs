@@ -18,7 +18,7 @@ fn loader() -> FsLoader {
 #[test]
 fn edrive_ptm_loads() {
     let ptm = load_ptm("ptm/pdt_synth_edrive.ptm.yaml", &loader()).expect("edrive .ptm loads");
-    assert_eq!(ptm.kind, PtmKind::ElectricMachine);
+    assert_eq!(ptm.kind, PtmKind::Electric);
     assert!(ptm.mass_kg > 0.0);
     // Speed axis strictly ascending (enforced by check_ptm) and the load axis is torque-gridded.
     assert!(ptm.axes.speed_rpm.windows(2).all(|w| w[1] > w[0]));
@@ -37,8 +37,7 @@ fn edrive_ptm_loads() {
 #[test]
 fn driveunit_ptm_loads() {
     let ptm = load_ptm("ptm/pdt_synth_du.ptm.yaml", &loader()).expect("driveunit .ptm loads");
-    assert_eq!(ptm.kind, PtmKind::DriveUnit);
-    assert_eq!(ptm.meta.upstream_ratio_applied, Some(true));
+    assert_eq!(ptm.kind, PtmKind::Electric);
     assert!(ptm
         .meta
         .source
@@ -70,10 +69,10 @@ fn imported_emotor_loads() {
 
 #[test]
 fn vdc_stacked_ptm_loads() {
-    // A ptm/1.1 drive-unit map carries an optional, strictly-ascending Vdc axis.
+    // The optional, strictly-ascending Vdc axis (a 1.1 feature, carried into ptm/2.0).
     let ptm = load_ptm("ptm/pdt_synth_du_vdc.ptm.yaml", &loader()).expect("vdc .ptm loads");
-    assert_eq!(ptm.kind, PtmKind::DriveUnit);
-    assert_eq!(ptm.schema.minor, 1, "the Vdc axis is a ptm/1.1 feature");
+    assert_eq!(ptm.kind, PtmKind::Electric);
+    assert_eq!((ptm.schema.major, ptm.schema.minor), (2, 0));
     let vdc = ptm.axes.vdc_v.clone().expect("vdc axis present");
     assert_eq!(vdc, vec![730.0, 790.0, 850.0]);
     assert!(vdc.windows(2).all(|w| w[1] > w[0]), "vdc axis ascending");

@@ -27,11 +27,11 @@ const MU_Y: f64 = 1.25;
 /// A flat-torque drive unit (constant tractive force below the rev limit).
 fn flat_ptm(torque: f64) -> String {
     format!(
-        "schema: ptm/1.0\nkind: drive_unit\n\
+        "schema: ptm/2.0\nkind: electric\n\
          axes: {{speed_rpm: [0.0, 30000.0], load_axis: {{torque_nm: [0.0, {torque}]}}, torque_nm: [0.0, {torque}]}}\n\
          tables: {{file: x.parquet}}\n\
          limits: {{max_torque_nm_vs_speed: {{speed_rpm: [0.0, 30000.0], torque_nm: [{torque}, {torque}]}}}}\n\
-         inertia_kgm2: 0.05\nmass_kg: 60.0\nmeta: {{upstream_ratio_applied: false}}\n"
+         inertia_kgm2: 0.05\nmass_kg: 60.0\n"
     )
 }
 

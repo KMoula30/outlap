@@ -728,7 +728,7 @@ suspension: { model: lumped_kc, front: {...}, rear: {...} }   # §7.5 parameters
 tires:      { front: c3_front.tyr.yaml, rear: c3_rear.tyr.yaml }
 drivetrain:                                   # topology graph (§8.0) — THE versatility surface
   units:
-    - source: engine.ptm.yaml                 # ICE or electric machine or lumped drive_unit
+    - source: engine.ptm.yaml                 # a combustion engine or an electric machine
       path:   [{gearbox: {ratios: [...], final_drive: 3.2, shift_time_s: 0.05, efficiency: 0.985}},
                {diff: {type: lsd, preload_Nm: 50, ramp: [0.4, 0.6]}}]
       wheels: [RL, RR]
@@ -749,7 +749,7 @@ extensions: { x-anything: ... }               # namespaced, ignored-with-warning
 
 ```yaml
 schema: ptm/1.0
-kind: electric_machine        # electric_machine | ice | drive_unit
+kind: electric                # combustion | electric (the energy source; ptm/2.0)
 axes:
   speed_rpm: [...]            # monotonically increasing
   # tables are defined on (speed × torque) or (speed × load_fraction) — declare which:
@@ -772,8 +772,9 @@ mass_kg: 18.7
 meta: { source: "user-supplied", dc_voltage_V: 400 }   # provenance, free-form
 ```
 
-`kind: drive_unit` = machine+inverter+gearbox lumped at the **output shaft** (wheel side); the
-consumer must not apply another gear ratio unless `meta.upstream_ratio_applied: false`.
+`kind` is the ENERGY SOURCE only (`combustion` | `electric`, ptm/2.0). Every map is referenced at
+the shaft its drive unit outputs onto; a map authored at the machine's own shaft declares the
+reduction as the unit's `fixed_ratio:` (vehicle/2.1).
 
 ### 9.3 `track.yaml` + `centerline.csv`
 
@@ -884,7 +885,7 @@ schemas were inspected on 2026-07-02 from these reference files:
   **0–1**, voltage **V**, current **A**, temperature **°C**, mass **kg**, inertia **kg·m²**,
   lengths **mm**.
 
-### 10.2 EDrive stage file → `.ptm` (`kind: electric_machine`, machine+inverter at motor shaft)
+### 10.2 EDrive stage file → `.ptm` (`kind: electric`, machine+inverter at motor shaft)
 
 Verified layout (dataset → shape → meaning):
 
@@ -937,7 +938,7 @@ performance/                    # summary scalars — DO NOT TRUST UNITS (§10.1
    route to the case node). Mark `meta.source: pdt-distilled` + fit residuals in `meta.notes`.
    The un-distilled envelopes also land in `.ptm` `limits:` as validation references (§9.2).
 
-### 10.3 DriveUnit stage file → `.ptm` (`kind: drive_unit`, motor+inverter+gearbox at OUTPUT shaft)
+### 10.3 DriveUnit stage file → `.ptm` (`kind: electric`, motor+inverter+gearbox at OUTPUT shaft)
 
 Verified layout:
 
@@ -969,7 +970,7 @@ inertia/
 ```
 
 **Conversion**: same re-grid recipe as §10.2 but on `opt_op/torque` + `du_eff`, output-shaft side.
-Set `kind: drive_unit`, `inertia_kgm2` ← `at_output_j_kgm2`, record `info/gearbox/gear_ratio` in
+Set `kind: electric`, `inertia_kgm2` ← `at_output_j_kgm2`, record `info/gearbox/gear_ratio` in
 `meta` (informational — ratio already applied), `drag_torque` ← `no_load/torque_drag` interpolated
 onto the speed axis. In a race car this block maps to a hub/corner drive or a whole e-axle.
 

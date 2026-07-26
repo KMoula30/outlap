@@ -2,8 +2,8 @@
 # Synthetic PDT-importer output (regenerate: python -m outlap.importers.pdt_h5 …). NOT real PDT data.
 # Imported by outlap.importers.pdt_h5 from d.h5 (§10.3)
 # drive_unit map
-schema: ptm/1.0
-kind: drive_unit
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm:
   - 10.0
@@ -136,4 +136,3 @@ mass_kg: 9.5
 meta:
   source: PDT DriveUnit synth_du unknown (gear ratio 16.2489 applied at output shaft)
   dc_voltage_v: 48.0
-  upstream_ratio_applied: true

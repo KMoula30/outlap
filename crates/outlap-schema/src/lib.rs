@@ -112,7 +112,7 @@ pub const SCHEMA_MAJOR: u16 = 1;
 /// sidecar with it.
 pub fn current_major(name: &str) -> u16 {
     match name {
-        schema_name::VEHICLE => 2,
+        schema_name::VEHICLE | schema_name::PTM => 2,
         _ => SCHEMA_MAJOR,
     }
 }
@@ -131,7 +131,11 @@ pub fn current_major(name: &str) -> u16 {
 /// and `drivetrain` gains a first-class graph (unit `id`/`output`, top-level `couplers`) with the
 /// MGU-K promoted to a `units[]` entry. All prior `vehicle` minors (1.2 ride height, 1.5 driver,
 /// 1.6 control layer, 1.7 ERS recharge fields, 1.8 fuel + shift maps, 1.9 T3 suspension) fold into
-/// this reset baseline. `ptm`: 1.1 optional
+/// this reset baseline. `ptm`: **2.0** renames
+/// `kind` to the pure energy label (`combustion` / `electric` — the old `ice` /
+/// `electric_machine` / `drive_unit` conflated energy with packaging and mislabelled real engines)
+/// and deletes the inert `meta.upstream_ratio_applied`; no aliases, no `outlap migrate` — 1.x files
+/// are hand-rewritten (the vehicle-2.0 pattern). 1.x history: 1.1 optional
 /// Vdc axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block, 1.2 optional
 /// structured `vertical` block (tyre `k_z`/`c_z` for the T3 per-wheel `F_z`, §7.5, M6/PR6);
 /// `battery`: 1.1 `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` +
@@ -154,7 +158,7 @@ pub fn current_major(name: &str) -> u16 {
 /// rulebook consumes it — any further semantics change is MAJOR.
 pub fn current_minor(name: &str) -> u16 {
     match name {
-        schema_name::PTM | schema_name::BATTERY | schema_name::TYR => 2,
+        schema_name::BATTERY | schema_name::TYR => 2,
         schema_name::SIM | schema_name::VEHICLE => 1,
         // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/track/conditions
         // (and anything unknown) have had no additive change since their `.0`.
