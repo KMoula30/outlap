@@ -4,7 +4,7 @@
 Writes, under ``data/vehicles/tesla_model3_rwd/``:
 
 * ``ptm/du_{small,medium,large}.ptm.yaml`` + ``ptm/du_{size}.maps.parquet`` — three
-  Vdc-stacked (``ptm/1.1``) drive-unit maps at the OUTPUT shaft (gear ratio applied),
+  Vdc-stacked (``ptm/2.0``) drive-unit maps at the OUTPUT shaft (gear ratio applied),
   the sizing-sensitivity axis of notebook 07.
 * ``battery/pack_800v.battery.yaml`` + ``battery/pack_800v.tables.parquet`` — the
   synthetic 800 V-class Thevenin pack of the HV variant study.
@@ -143,8 +143,8 @@ def _emit_du_yaml(path: Path, size: str, tau_pk: float) -> None:
 # output shaft) — one of the three sizing-sensitivity variants of the HV (800 V-class) study.
 # NOT measured data and NOT derived from any PDT export (firewall; M3 user decision #7).
 # Regenerate with: python python/tools/gen_model3_powertrain.py
-schema: ptm/1.1
-kind: drive_unit
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm: {_fmt_list(SPEED_RPM)}
   load_axis:
@@ -160,12 +160,17 @@ limits:
   max_torque_nm_vs_speed:
     speed_rpm: {_fmt_list(SPEED_RPM)}
     torque_nm: {_fmt_list(peak)}
+  # Symmetric by construction (a synthetic PMSM-like machine, inverter-current-limited in both
+  # quadrants) — declared explicitly so the data carries its own 4th-quadrant boundary instead of
+  # leaning on the loader's symmetric-machine fallback.
+  max_regen_torque_nm_vs_speed:
+    speed_rpm: {_fmt_list(SPEED_RPM)}
+    torque_nm: {_fmt_list(peak)}
 inertia_kgm2: {DU_INERTIA_KGM2[size]}
 mass_kg: {DU_MASS_KG[size]}
 meta:
   source: synthetic Model-3-scale drive unit (gen_model3_powertrain.py) — ESTIMATED
   dc_voltage_v: {VDC_REF}
-  upstream_ratio_applied: true
 """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")

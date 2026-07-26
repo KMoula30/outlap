@@ -7,8 +7,8 @@
 # rho = 1.2: P = 0.5*rho*CdA*u^3 = 560 kW at 88.4 m/s). The 5000 N*m low-speed cap is a plain
 # torque bound chosen safely above the tyre traction limit (the launch is grip-limited, matching
 # the paper's tyre-limited drive). See README.md.
-schema: ptm/1.0
-kind: drive_unit
+schema: ptm/2.0
+kind: combustion
 axes:
   speed_rpm: [0.0, 2900.0]
   load_axis: { torque_nm: [0.0, 5000.0] }
@@ -25,4 +25,3 @@ limits:
                 2228.2, 2139.0, 2056.8, 1980.6, 1909.9, 1844.0]
 inertia_kgm2: 0.05
 mass_kg: 100.0
-meta: { upstream_ratio_applied: false }
