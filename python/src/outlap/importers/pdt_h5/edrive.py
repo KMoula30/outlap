@@ -125,6 +125,11 @@ def convert_edrive(
 
     limits: dict[str, Any] = {
         "max_torque_nm_vs_speed": c.torque_curve(speed_rpm, torque_drive),
+        # The MEASURED regen capability, |peak_capability/torque_regen| at the selected Vdc slice —
+        # no symmetric-machine fallback for an imported machine.
+        "max_regen_torque_nm_vs_speed": c.torque_curve(
+            speed_rpm, np.abs(np.asarray(torque_regen, dtype=np.float64))
+        ),
     }
     if cont is not None:
         limits["cont_torque_nm_vs_speed"] = c.torque_curve(speed_rpm, cont.reshape(-1))
@@ -147,8 +152,8 @@ def convert_edrive(
     if regrid_stack is not None:
         axes["vdc_v"] = [round(float(v), 4) for v in regrid_stack.vdc]
     doc: dict[str, Any] = {
-        "schema": "ptm/1.1" if regrid_stack is not None else "ptm/1.0",
-        "kind": "electric_machine",
+        "schema": "ptm/2.0",
+        "kind": "electric",
         "axes": axes,
         "tables": {"file": maps_path.name, "efficiency": True, "loss_w": True},
         "limits": limits,
