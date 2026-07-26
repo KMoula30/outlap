@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with: {components: "clippy, rustfmt", targets: "wasm32-unknown-unknown"}
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -39,7 +39,7 @@ jobs:
       MATURIN_PEP517_ARGS: --profile release
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable   # uv sync builds the outlap-core extension (maturin)
+      - uses: dtolnay/rust-toolchain@1.97.1   # uv sync builds the outlap-core extension (maturin)
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --directory python --group notebooks --group derivations --extra tire-fit
@@ -69,7 +69,7 @@ jobs:
       MATURIN_PEP517_ARGS: --profile release
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable   # uv sync builds the outlap-core extension (maturin)
+      - uses: dtolnay/rust-toolchain@1.97.1   # uv sync builds the outlap-core extension (maturin)
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --directory python --group notebooks --extra tire-fit

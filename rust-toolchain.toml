@@ -1,0 +1,7 @@
+# Pin the workspace toolchain so CI and every checkout compile with the same rustc.
+# (A local-1.97.0 / CI-1.97.1 skew turned a flaky alloc-gate failure into a false toolchain
+# bisect, 2026-07-26.) CI's dtolnay/rust-toolchain action exports RUSTUP_TOOLCHAIN, which
+# overrides this file — ci.yml pins the same version explicitly. Bump both deliberately.
+[toolchain]
+channel = "1.97.1"
+targets = ["wasm32-unknown-unknown"]
