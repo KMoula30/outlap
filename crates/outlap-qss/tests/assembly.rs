@@ -65,8 +65,8 @@ const BRUSH_PLUS_MF61: &str =
     include_str!("../../outlap-schema/tests/fixtures/tyr/brush_plus_mf61.tyr.yaml");
 
 const FLAT_PTM: &str = "\
-schema: ptm/1.0
-kind: drive_unit
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm: [0.0, 12000.0]
   load_axis: {torque_nm: [0.0, 300.0]}
@@ -76,7 +76,6 @@ limits:
   max_torque_nm_vs_speed: {speed_rpm: [0.0, 12000.0], torque_nm: [300.0, 300.0]}
 inertia_kgm2: 0.05
 mass_kg: 60.0
-meta: {upstream_ratio_applied: false}
 ";
 
 const EV_VEHICLE: &str = "\

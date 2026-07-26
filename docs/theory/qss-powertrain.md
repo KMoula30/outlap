@@ -30,7 +30,7 @@ ratio   = Π(fixed ratios) · gear_ratio · final_drive
 ```
 
 where `η_mech` is the constant (or mapped) **mechanical** gearbox efficiency and `r_wheel` the driven
-tyre's unloaded radius. A `kind: drive_unit` map is already lumped at the wheel-side shaft, so the
+tyre's unloaded radius. A map is always referenced at the shaft its unit outputs onto (ptm/2.0), so a wheel-terminus unit's
 topology applies no further ratio unless `meta.upstream_ratio_applied: false`.
 
 ### Traction ceiling

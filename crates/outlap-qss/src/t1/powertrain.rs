@@ -297,7 +297,7 @@ impl PtUnit {
     /// for an ICE (fuel, not charge), a unit with no efficiency map, or a speed with no on-envelope
     /// gear. Zero-allocation.
     fn machine_efficiency(&self, v: f64) -> Option<f64> {
-        if self.kind == PtmKind::Ice {
+        if self.kind == PtmKind::Combustion {
             return None;
         }
         let eff = self.eff_map.as_ref()?;
@@ -578,7 +578,7 @@ fn build_pt_unit(
     // The regen (negative-quadrant) envelope. An ICE recovers nothing; an electric machine with no
     // declared envelope is assumed symmetric with its drive envelope (estimated, surfaced #41).
     let regen_env = match (&ptm.kind, &ptm.limits.max_regen_torque_nm_vs_speed) {
-        (PtmKind::Ice, _) => {
+        (PtmKind::Combustion, _) => {
             notes.push(format!(
                 "drive unit {i} is an internal-combustion engine: it recovers no braking \
                  energy (regen envelope zero; overrun drag is not commandable regen)"
@@ -713,7 +713,7 @@ impl T1Powertrain {
                 &mut notes,
             )?;
             if let Some(cap) = rev_limit {
-                if pt.kind == PtmKind::Ice && cap < pt.omega_max {
+                if pt.kind == PtmKind::Combustion && cap < pt.omega_max {
                     notes.push(format!(
                         "drive unit {i}: the regulatory rev limit (policy.max_engine_speed_rpm) \
                          clips the engine envelope — {:.0} rpm of authored map is unreachable",
@@ -1177,7 +1177,7 @@ impl T1Powertrain {
             mech_w: p_mech,
             loss_w,
             // An ICE burns fuel whenever it draws chemical power (drive or idle); motoring does not.
-            fuel_kg_per_s: if unit.kind == PtmKind::Ice && source_w > 0.0 {
+            fuel_kg_per_s: if unit.kind == PtmKind::Combustion && source_w > 0.0 {
                 source_w / FUEL_LHV_J_PER_KG
             } else {
                 0.0
@@ -1332,7 +1332,7 @@ impl T1Powertrain {
         // ICE force share ∝ each ICE unit's best-gear capacity at this speed (usually one unit).
         let mut total_cap = 0.0;
         for u in &self.units {
-            if u.kind == PtmKind::Ice && u.eff_map.is_some() {
+            if u.kind == PtmKind::Combustion && u.eff_map.is_some() {
                 total_cap += u.max_wheel_force(v);
             }
         }
@@ -1341,7 +1341,7 @@ impl T1Powertrain {
         }
         let mut kg_per_s = 0.0;
         for (idx, u) in self.units.iter().enumerate() {
-            if u.kind != PtmKind::Ice || u.eff_map.is_none() {
+            if u.kind != PtmKind::Combustion || u.eff_map.is_none() {
                 continue;
             }
             let share = u.max_wheel_force(v) / total_cap;
@@ -1360,7 +1360,7 @@ impl T1Powertrain {
     #[must_use]
     pub fn representative_ice_efficiency(&self) -> Option<f64> {
         for (idx, u) in self.units.iter().enumerate() {
-            if u.kind == PtmKind::Ice && u.eff_map.is_some() {
+            if u.kind == PtmKind::Combustion && u.eff_map.is_some() {
                 return self.efficiency(idx, 10_000.0, 200.0);
             }
         }
@@ -1373,7 +1373,7 @@ impl T1Powertrain {
     pub fn ice_crank_rpm(&self, v: f64, wheel_force_n: f64) -> Option<f64> {
         let mut rpm_out = None::<f64>;
         for u in &self.units {
-            if u.kind != PtmKind::Ice {
+            if u.kind != PtmKind::Combustion {
                 continue;
             }
             if let Some((rpm, _)) = u.source_op(v, wheel_force_n.max(0.0)) {

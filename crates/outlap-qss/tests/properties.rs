@@ -20,11 +20,11 @@ use proptest::prelude::*;
 const SLICK: &str = include_str!("../../outlap-schema/tests/fixtures/tyr/slick.tyr.yaml");
 
 fn build_vehicle(mass: f64, cx: f64, cz: f64) -> T0Vehicle {
-    let ptm = "schema: ptm/1.0\nkind: drive_unit\n\
+    let ptm = "schema: ptm/2.0\nkind: electric\n\
         axes: {speed_rpm: [0.0, 30000.0], load_axis: {torque_nm: [0.0, 1500.0]}, torque_nm: [0.0, 1500.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 30000.0], torque_nm: [1500.0, 1500.0]}}\n\
-        inertia_kgm2: 0.05\nmass_kg: 60.0\nmeta: {upstream_ratio_applied: false}\n";
+        inertia_kgm2: 0.05\nmass_kg: 60.0\n";
     let veh = format!(
         "schema: vehicle/2.0\nname: t\n\
          chassis: {{mass_kg: {mass}, cg: [1.4, 0.0, 0.3], inertia: [100.0, 400.0, 450.0], wheelbase_m: 2.8, track_m: [1.6, 1.6]}}\n\

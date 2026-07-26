@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # SYNTHETIC drive-unit map (machine + inverter + reduction lumped at the wheel-side shaft).
-schema: ptm/1.0
-kind: drive_unit
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm: [0.0, 3000.0, 6000.0, 9000.0, 12000.0]
   load_axis:
@@ -20,4 +20,3 @@ mass_kg: 82.0
 meta:
   source: "synthetic drive unit"
   dc_voltage_v: 800.0
-  upstream_ratio_applied: true

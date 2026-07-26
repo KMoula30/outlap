@@ -359,7 +359,7 @@ fn all_six_reference_topologies_resolve() {
 /// mistake, so the message says exactly what to do rather than just "invalid".
 #[test]
 fn a_negative_regen_envelope_is_rejected_with_a_plain_language_fix() {
-    let ptm = "schema: ptm/1.2\nkind: electric_machine\n\
+    let ptm = "schema: ptm/2.0\nkind: electric\n\
         axes: {speed_rpm: [0.0, 8000.0], load_axis: {torque_nm: [-300.0, 300.0]}, torque_nm: [-300.0, 300.0]}\n\
         tables: {file: x.parquet}\n\
         limits: {max_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}, max_regen_torque_nm_vs_speed: {speed_rpm: [0.0, 8000.0], torque_nm: [-120.0, -120.0]}}\n\

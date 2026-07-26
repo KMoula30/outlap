@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # SYNTHETIC ICE map (torque-axis load).
-schema: ptm/1.0
-kind: ice
+schema: ptm/2.0
+kind: combustion
 axes:
   speed_rpm: [1000.0, 4000.0, 8000.0, 12000.0, 15000.0]
   load_axis:

@@ -1134,7 +1134,7 @@ drivetrain:
       wheels: [RL, RR]
 ```
 
-Because a lumped `drive_unit` `.ptm` already includes its gearbox ratio, the loader refuses to put one behind *another* gearbox or fixed ratio — one of the topology checks in §4.5.
+A unit's private `path` carries its differential only: an internal machine→output-shaft reduction is the unit's `fixed_ratio:` field, and gearboxes live on the shared graph `couplers` — one of the load checks in §4.5.
 
 #### 4.2.6 `ers` — the hybrid energy-recovery block (optional)
 
@@ -1256,7 +1256,7 @@ ValueError: `suspension.front.roll_stiffness_share` must lie in [0, 1]
 
 1. at least one drive unit;
 2. every unit drives at least one wheel, with no duplicates;
-3. a lumped `drive_unit` `.ptm` (ratio already applied) must not sit behind a gearbox or fixed ratio — the message suggests `meta.upstream_ratio_applied: false` or removing the coupler;
+3. a unit's private `path` may carry only its differential — a `fixed_ratio` there is rejected (declare it as the unit's `fixed_ratio:` field) and a gearbox there is rejected (move it to the shared graph `couplers`);
 4. a wheel rigidly driven by two or more units with no differential anywhere in the driving paths is rejected ("over-constrains the wheel speed" — parallel hybrids sharing a diff pass);
 5. torque vectoring cannot be enabled across a `locked`/`solid` diff feeding a full axle.
 
@@ -1404,7 +1404,7 @@ The document has seven required fields — `schema`, `kind`, `axes`, `tables`, `
 
 ```yaml
 schema: ptm/1.1
-kind: drive_unit
+kind: electric
 axes:
   speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
   load_axis:
@@ -1430,13 +1430,13 @@ meta:
 
 Field by field:
 
-- **`kind`** is one of `electric_machine` (torque at the machine's own shaft; a downstream gear ratio may apply), `ice` (internal-combustion engine), or `drive_unit` (machine + inverter + gearbox lumped at the wheel-side shaft — the drivetrain topology must *not* apply another ratio unless `meta.upstream_ratio_applied: false`).
+- **`kind`** is the unit's ENERGY SOURCE and nothing else (`ptm/2.0`): `combustion` (burns fuel — no regenerative quadrant, fuel-mass accounting applies) or `electric` (may regenerate, draws from / harvests into a pack). Where the map is referenced is not the kind's business: every map is read at the shaft its drive unit outputs onto, and a map authored at the machine's own shaft declares the reduction as the unit's `fixed_ratio:` (vehicle/2.1).
 - **`axes`** declares the grid. `speed_rpm` is the shaft-speed axis (rpm is a file-format boundary unit; internally everything is rad/s). `load_axis` is written as either `{torque_nm: [...]}` or `{load_fraction: [...]}` — a load fraction runs −1..1 where negative is the regeneration (braking-recovery) quadrant. `vdc_v` is the optional **DC-link voltage axis introduced by `ptm/1.1`**: when present, the sidecar tables become a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor and the solver evaluates them at the battery's state-of-charge-dependent terminal voltage (Chapter 9). It needs at least two strictly ascending breakpoints. When absent the map is single-voltage, measured at the scalar `meta.dc_voltage_v`.
 - **`tables`** points at the numeric sidecar (§5.8) and declares its columns: `efficiency` (default `true`; values 0..1 covering drive *and* regen quadrants) and `loss_w` (default `false`; a total power-loss column in watts, which must be consistent with efficiency if both are given). The shipped `du_medium.maps.parquet` is a long/tidy table of 210 rows = 7 speeds × 10 torques × 3 voltages with columns exactly `[speed_rpm, torque_nm, vdc_v, efficiency, loss_w]`. Per-component loss columns (winding loss vs iron loss, say) are a hook in the format — the `.emotor` loss routing can name a component column — but in v0.2 the lap loop only consumes total `loss_w`.
 - **`limits`**: only `max_torque_nm_vs_speed` (the peak torque envelope, paired equal-length arrays) is required — it is what caps traction. `cont_torque_nm_vs_speed`, `overload`, and `drag_torque_nm_vs_speed` are optional *validation references*, not the derating mechanism: sustained thermal capability is computed by the `.emotor` model from the loss tables.
 - **`inertia_kgm2` / `mass_kg`**: rotational inertia referred to this map's shaft, and the mass attributed to the unit (which also feeds the `.emotor` mass heuristics, §5.4).
 
-**The ICE variant** is supported from day one with the same schema. `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml` is a synthetic 1.6 L V6 (`kind: ice`, `schema: ptm/1.0`) with a torque-axis load and a negative `drag_torque_nm_vs_speed` curve for engine braking. For an ICE the sidecar `efficiency` column is brake thermal efficiency, and the runtime converts source power to a fuel-mass rate using a lower heating value of 43 MJ/kg (see Chapter 9).
+**The ICE variant** is supported from day one with the same schema. `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml` is a synthetic 1.6 L V6 (`kind: combustion`, `schema: ptm/2.0`) with a torque-axis load and a negative `drag_torque_nm_vs_speed` curve for engine braking. For an ICE the sidecar `efficiency` column is brake thermal efficiency, and the runtime converts source power to a fuel-mass rate using a lower heating value of 43 MJ/kg (see Chapter 9).
 
 ### 5.3 `.tyr` — the tire document
 
@@ -2911,7 +2911,7 @@ outlap never simulates the inside of an electric machine, an inverter, or a gear
 Why? Two reasons. First, scope: outlap is a vehicle and lap simulator, and machine design tools already exist that produce exactly these maps. Second, cleanliness: a map is a neutral, tool-agnostic contract. The importers in Chapter 11 read a design tool's HDF5 exports with plain `h5py` and emit `.ptm` files — the design tool's code and data never enter this repository (all committed powertrain data is synthetic, regenerated by `python/tools/gen_model3_powertrain.py`).
 
 A `.ptm` document (schema `ptm/1.0` or `ptm/1.1`) describes a unit at its shaft: its `kind`
-(`electric_machine`, `ice`, or `drive_unit`), the grid `axes` (a strictly ascending shaft-speed
+(`combustion` or `electric`), the grid `axes` (a strictly ascending shaft-speed
 axis, a load axis, and — new in `ptm/1.1` — an optional DC-link `vdc_v` axis), a `tables` sidecar
 carrying the dense efficiency/loss data, and the `limits`. Chapter 5, Files and formats, walks the
 format field by field with the shipped `du_medium.ptm.yaml`; here we care about what those numbers
@@ -2929,7 +2929,7 @@ format field by field with the shipped `du_medium.ptm.yaml`; here we care about 
 - A **missing sidecar table is not fatal**: the lap falls back to the peak envelope alone, with a
   note that energy accounting is off (nothing silent).
 
-Internal-combustion engines are supported day one with the same format: `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml` is a `ptm/1.0`, `kind: ice` map for a synthetic 1.6 L V6 turbo, including a negative `drag_torque_nm_vs_speed` curve (engine braking, −20 to −80 N·m across the rev range). For an ICE the sidecar `efficiency` is *brake thermal efficiency*, and Section 9.5 shows how it becomes a fuel-mass rate.
+Internal-combustion engines are supported day one with the same format: `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml` is a `ptm/2.0`, `kind: combustion` map for a synthetic 1.6 L V6 turbo, including a negative `drag_torque_nm_vs_speed` curve (engine braking, −20 to −80 N·m across the rev range). For an ICE the sidecar `efficiency` is *brake thermal efficiency*, and Section 9.5 shows how it becomes a fuel-mass rate.
 
 Finally, imports are gated: the round-trip test loads an importer-emitted `.ptm` plus its Parquet through the real gridded-map path and must reproduce spot efficiencies from the source arrays to **1e-6**; unreachable cells beyond the torque envelope carry `NaN` and are nearest-valid filled and flagged out-of-hull; the zero-torque spin column is pinned to $\eta = 0$. CI runs on synthetic, tool-shaped fixtures only — real design-tool data never enters the repository (see Chapter 11, Importers and tooling, and Chapter 13, Validation).
 
@@ -2963,7 +2963,7 @@ Three coupler kinds exist, written `{gearbox: {...}}`, `{diff: {...}}`, or `{fix
 
 The control layer is `drivetrain.control`: **static splits** (`split.front` = front-axle torque share 0..1, omitted for single-axle cars; `split.left` = left-side share) and a **torque-vectoring** stub (`enabled`, `k_yaw`, a yaw-rate feedback `ΔM_z = k_yaw · (r_target − r)`; rule-based control only in this release — optimization-based allocation is on the roadmap, Chapter 15).
 
-Because "config errors are a product surface", the loader validates the graph at load time (`crates/outlap-schema/src/load/topology.rs`) with plain-language messages: every unit must actually reach wheels; a lumped `drive_unit` map "must not sit behind a gearbox/fixed ratio" (its ratio is already applied); a wheel rigidly driven by two units with no differential between them is a conflict (parallel hybrids sharing a diff pass); and torque vectoring cannot act across a locked/solid diff on the same axle.
+Because "config errors are a product surface", the loader validates the graph at load time (`crates/outlap-schema/src/load/topology.rs`) with plain-language messages: every unit must actually reach wheels; a unit's private `path` may carry only its differential (reductions are the unit's `fixed_ratio:`, gearboxes live on the graph `couplers`); a wheel rigidly driven by two units with no differential between them is a conflict (parallel hybrids sharing a diff pass); and torque vectoring cannot act across a locked/solid diff on the same axle.
 
 ### 9.3 From graph to traction ceiling
 

@@ -161,22 +161,17 @@
       ]
     },
     "PtmKind": {
-      "description": "Source kind of a powertrain map.",
+      "description": "The unit's ENERGY SOURCE — the only thing a map's kind declares (`ptm/2.0`).\n\nWhere the map is referenced is NOT the kind's business: every map is read at the shaft its\ndrive unit outputs onto, and a unit whose map is authored at the machine's own shaft declares\nthe reduction as its `fixed_ratio` (vehicle/2.1). The pre-2.0 kinds conflated the two — a\npackaging label (`drive_unit` = \"lumped at the wheel-side shaft\") sat beside an energy label\n(`ice`), and real files picked the wrong one: two petrol engines shipped as `drive_unit` and\nsilently inherited an electric machine's symmetric REGEN envelope. There are no aliases for the\nold names — mapping `drive_unit` automatically to either side would repeat that mislabel; the\nloader rejects them with the two candidates named.",
       "oneOf": [
         {
-          "description": "A bare electric machine (torque available at its own shaft; a downstream ratio may apply).",
+          "description": "Burns fuel: no regenerative quadrant (overrun drag is not commandable regen), and the\nfuel-mass accounting applies.",
           "type": "string",
-          "const": "electric_machine"
+          "const": "combustion"
         },
         {
-          "description": "An internal-combustion engine.",
+          "description": "An electric machine, whatever its packaging (bare motor or lumped drive unit): may\nregenerate, draws from / harvests into a pack.",
           "type": "string",
-          "const": "ice"
-        },
-        {
-          "description": "A machine+inverter+gearbox lumped at the wheel-side shaft. The topology must **not** apply\nanother gear ratio unless [`PtmMeta::upstream_ratio_applied`] is `false`.",
-          "type": "string",
-          "const": "drive_unit"
+          "const": "electric"
         }
       ]
     },
@@ -253,13 +248,6 @@
           "description": "Human-readable source/provenance note.",
           "type": [
             "string",
-            "null"
-          ]
-        },
-        "upstream_ratio_applied": {
-          "description": "For `drive_unit` maps: whether the internal gear ratio is already applied (default `true`).\nWhen `false`, the topology may apply one downstream ratio.",
-          "type": [
-            "boolean",
             "null"
           ]
         }

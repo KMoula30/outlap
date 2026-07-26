@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# SYNTHETIC MGU-K map. This is a `drive_unit`: the rotor (which spins to the regulatory ~50 000 rpm)
-# PLUS its fixed step-up reduction, lumped together and expressed at the shaft the unit declares as
-# its `output` — the crank. Every axis below is therefore OUTPUT-SHAFT referenced, and that shaft is
-# the V6's, so it stops at the 15 000 rpm redline. Declaring this a bare `electric_machine` (as it
-# was) would mean these axes are the ROTOR's and the topology owes a `fixed_ratio` on the unit's
-# `path` — see docs/theory/ers-energy-manager.md, "The shared crank".
-schema: ptm/1.0
-kind: drive_unit
+# SYNTHETIC MGU-K map: the rotor (which spins to the regulatory ~50 000 rpm) PLUS its fixed
+# step-up reduction, lumped together and expressed at the shaft the unit declares as its `output` —
+# the crank. Every axis below is therefore OUTPUT-SHAFT referenced (the unit declares no
+# `fixed_ratio`), and that shaft is the V6's, so it stops at the 15 000 rpm redline. Were the map
+# authored at the ROTOR's own shaft instead, the unit would declare the reduction as
+# `fixed_ratio: ~3.33` — see docs/theory/ers-energy-manager.md, "The shared crank".
+schema: ptm/2.0
+kind: electric
 axes:
   speed_rpm: [0, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000]
   load_axis:
