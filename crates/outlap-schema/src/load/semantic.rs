@@ -949,6 +949,22 @@ pub fn check_ptm(
     // The optional regen envelope (ptm/1.2) is a *positive-magnitude* braking-torque curve; a signed
     // (negative) curve is the most likely authoring mistake, so name it explicitly.
     if let Some(regen) = &ptm.limits.max_regen_torque_nm_vs_speed {
+        // A combustion engine has no regenerative quadrant (ptm/2.0: `kind` is the energy
+        // source), so a declared regen envelope on one is always meaningless — a hard error
+        // per Decision #40, never a silent discard.
+        if ptm.kind == crate::ptm::PtmKind::Combustion {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/limits/max_regen_torque_nm_vs_speed"),
+                "`kind: combustion` declares no regenerative quadrant, but \
+                 `limits.max_regen_torque_nm_vs_speed` is present",
+                Some(
+                    "delete the curve, or relabel the unit `kind: electric` if it can \
+                     regenerate"
+                        .into(),
+                ),
+            ));
+        }
         if regen.speed_rpm.len() != regen.torque_nm.len() || regen.speed_rpm.is_empty() {
             return Err(SchemaError::semantic(
                 sources,

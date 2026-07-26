@@ -43,8 +43,8 @@ simplifications recorded in the lap's `notes` attr — nothing silent (Decision 
 
 ## Synthetic powertrain (committed) — the three sizings
 
-`python/tools/gen_model3_powertrain.py` writes the three Vdc-stacked (`ptm/1.1`) drive-unit
-maps and the pack; notebook 07 sweeps them as the sizing-sensitivity axis:
+`python/tools/gen_model3_powertrain.py` writes the three Vdc-stacked (`ptm/2.0`, `kind: electric`)
+drive-unit maps and the pack; notebook 07 sweeps them as the sizing-sensitivity axis:
 
 | Variant | Peak torque (output shaft) | ≈Peak power | File |
 |---|---|---|---|

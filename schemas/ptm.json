@@ -14,7 +14,7 @@
       "format": "double"
     },
     "kind": {
-      "description": "Source kind — determines how the topology consumes this map.",
+      "description": "The unit's energy source (`combustion` | `electric`) and nothing else — see [`PtmKind`].",
       "$ref": "#/$defs/PtmKind"
     },
     "limits": {
@@ -32,7 +32,7 @@
       "default": {}
     },
     "schema": {
-      "description": "Schema version, e.g. `ptm/1.0` (`ptm/1.1` adds the optional Vdc axis).",
+      "description": "Schema version, e.g. `ptm/2.0` (the Vdc axis and the regen envelope are 1.x-era\nfeatures carried into 2.0 — see the version history in `lib.rs`).",
       "$ref": "#/$defs/SchemaVersion"
     },
     "tables": {

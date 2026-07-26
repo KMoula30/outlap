@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: CC-BY-SA-4.0
-# Synthetic PDT-importer output (regenerate: python -m outlap.importers.pdt_h5 …). NOT real PDT data.
+# Synthetic PDT-importer output — NOT real PDT data. Regenerate: build e.h5 with
+# python/tests/pdt_fixtures.py::make_edrive (defaults), then
+# `python -m outlap.importers.pdt_h5 edrive e.h5 -o e.ptm.yaml --vdc 400 --torque-points 9`.
 # Imported by outlap.importers.pdt_h5 from e.h5 (§10.2)
-# electric_machine map
+# electric machine map (motor shaft)
 schema: ptm/2.0
 kind: electric
 axes:
@@ -53,6 +55,21 @@ limits:
     - 128.0
     - 128.0
     - 128.0
+  max_regen_torque_nm_vs_speed:
+    speed_rpm:
+    - 100.0
+    - 2480.0
+    - 4860.0
+    - 7240.0
+    - 9620.0
+    - 12000.0
+    torque_nm:
+    - 115.2
+    - 115.2
+    - 115.2
+    - 115.2
+    - 115.2
+    - 115.2
   cont_torque_nm_vs_speed:
     speed_rpm:
     - 100.0

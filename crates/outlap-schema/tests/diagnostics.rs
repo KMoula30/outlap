@@ -337,6 +337,53 @@ fn same_major_minor_is_accepted_but_new_major_is_rejected() {
     );
 }
 
+/// A `ptm/1.x` file hits the version gate (ptm/2.0 renamed the kinds — the regen-honesty break),
+/// the ptm twin of the vehicle 1.x witness above: a version error, never a bare deserialize
+/// failure from whatever field changed underneath.
+#[test]
+fn a_ptm_1x_file_is_rejected_at_the_version_gate() {
+    for schema in ["ptm/1.0", "ptm/1.2"] {
+        let ptm = format!(
+            "schema: {schema}\nkind: electric\n\
+             axes: {{speed_rpm: [0.0, 8000.0], load_axis: {{torque_nm: [0.0, 300.0]}}, torque_nm: [0.0, 300.0]}}\n\
+             tables: {{file: x.parquet}}\n\
+             limits: {{max_torque_nm_vs_speed: {{speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}}}}\n\
+             inertia_kgm2: 0.1\nmass_kg: 80.0\n"
+        );
+        let loader = MemLoader::new().with("u.ptm.yaml", &ptm);
+        let err = outlap_schema::load::load_ptm("u.ptm.yaml", &loader)
+            .expect_err("a ptm/1.x file must be rejected at the version gate");
+        assert!(
+            matches!(err, SchemaError::SchemaVersionMismatch { .. }),
+            "{schema} must fail the version gate, got: {err}"
+        );
+    }
+}
+
+/// ptm/2.0 has NO aliases for the retired kind names — auto-mapping `drive_unit` to either side is
+/// exactly how two petrol engines silently inherited a regen envelope. The rejection must name
+/// both live candidates so the author knows which honest label to pick.
+#[test]
+fn old_ptm_kind_names_are_rejected_naming_both_candidates() {
+    for old in ["drive_unit", "ice", "electric_machine"] {
+        let ptm = format!(
+            "schema: ptm/2.0\nkind: {old}\n\
+             axes: {{speed_rpm: [0.0, 8000.0], load_axis: {{torque_nm: [0.0, 300.0]}}, torque_nm: [0.0, 300.0]}}\n\
+             tables: {{file: x.parquet}}\n\
+             limits: {{max_torque_nm_vs_speed: {{speed_rpm: [0.0, 8000.0], torque_nm: [300.0, 300.0]}}}}\n\
+             inertia_kgm2: 0.1\nmass_kg: 80.0\n"
+        );
+        let loader = MemLoader::new().with("u.ptm.yaml", &ptm);
+        let err = outlap_schema::load::load_ptm("u.ptm.yaml", &loader)
+            .expect_err("an old kind name must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(old) && msg.contains("combustion") && msg.contains("electric"),
+            "`kind: {old}` must be rejected naming both candidates: {msg}"
+        );
+    }
+}
+
 #[test]
 fn all_six_reference_topologies_resolve() {
     let l = loader();
@@ -371,6 +418,26 @@ fn a_negative_regen_envelope_is_rejected_with_a_plain_language_fix() {
     assert!(
         msg.contains("positive-magnitude") && msg.contains("minus sign"),
         "the message must tell the author what to do: {msg}"
+    );
+}
+
+/// `kind: combustion` has no regenerative quadrant (ptm/2.0: the kind IS the energy source), so a
+/// declared regen envelope on one is always meaningless — a hard error naming the contradiction
+/// (Decision #40), never a silent discard.
+#[test]
+fn a_combustion_map_with_a_declared_regen_envelope_is_rejected() {
+    let ptm = "schema: ptm/2.0\nkind: combustion\n\
+        axes: {speed_rpm: [1000.0, 8000.0], load_axis: {torque_nm: [0.0, 300.0]}, torque_nm: [0.0, 300.0]}\n\
+        tables: {file: x.parquet}\n\
+        limits: {max_torque_nm_vs_speed: {speed_rpm: [1000.0, 8000.0], torque_nm: [280.0, 300.0]}, max_regen_torque_nm_vs_speed: {speed_rpm: [1000.0, 8000.0], torque_nm: [120.0, 120.0]}}\n\
+        inertia_kgm2: 0.1\nmass_kg: 120.0\n";
+    let loader = MemLoader::new().with("u.ptm.yaml", ptm);
+    let err = outlap_schema::load::load_ptm("u.ptm.yaml", &loader)
+        .expect_err("a combustion map declaring a regen envelope must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("regenerative quadrant"),
+        "the message names the contradiction: {msg}"
     );
 }
 

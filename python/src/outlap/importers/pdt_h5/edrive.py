@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""EDrive stage file → ``machine.ptm.yaml`` (+ ``maps.parquet``), kind ``electric_machine`` (§10.2).
+"""EDrive stage file → ``machine.ptm.yaml`` (+ ``maps.parquet``), kind ``electric`` (§10.2).
 
 The system (machine + inverter) efficiency is ``motor_efficiency · inverter_efficiency`` and the
 system loss is ``motor_loss_total + inverter_loss_total`` — the real files carry the two stages
-separately, not a lumped ``system_efficiency``. The torque coordinate is ``airgap_torque``.
+separately, not a lumped ``system_efficiency``. The torque coordinate is ``airgap_torque``; the
+measured regen envelope comes from ``peak_capability/torque_regen``.
 """
 
 from __future__ import annotations
@@ -172,7 +173,7 @@ def convert_edrive(
         doc,
         [
             f"Imported by outlap.importers.pdt_h5 from {src.name} (§10.2)",
-            "electric_machine map",
+            "electric machine map (motor shaft)",
         ],
     )
     nan_frac = float(np.isnan(regrid.efficiency).mean())
