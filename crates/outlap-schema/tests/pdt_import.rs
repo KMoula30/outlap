@@ -32,6 +32,16 @@ fn edrive_ptm_loads() {
     // The overload block round-trips with its three durations.
     let overload = ptm.limits.overload.expect("overload present");
     assert_eq!(overload.durations_s, vec![10.0, 20.0, 30.0]);
+    // The MEASURED regen envelope rides along — the importer writes it from
+    // `peak_capability/torque_regen`, so an imported machine never falls back to the
+    // symmetric-machine assumption. |TAU_REGEN| = 0.9 · 128 = 115.2 N·m at every speed.
+    let regen = ptm
+        .limits
+        .max_regen_torque_nm_vs_speed
+        .as_ref()
+        .expect("measured regen envelope present");
+    assert_eq!(regen.speed_rpm, ptm.limits.max_torque_nm_vs_speed.speed_rpm);
+    assert!(regen.torque_nm.iter().all(|&t| (t - 115.2).abs() < 1e-9));
 }
 
 #[test]
@@ -44,6 +54,15 @@ fn driveunit_ptm_loads() {
         .as_deref()
         .unwrap_or("")
         .contains("PDT DriveUnit"));
+    // The MEASURED regen envelope rides along — written from `peak_op/torque_regen`
+    // (|−150| = 150 N·m at every output-shaft speed), no symmetric fallback.
+    let regen = ptm
+        .limits
+        .max_regen_torque_nm_vs_speed
+        .as_ref()
+        .expect("measured regen envelope present");
+    assert_eq!(regen.speed_rpm, ptm.limits.max_torque_nm_vs_speed.speed_rpm);
+    assert!(regen.torque_nm.iter().all(|&t| (t - 150.0).abs() < 1e-9));
     // serde JSON round-trip is stable.
     let json = serde_json::to_string(&ptm).unwrap();
     let back: outlap_schema::ptm::Ptm = serde_json::from_str(&json).unwrap();

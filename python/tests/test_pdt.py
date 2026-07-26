@@ -58,6 +58,11 @@ def test_edrive_converts_and_validates(tmp_path: Path):
     assert doc["mass_kg"] == 20.0
     # Overload has the 3 durations.
     assert doc["limits"]["overload"]["durations_s"] == [10.0, 20.0, 30.0]
+    # The measured regen envelope is written verbatim: |TAU_REGEN| = 0.9 · 128 = 115.2 N·m
+    # at every speed — value-checked so a dropped or mangled emission fails loudly.
+    regen = doc["limits"]["max_regen_torque_nm_vs_speed"]
+    assert regen["speed_rpm"] == sp
+    assert regen["torque_nm"] == [115.2] * len(sp)
 
 
 def test_edrive_spot_efficiencies_reproduce_to_1e6(tmp_path: Path):
@@ -129,8 +134,11 @@ def test_driveunit_handles_capital_t_thermal(tmp_path: Path, thermal_name: str):
     doc = yaml.safe_load(out.read_text())
     assert doc["kind"] == "electric"
     assert "upstream_ratio_applied" not in doc["meta"]
-    # The measured 4th-quadrant boundary rides along — no symmetric fallback for imported units.
-    assert "max_regen_torque_nm_vs_speed" in doc["limits"]
+    # The measured 4th-quadrant boundary rides along, VALUE-checked against the fixture's
+    # constant peak_op/torque_regen = -150.0 — no symmetric fallback for imported units.
+    regen = doc["limits"]["max_regen_torque_nm_vs_speed"]
+    assert regen["speed_rpm"] == doc["limits"]["max_torque_nm_vs_speed"]["speed_rpm"]
+    assert regen["torque_nm"] == [150.0] * len(regen["speed_rpm"])
     assert "16.24" in doc["meta"]["source"]  # gear ratio recorded in the source string
     assert doc["inertia_kgm2"] == 0.021  # at_output, not at_input
     assert "cont_torque_nm_vs_speed" in doc["limits"]  # thermal group was found
