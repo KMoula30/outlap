@@ -137,7 +137,7 @@ def test_driveunit_handles_capital_t_thermal(tmp_path: Path, thermal_name: str):
 
 
 def test_driveunit_emits_full_vdc_stack_by_default(tmp_path: Path):
-    # No --vdc and >1 vdc slice ⇒ a ptm/1.1 map with a vdc_v axis (the Vdc–SoC coupling stack).
+    # No --vdc and >1 vdc slice ⇒ a `vdc_v`-axis map (the Vdc–SoC coupling stack).
     src = tmp_path / "du.h5"
     fx.make_driveunit(src, nv=2)  # vdc grid [48, 60]
     out = tmp_path / "du.ptm.yaml"

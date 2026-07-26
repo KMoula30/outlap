@@ -748,7 +748,7 @@ extensions: { x-anything: ... }               # namespaced, ignored-with-warning
 ### 9.2 `.ptm.yaml` — the neutral powertrain-map contract (THE FIREWALL)
 
 ```yaml
-schema: ptm/1.0
+schema: ptm/2.0
 kind: electric                # combustion | electric (the energy source; ptm/2.0)
 axes:
   speed_rpm: [...]            # monotonically increasing

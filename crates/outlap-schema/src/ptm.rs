@@ -16,7 +16,8 @@ use crate::version::SchemaVersion;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Ptm {
-    /// Schema version, e.g. `ptm/1.0` (`ptm/1.1` adds the optional Vdc axis).
+    /// Schema version, e.g. `ptm/2.0` (the Vdc axis and the regen envelope are 1.x-era
+    /// features carried into 2.0 — see the version history in `lib.rs`).
     pub schema: SchemaVersion,
     /// Source kind — determines how the topology consumes this map.
     pub kind: PtmKind,

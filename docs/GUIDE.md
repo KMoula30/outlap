@@ -1403,7 +1403,7 @@ A `.ptm` file (by convention named `<name>.ptm.yaml`) is how *any* torque source
 The document has seven required fields — `schema`, `kind`, `axes`, `tables`, `limits`, `inertia_kgm2`, `mass_kg` — plus optional `meta` (`schemas/ptm.json`). Here is a shipped example, the Tesla Model 3 study's medium drive unit (`data/vehicles/tesla_model3_rwd/ptm/du_medium.ptm.yaml`, a synthetic dataset):
 
 ```yaml
-schema: ptm/1.1
+schema: ptm/2.0
 kind: electric
 axes:
   speed_rpm: [10.000, 340.000, 670.000, 1000.000, 1330.000, 1660.000, 1990.000]
@@ -1431,7 +1431,7 @@ meta:
 Field by field:
 
 - **`kind`** is the unit's ENERGY SOURCE and nothing else (`ptm/2.0`): `combustion` (burns fuel — no regenerative quadrant, fuel-mass accounting applies) or `electric` (may regenerate, draws from / harvests into a pack). Where the map is referenced is not the kind's business: every map is read at the shaft its drive unit outputs onto, and a map authored at the machine's own shaft declares the reduction as the unit's `fixed_ratio:` (vehicle/2.1).
-- **`axes`** declares the grid. `speed_rpm` is the shaft-speed axis (rpm is a file-format boundary unit; internally everything is rad/s). `load_axis` is written as either `{torque_nm: [...]}` or `{load_fraction: [...]}` — a load fraction runs −1..1 where negative is the regeneration (braking-recovery) quadrant. `vdc_v` is the optional **DC-link voltage axis introduced by `ptm/1.1`**: when present, the sidecar tables become a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor and the solver evaluates them at the battery's state-of-charge-dependent terminal voltage (Chapter 9). It needs at least two strictly ascending breakpoints. When absent the map is single-voltage, measured at the scalar `meta.dc_voltage_v`.
+- **`axes`** declares the grid. `speed_rpm` is the shaft-speed axis (rpm is a file-format boundary unit; internally everything is rad/s). `load_axis` is written as either `{torque_nm: [...]}` or `{load_fraction: [...]}` — a load fraction runs −1..1 where negative is the regeneration (braking-recovery) quadrant. `vdc_v` is the optional **DC-link voltage axis** (a 1.x-era feature carried into `ptm/2.0`): when present, the sidecar tables become a 3-D `(speed_rpm, torque_nm, vdc_v)` tensor and the solver evaluates them at the battery's state-of-charge-dependent terminal voltage (Chapter 9). It needs at least two strictly ascending breakpoints. When absent the map is single-voltage, measured at the scalar `meta.dc_voltage_v`.
 - **`tables`** points at the numeric sidecar (§5.8) and declares its columns: `efficiency` (default `true`; values 0..1 covering drive *and* regen quadrants) and `loss_w` (default `false`; a total power-loss column in watts, which must be consistent with efficiency if both are given). The shipped `du_medium.maps.parquet` is a long/tidy table of 210 rows = 7 speeds × 10 torques × 3 voltages with columns exactly `[speed_rpm, torque_nm, vdc_v, efficiency, loss_w]`. Per-component loss columns (winding loss vs iron loss, say) are a hook in the format — the `.emotor` loss routing can name a component column — but in v0.2 the lap loop only consumes total `loss_w`.
 - **`limits`**: only `max_torque_nm_vs_speed` (the peak torque envelope, paired equal-length arrays) is required — it is what caps traction. `cont_torque_nm_vs_speed`, `overload`, and `drag_torque_nm_vs_speed` are optional *validation references*, not the derating mechanism: sustained thermal capability is computed by the `.emotor` model from the loss tables.
 - **`inertia_kgm2` / `mass_kg`**: rotational inertia referred to this map's shaft, and the mass attributed to the unit (which also feeds the `.emotor` mass heuristics, §5.4).
@@ -1676,7 +1676,7 @@ and installing a Vdc-stacked map records a note in the loaded-model notes — "e
 | `centerline.csv` | — (CSV, no JSON Schema) | 8-column 3D centerline: `s_m,x_m,y_m,z_m,banking_deg,width_left_m,width_right_m,grip_scale` | is the sidecar |
 | `conditions.yaml` | `conditions/1.0` | Environment: air temperature/pressure, wind, track surface and ambient temperatures (all defaulted) | — |
 | `sim.yaml` | `sim/1.1` | Numerics: tier, dt, integrator, envelope grid, raceline source, `allow_degraded`, `flat_track` (all defaulted) | — |
-| `*.ptm.yaml` | `ptm/1.0` / `ptm/1.1` | Neutral powertrain map: kind, speed/load(/Vdc) axes, torque limits, inertia, mass | `*.maps.parquet` (`efficiency`, `loss_w`) |
+| `*.ptm.yaml` | `ptm/2.0` | Neutral powertrain map: kind, speed/load(/Vdc) axes, torque limits, inertia, mass | `*.maps.parquet` (`efficiency`, `loss_w`) |
 | `*.tyr.yaml` | `tyr/1.0` / `tyr/1.1` | Tire: MF6.1 coefficients (`.tir` names), optional brush block, thermal/wear (placeholders), provenance | — |
 | `*.emotor.yaml` | `emotor/1.1` | N-node machine thermal network: nodes, edges, cooling, loss routing | — |
 | `*.battery.yaml` | `battery/1.0` | Thevenin pack: topology, capacity, SoC window, ECM axes, power limits, lumped thermal | `*.tables.parquet` (OCV/R0/R1/τ1/dU-dT) |
@@ -2910,7 +2910,7 @@ outlap never simulates the inside of an electric machine, an inverter, or a gear
 
 Why? Two reasons. First, scope: outlap is a vehicle and lap simulator, and machine design tools already exist that produce exactly these maps. Second, cleanliness: a map is a neutral, tool-agnostic contract. The importers in Chapter 11 read a design tool's HDF5 exports with plain `h5py` and emit `.ptm` files — the design tool's code and data never enter this repository (all committed powertrain data is synthetic, regenerated by `python/tools/gen_model3_powertrain.py`).
 
-A `.ptm` document (schema `ptm/1.0` or `ptm/1.1`) describes a unit at its shaft: its `kind`
+A `.ptm` document (schema `ptm/2.0`) describes a unit at its shaft: its `kind`
 (`combustion` or `electric`), the grid `axes` (a strictly ascending shaft-speed
 axis, a load axis, and — new in `ptm/1.1` — an optional DC-link `vdc_v` axis), a `tables` sidecar
 carrying the dense efficiency/loss data, and the `limits`. Chapter 5, Files and formats, walks the

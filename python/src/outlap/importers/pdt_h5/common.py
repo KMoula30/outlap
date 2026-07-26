@@ -252,7 +252,7 @@ class RegridStack:
     """A Vdc-stacked machine map: a shared (speed, torque) grid replicated across a ``vdc`` axis.
 
     The 3-D efficiency/loss tensors are ``(n_vdc, n_speed, n_torque)`` (NaN beyond each slice's
-    envelope). Emitted as a ``ptm/1.1`` document with a ``vdc_v`` axis; the Rust core evaluates the
+    envelope). Emitted as a ``ptm/2.0`` document with a ``vdc_v`` axis; the Rust core evaluates the
     map at the pack's SoC-dependent terminal voltage (the Vdc–SoC coupling, §8.4).
     """
 

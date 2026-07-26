@@ -69,7 +69,7 @@ def convert_driveunit(
         loss_all = c.arr(f, "opt_op/du_total_losses")
         td_all = c.arr(f, "peak_op/torque_drive")
         tr_all = c.arr(f, "peak_op/torque_regen")
-        # Emit the FULL Vdc stack by default (a ptm/1.1 map with a vdc_v axis, for the Vdc–SoC
+        # Emit the FULL Vdc stack by default (a `vdc_v`-axis map, for the Vdc–SoC
         # coupling); `--vdc` forces the single nearest slice (the legacy single-voltage map).
         stack_vdc = vdc is None and vdc_grid.size > 1
         tau = tau_all[iv]
