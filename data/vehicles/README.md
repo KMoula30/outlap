@@ -61,6 +61,7 @@ run notes on the lap.
 | `suspension.*.static_ride_height_m`, `anti_dive`/`anti_squat` | omitted | filled by the load pipeline's documented estimator, **surfaced in the loaded-model report** |
 | `tires` | `tyr/slick.tyr.yaml` | copy of the `f1_2026` synthetic slick (identical numbers, gt provenance header) — its peak μ ≈ 1.68 was calibrated against F1 data and is **optimistic for a GT slick** |
 | `drivetrain` | ICE + MGU-K both `output: crank`; 6-speed + LSD couplers | the D-M6-13 shared-crank graph — one engaged gear sets BOTH sources' operating point |
+| `final_drive` | 6.4 — sized to the F1 V6 map this car references, not to its class | a GT-typical 3.4 assumes a ~7 400 rpm redline; against a 15 000 rpm engine it left the top three gears beyond any reachable speed. At 6.4 all six ratios are used (~112/146/182/224/265/324 km/h). A GT-appropriate engine map would bring it back down |
 | `ptm/ice_v6.ptm.yaml` | copy of the `f1_2026` map | **synthetic** ≈500 kW-class V6 (identical numbers, gt provenance header): the 80/20 GT-hybrid split's combustion side |
 | `ptm/mgu_k.ptm.yaml` | copy of the `f1_2026` map | **synthetic** 223 N·m machine (identical numbers, gt provenance header); the hardware ceiling — the 120 kW policy cap is what actually binds |
 | `policy` | 2.0 MJ window, 120 kW deploy tapering to zero at 320 kph, 3.0 MJ/lap harvest | **synthetic** private-series rulebook — explicitly **not** an FIA one |

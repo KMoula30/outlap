@@ -59,7 +59,14 @@ drivetrain:
       output: crank
   couplers:
     - coupler:
-        gearbox: { ratios: [2.6, 2.0, 1.6, 1.3, 1.1, 0.9], final_drive: 3.4, shift_time_s: 0.04 }
+        # The final drive is sized to the engine this car actually references, not to the class
+        # its name suggests. A GT-typical 3.4 assumes a ~7 400 rpm redline; the `.ptm` here is the
+        # F1 V6 that revs to 15 000, so 3.4 made every gear span twice its intended range — first
+        # alone covered 0-211 km/h and the top three gears sat beyond any speed the car can reach.
+        # At 6.4 the six ratios ladder ~112/146/182/224/265/324 km/h, so all of them are used and
+        # the car stays drag-limited rather than rev-limited in top. Give this car a GT-appropriate
+        # engine map one day and the final drive should come back down with it.
+        gearbox: { ratios: [2.6, 2.0, 1.6, 1.3, 1.1, 0.9], final_drive: 6.4, shift_time_s: 0.04 }
       from: crank
       to: gearbox_out
     - coupler:
