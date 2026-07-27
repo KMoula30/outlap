@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC MGU-K map — the gt_hybrid reference car's electric source. The numbers are the SAME
+# semi-virtual machine as `data/vehicles/f1_2026/ptm/mgu_k.ptm.yaml` (only this provenance header
+# differs): a deliberate reuse, because gt_hybrid is the topology/Option-coverage reference car
+# (D-M6-12), not a performance model of any real GT class. On this car the machine is held to
+# 120 kW by `policy.deployment.power_limit_kw` — the envelope below is the hardware ceiling, the
+# policy is the rulebook. `tables/mgu_k.parquet` is a copy of the f1_2026 efficiency/loss sidecar
+# (python/tools/gen_f1_mgu_k.py); this car declares NO `thermal:` `.emotor`, so the machine-thermal
+# derate path is deliberately absent (D-M6-12).
+#
+# The map is the rotor (which spins to the regulatory ~50 000 rpm) PLUS its fixed step-up reduction,
+# lumped together and expressed at the shaft the unit declares as its `output` — the crank. Every
+# axis below is therefore OUTPUT-SHAFT referenced (the unit declares no `fixed_ratio`), and that
+# shaft is the V6's, so it stops at the 15 000 rpm redline. Were the map authored at the ROTOR's own
+# shaft instead, the unit would declare the reduction as `fixed_ratio: ~3.33` — see
+# docs/theory/ers-energy-manager.md, "The shared crank".
+schema: ptm/2.0
+kind: electric
+axes:
+  speed_rpm: [0, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000]
+  load_axis:
+    load_fraction: [-1, -0.916667, -0.833333, -0.75, -0.666667, -0.583333, -0.5, -0.416667, -0.333333, -0.25, -0.166667, -0.0833333, 0, 0.0833333, 0.166667, 0.25, 0.333333, 0.416667, 0.5, 0.583333, 0.666667, 0.75, 0.833333, 0.916667, 1]
+  torque_nm: [-223.0, -204.4167, -185.8333, -167.25, -148.6667, -130.0833, -111.5, -92.9167, -74.3333, -55.75, -37.1667, -18.5833, 0.0, 18.5833, 37.1667, 55.75, 74.3333, 92.9167, 111.5, 130.0833, 148.6667, 167.25, 185.8333, 204.4167, 223.0]
+tables:
+  file: tables/mgu_k.parquet
+  loss_w: true
+limits:
+  # Peak torque 223 N·m at the OUTPUT SHAFT (the crank), constant to its 15 000 rpm redline. The
+  # rotor's constant-power taper sits above the lumped reduction's base speed and is not reachable
+  # through this shaft; carrying it here implied the crank could turn to 50 000 rpm — D-M6-13 L3.
+  max_torque_nm_vs_speed:
+    speed_rpm: [0.0, 15000.0]
+    torque_nm: [223.0, 223.0]
+  # Regen envelope confirmed symmetric with drive by the 6Et_730V reference (peak ratio 1.0).
+  max_regen_torque_nm_vs_speed:
+    speed_rpm: [0.0, 15000.0]
+    torque_nm: [223.0, 223.0]
+  # Continuous (thermal) rating — a validation reference only. This car ships no `.emotor`, so no
+  # thermal derate is computed; raising PEAK torque does not raise the sustained thermal duty.
+  cont_torque_nm_vs_speed:
+    speed_rpm: [0.0, 50000.0]
+    torque_nm: [80.0, 44.0]
+inertia_kgm2: 0.008
+mass_kg: 24.0
+meta:
+  source: "synthetic 2026 MGU-K"
+  dc_voltage_v: 800.0
