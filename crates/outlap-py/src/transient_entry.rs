@@ -419,6 +419,13 @@ pub struct TransientLap {
     /// Whether the lap ran in flat-track analysis mode.
     #[pyo3(get)]
     flat_track: bool,
+    /// The applied path curvature-smoothing window, m (`0.0` = no smoothing) — the resolved
+    /// `sim.path_curvature_smooth_m`.
+    #[pyo3(get)]
+    path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, m — the resolved `sim.vertical_baseline_m`.
+    #[pyo3(get)]
+    vertical_baseline_m: f64,
     /// Resolved fixed step size, s.
     #[pyo3(get)]
     dt_s: f64,
@@ -695,6 +702,10 @@ pub(crate) struct PreparedTransient {
     length: f64,
     /// Whether the run is flat-track (grade/banking/κ_v zeroed).
     flat: bool,
+    /// The applied path curvature-smoothing window, m (the resolved `sim.path_curvature_smooth_m`).
+    path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, m (the resolved `sim.vertical_baseline_m`).
+    vertical_baseline_m: f64,
     /// The corner-scaled speed-profile fraction the driver tracked.
     speed_margin: f64,
     resolved_hash: String,
@@ -926,11 +937,21 @@ pub(crate) fn prepare_transient(
         allow_degraded: sim_cfg.allow_degraded,
         ..T0Options::default()
     };
-    let path = if flat {
-        T0Path::from_track_flat(&track.inner, ds_m)
-    } else {
-        T0Path::from_track(&track.inner, ds_m)
-    };
+    // The recorded track/path sim numerics (MT): `vertical_baseline_m` governs this run's grade/κ_v
+    // finite differences and `path_curvature_smooth_m` the sampled-path boxcar. The defaults
+    // reproduce the historical behavior bit-for-bit (30 m baseline, legacy 6-station smoothing).
+    let track_eval = track
+        .inner
+        .clone()
+        .with_vertical_baseline_m(sim_cfg.vertical_baseline_m);
+    let path = T0Path::from_track_with(
+        &track_eval,
+        ds_m,
+        outlap_qss::T0PathOptions {
+            flat,
+            curvature_smooth_m: sim_cfg.path_curvature_smooth_m,
+        },
+    );
     let line_descriptor = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
     let mut t1v =
         T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;
@@ -952,6 +973,8 @@ pub(crate) fn prepare_transient(
             notes: Vec::new(),
             fz_coupling: sim_cfg.resolved_fz_coupling(),
             flat_track: flat,
+            path_curvature_smooth_m: path.curv_smooth_m,
+            vertical_baseline_m: sim_cfg.vertical_baseline_m,
         },
     )
     .map_err(err)?;
@@ -1028,7 +1051,7 @@ pub(crate) fn prepare_transient(
         &reference.lap.ax,
         speed_margin,
     );
-    let line = line_from_track(&track.inner, &path, &v_target, flat)?;
+    let line = line_from_track(&track_eval, &path, &v_target, flat)?;
     let start_i = straightest_station(&path.kappa_l);
     let start_s = path.s[start_i];
     let length = reference.lap.s.last().copied().unwrap_or(0.0);
@@ -1230,6 +1253,8 @@ pub(crate) fn prepare_transient(
         cfg,
         length,
         flat,
+        path_curvature_smooth_m: path.curv_smooth_m,
+        vertical_baseline_m: sim_cfg.vertical_baseline_m,
         speed_margin,
         resolved_hash: hash,
         notes,
@@ -1362,6 +1387,8 @@ pub(crate) fn solve_transient_lap(
         cfg,
         length,
         flat,
+        path_curvature_smooth_m,
+        vertical_baseline_m,
         speed_margin,
         resolved_hash,
         mut notes,
@@ -1478,6 +1505,8 @@ pub(crate) fn solve_transient_lap(
         tier: tier.to_owned(),
         fz_coupling: fz_coupling_str(provenance.fz_coupling),
         flat_track: flat,
+        path_curvature_smooth_m,
+        vertical_baseline_m,
         dt_s: provenance.dt_s,
         integrator_order: provenance.integrator_order,
         speed_margin,
@@ -1538,6 +1567,13 @@ pub struct TransientStint {
     /// Whether the stint ran flat-track.
     #[pyo3(get)]
     flat_track: bool,
+    /// The applied path curvature-smoothing window, m (`0.0` = no smoothing) — the resolved
+    /// `sim.path_curvature_smooth_m`.
+    #[pyo3(get)]
+    path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, m — the resolved `sim.vertical_baseline_m`.
+    #[pyo3(get)]
+    vertical_baseline_m: f64,
     /// Resolved fixed step, s.
     #[pyo3(get)]
     dt_s: f64,
@@ -1677,6 +1713,8 @@ pub(crate) fn solve_transient_stint(
         cfg,
         length,
         flat,
+        path_curvature_smooth_m,
+        vertical_baseline_m,
         speed_margin,
         resolved_hash,
         mut notes,
@@ -1814,6 +1852,8 @@ pub(crate) fn solve_transient_stint(
         tier: "t2".to_owned(),
         fz_coupling: fz_coupling_str(provenance.fz_coupling),
         flat_track: flat,
+        path_curvature_smooth_m,
+        vertical_baseline_m,
         dt_s: provenance.dt_s,
         integrator_order: provenance.integrator_order,
         speed_margin,

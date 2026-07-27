@@ -292,6 +292,8 @@ fn f1_stint_burns_fuel_and_gets_faster() {
             notes: vec![],
             fz_coupling: FzCoupling::OneStepLag,
             flat_track: false,
+            path_curvature_smooth_m: 0.0,
+            vertical_baseline_m: 30.0,
         },
     };
     let n_laps = 5;
@@ -372,6 +374,8 @@ fn solve_one_lap(flow: Option<outlap_schema::vehicle::FuelFlowLimit>) -> (f64, f
             notes: vec![],
             fz_coupling: FzCoupling::OneStepLag,
             flat_track: false,
+            path_curvature_smooth_m: 0.0,
+            vertical_baseline_m: 30.0,
         },
     };
     let result = solve_stint(&plan, 1, StintSeeds::default()).unwrap();

@@ -345,6 +345,7 @@ mod tests {
             grip: vec![1.0; n],
             ds,
             closed: true,
+            curv_smooth_m: 0.0,
         }
     }
 

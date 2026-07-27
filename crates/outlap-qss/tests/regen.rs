@@ -194,6 +194,8 @@ fn march(e: &Ev) -> Vec<f64> {
             notes: vec![],
             fz_coupling: FzCoupling::OneStepLag,
             flat_track: false,
+            path_curvature_smooth_m: 0.0,
+            vertical_baseline_m: 30.0,
         },
     )
     .unwrap();
@@ -263,6 +265,8 @@ fn units_draw_from_their_referenced_pack_independently() {
         notes: vec![],
         fz_coupling: FzCoupling::OneStepLag,
         flat_track: false,
+        path_curvature_smooth_m: 0.0,
+        vertical_baseline_m: 30.0,
     };
     // Two packs, identical model + seed; the single mapped drive unit routes to `pack_idx`.
     let run = |pack_idx: usize| -> [f64; 2] {

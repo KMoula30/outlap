@@ -11,7 +11,7 @@
 use std::f64::consts::PI;
 
 use outlap_core::GriddedTable;
-use outlap_qss::path::T0Path;
+use outlap_qss::path::{T0Path, T0PathOptions};
 use outlap_qss::{
     solve_t0, solve_t1, tier_not_implemented, Couplings, GgvEnvelope, LapRequest, LineDescriptor,
     MachineThermal, Pack, SlowCoupling, T0Options, T0Vehicle, T1Powertrain, T1Vehicle,
@@ -118,6 +118,8 @@ fn plain_request() -> LapRequest {
         notes: vec![],
         fz_coupling: FzCoupling::OneStepLag,
         flat_track: false,
+        path_curvature_smooth_m: 0.0,
+        vertical_baseline_m: 30.0,
     }
 }
 
@@ -272,6 +274,36 @@ fn transient_tiers_are_typed_errors() {
     let e3 = tier_not_implemented(Tier::T3).to_string();
     assert!(e2.contains("t2") && e2.contains("M4"), "{e2}");
     assert!(e3.contains("t3") && e3.contains("M6"), "{e3}");
+}
+
+#[test]
+// The record must arrive bit-for-bit; exact f64 comparison is the contract under test.
+#[allow(clippy::float_cmp)]
+fn recorded_track_numerics_round_trip_into_the_lap() {
+    // The MT sim numerics (`path_curvature_smooth_m` / `vertical_baseline_m`) must ride the
+    // request into the solved artifact untouched — the resolved-settings record every result
+    // carries (the fz_coupling pattern).
+    let (t1, t0, ..) = full_stack(false);
+    let env = small_env(&t1);
+    let track = circle_track(false);
+    let path = T0Path::from_track_with(
+        &track,
+        5.0,
+        T0PathOptions {
+            flat: false,
+            curvature_smooth_m: Some(40.0),
+        },
+    );
+    assert!(
+        path.curv_smooth_m > 0.0,
+        "a 40 m window on a ~5 m step must apply"
+    );
+    let mut req = plain_request();
+    req.path_curvature_smooth_m = path.curv_smooth_m;
+    req.vertical_baseline_m = 12.5;
+    let lap = solve_t0(&t0, env, &Couplings::default(), &path, req).unwrap();
+    assert_eq!(lap.path_curvature_smooth_m, path.curv_smooth_m);
+    assert_eq!(lap.vertical_baseline_m, 12.5);
 }
 
 #[test]

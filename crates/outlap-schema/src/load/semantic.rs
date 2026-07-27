@@ -1478,6 +1478,26 @@ pub fn check_sim(
             None,
         ));
     }
+    // Recorded track/path numerics (sim/1.3): the QSS curvature-smoothing window and the vertical
+    // finite-difference baseline.
+    if let Some(w) = sim.path_curvature_smooth_m {
+        if !(w.is_finite() && w >= 0.0) {
+            return Err(SchemaError::semantic(
+                sources,
+                s.at("/path_curvature_smooth_m"),
+                "`path_curvature_smooth_m` must be a finite window >= 0 metres (0 disables \
+                 smoothing; omit the field for the per-consumer default)",
+                None,
+            ));
+        }
+    }
+    positive(
+        sim.vertical_baseline_m,
+        "vertical_baseline_m",
+        "/vertical_baseline_m",
+        &s,
+        sources,
+    )?;
     Ok(())
 }
 

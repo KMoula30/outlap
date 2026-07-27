@@ -139,7 +139,9 @@ pub fn current_major(name: &str) -> u16 {
 /// Vdc axis (§8.4), 1.2 `max_regen_torque_nm_vs_speed` (§7.6); `tyr`: 1.1 brush block, 1.2 optional
 /// structured `vertical` block (tyre `k_z`/`c_z` for the T3 per-wheel `F_z`, §7.5, M6/PR6);
 /// `battery`: 1.1 `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` +
-/// `r2_ohm`/`tau2_s` sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag.
+/// `r2_ohm`/`tau2_s` sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag, 1.2 the
+/// split-integrator numerics (`fz_coupling` auto, `slow_decimation`, `fixed_point`), 1.3 the
+/// recorded track/path numerics (`path_curvature_smooth_m`, `vertical_baseline_m`, MT).
 ///
 /// # Validation-tightening policy
 ///
@@ -158,8 +160,9 @@ pub fn current_major(name: &str) -> u16 {
 /// rulebook consumes it — any further semantics change is MAJOR.
 pub fn current_minor(name: &str) -> u16 {
     match name {
+        schema_name::SIM => 3,
         schema_name::BATTERY | schema_name::TYR => 2,
-        schema_name::SIM | schema_name::VEHICLE => 1,
+        schema_name::VEHICLE => 1,
         // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/track/conditions
         // (and anything unknown) have had no additive change since their `.0`.
         _ => 0,

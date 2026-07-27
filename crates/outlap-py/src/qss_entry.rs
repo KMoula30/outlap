@@ -55,6 +55,13 @@ pub struct Lap {
     /// Whether the lap ran in flat-track analysis mode.
     #[pyo3(get)]
     flat_track: bool,
+    /// The applied path curvature-smoothing window, m (`0.0` = no smoothing) — the resolved
+    /// `sim.path_curvature_smooth_m`.
+    #[pyo3(get)]
+    path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, m — the resolved `sim.vertical_baseline_m`.
+    #[pyo3(get)]
+    vertical_baseline_m: f64,
     /// The wheel-channel order for the per-wheel arrays (`["FL","FR","RL","RR"]`).
     #[pyo3(get)]
     wheels: Vec<String>,
@@ -232,6 +239,9 @@ pub(crate) struct PreparedQss {
     pub hash: String,
     pub fzc: outlap_schema::sim::FzCoupling,
     pub flat: bool,
+    /// The applied vertical finite-difference baseline, m (the resolved `sim.vertical_baseline_m`;
+    /// its curvature-smoothing sibling is recorded on `path.curv_smooth_m`).
+    pub vertical_baseline_m: f64,
     pub notes: Vec<String>,
 }
 
@@ -305,11 +315,21 @@ pub(crate) fn prepare_qss(
         allow_degraded: sim_cfg.allow_degraded,
         ..T0Options::default()
     };
-    let path = if sim_cfg.flat_track {
-        T0Path::from_track_flat(&track.inner, ds_m)
-    } else {
-        T0Path::from_track(&track.inner, ds_m)
-    };
+    // The recorded track/path sim numerics (MT): `vertical_baseline_m` governs this run's grade/κ_v
+    // finite differences and `path_curvature_smooth_m` the sampled-path boxcar. The defaults
+    // reproduce the historical behavior bit-for-bit (30 m baseline, legacy 6-station smoothing).
+    let track_eval = track
+        .inner
+        .clone()
+        .with_vertical_baseline_m(sim_cfg.vertical_baseline_m);
+    let path = T0Path::from_track_with(
+        &track_eval,
+        ds_m,
+        T0PathOptions {
+            flat: sim_cfg.flat_track,
+            curvature_smooth_m: sim_cfg.path_curvature_smooth_m,
+        },
+    );
     let hash = resolved.report.resolved_hash.clone();
     let fzc = sim_cfg.resolved_fz_coupling();
     let flat = sim_cfg.flat_track;
@@ -398,6 +418,7 @@ pub(crate) fn prepare_qss(
         hash,
         fzc,
         flat,
+        vertical_baseline_m: sim_cfg.vertical_baseline_m,
         notes,
     })
 }
@@ -454,6 +475,7 @@ pub(crate) fn solve_lap(
         hash,
         fzc,
         flat,
+        vertical_baseline_m,
         notes,
     } = prepare_qss(
         QssEntryKind::Lap,
@@ -495,6 +517,8 @@ pub(crate) fn solve_lap(
         notes,
         fz_coupling: fzc,
         flat_track: flat,
+        path_curvature_smooth_m: path.curv_smooth_m,
+        vertical_baseline_m,
     };
     let qss: QssLap = if wanted == Tier::T0 {
         solve_t0(&t0v, env, &couplings, &path, req).map_err(err)?
@@ -605,6 +629,8 @@ pub(crate) fn qss_lap_to_py(qss: QssLap, track: &Track) -> Lap {
         tier: format!("{:?}", qss.tier).to_lowercase(),
         fz_coupling: fz_coupling_str(qss.fz_coupling),
         flat_track: qss.flat_track,
+        path_curvature_smooth_m: qss.path_curvature_smooth_m,
+        vertical_baseline_m: qss.vertical_baseline_m,
         wheels: WHEEL_ORDER.iter().map(|s| (*s).to_owned()).collect(),
         notes: lap.notes,
         resolved_hash: lap.resolved_hash,
@@ -701,6 +727,13 @@ pub struct QssStint {
     /// Whether the stint ran in flat-track analysis mode.
     #[pyo3(get)]
     flat_track: bool,
+    /// The applied path curvature-smoothing window, m (`0.0` = no smoothing) — the resolved
+    /// `sim.path_curvature_smooth_m`.
+    #[pyo3(get)]
+    path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, m — the resolved `sim.vertical_baseline_m`.
+    #[pyo3(get)]
+    vertical_baseline_m: f64,
     /// blake3 hash of the resolved vehicle spec.
     #[pyo3(get)]
     resolved_hash: String,
@@ -874,6 +907,7 @@ pub(crate) fn solve_stint(
         hash,
         fzc,
         flat,
+        vertical_baseline_m,
         mut notes,
     } = prepare_qss(
         QssEntryKind::Stint,
@@ -944,6 +978,8 @@ pub(crate) fn solve_stint(
             notes: Vec::new(),
             fz_coupling: fzc,
             flat_track: flat,
+            path_curvature_smooth_m: path.curv_smooth_m,
+            vertical_baseline_m,
         },
     };
     let result = outlap_qss::solve_stint(&plan, n_laps, outlap_qss::StintSeeds { tire: tire_seed })
@@ -1038,6 +1074,8 @@ pub(crate) fn solve_stint(
         tier: format!("{:?}", result.tier).to_lowercase(),
         fz_coupling: fz_coupling_str(result.fz_coupling),
         flat_track: flat,
+        path_curvature_smooth_m: path.curv_smooth_m,
+        vertical_baseline_m,
         resolved_hash: hash,
         notes,
     })

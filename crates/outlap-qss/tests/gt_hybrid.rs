@@ -196,6 +196,8 @@ fn gt_hybrid_loads_clean_and_hybridises_over_a_lap() {
             notes: vec![],
             fz_coupling: FzCoupling::OneStepLag,
             flat_track: false,
+            path_curvature_smooth_m: path.curv_smooth_m,
+            vertical_baseline_m: 30.0,
         },
     )
     .expect("the managed lap solves");

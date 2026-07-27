@@ -109,6 +109,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         notes: Vec::new(),
         fz_coupling: coupling,
         flat_track: true,
+        path_curvature_smooth_m: path.curv_smooth_m,
+        vertical_baseline_m: 30.0,
     };
     let frozen = solve_t0(
         &t0,

@@ -212,6 +212,12 @@ pub struct QssLap {
     pub fz_coupling: FzCoupling,
     /// Whether the lap ran in flat-track analysis mode (`sim.flat_track`).
     pub flat_track: bool,
+    /// The applied path curvature-smoothing window, metres (`0.0` = no smoothing) — the resolved
+    /// `sim.path_curvature_smooth_m` (recorded in every artifact).
+    pub path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, metres — the resolved
+    /// `sim.vertical_baseline_m` (recorded in every artifact).
+    pub vertical_baseline_m: f64,
     /// Per-wheel channels (`t1` only).
     pub wheels: Option<WheelLog>,
     /// Setup metrics (`t1` only).
@@ -338,6 +344,12 @@ pub struct LapRequest {
     pub fz_coupling: FzCoupling,
     /// Whether the lap runs in flat-track analysis mode.
     pub flat_track: bool,
+    /// The applied path curvature-smoothing window, metres (`0.0` = no smoothing) — the resolved
+    /// `sim.path_curvature_smooth_m` ([`T0Path::curv_smooth_m`](crate::path::T0Path)).
+    pub path_curvature_smooth_m: f64,
+    /// The applied vertical finite-difference baseline, metres — the resolved
+    /// `sim.vertical_baseline_m`.
+    pub vertical_baseline_m: f64,
 }
 
 /// Errors from the tier dispatch and the QSS lap solve.
@@ -1210,6 +1222,8 @@ pub fn solve_t0(
         tier: Tier::T0,
         fz_coupling: req.fz_coupling,
         flat_track: req.flat_track,
+        path_curvature_smooth_m: req.path_curvature_smooth_m,
+        vertical_baseline_m: req.vertical_baseline_m,
         wheels: None,
         setup: None,
         slow,
@@ -1270,6 +1284,8 @@ pub fn solve_t1(
         tier: Tier::T1,
         fz_coupling: req.fz_coupling,
         flat_track: req.flat_track,
+        path_curvature_smooth_m: req.path_curvature_smooth_m,
+        vertical_baseline_m: req.vertical_baseline_m,
         wheels: Some(wheels),
         setup: Some(SetupLog {
             understeer_gradient,

@@ -50,6 +50,9 @@ fn sim_loads_and_defaults() {
     assert_eq!(s.resolved_fz_coupling(), FzCoupling::OneStepLag);
     assert_eq!(s.raceline.generator, Some(RacelineGenerator::MinCurvature));
     assert!(!s.allow_degraded);
+    // The sim/1.3 recorded track/path numerics round-trip through the loader.
+    assert_eq!(s.path_curvature_smooth_m, Some(25.0));
+    assert_eq!(s.vertical_baseline_m, 30.0);
 
     // Defaults fill an empty document.
     let d = outlap_schema::Sim::default();
@@ -59,6 +62,10 @@ fn sim_loads_and_defaults() {
     assert_eq!(d.fz_coupling, None);
     assert_eq!(d.resolved_fz_coupling(), FzCoupling::OneStepLag);
     assert_eq!(d.slow_decimation, 20);
+    // The smoothing window defaults to the per-consumer legacy behavior (None); the vertical
+    // finite-difference baseline to its historical 30 m.
+    assert_eq!(d.path_curvature_smooth_m, None);
+    assert_eq!(d.vertical_baseline_m, 30.0);
 }
 
 #[test]
