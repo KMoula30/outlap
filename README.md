@@ -12,7 +12,7 @@ and extending outlap, with the physics, the API, and worked recipes.
 The full architecture and specification live in [`docs/HANDOFF.md`](docs/HANDOFF.md); the working
 agreement is in [`CLAUDE.md`](CLAUDE.md).
 
-## What works at v0.3.0
+## What works at v0.4.0
 
 - **One vehicle description** consumed by every solver tier — chassis, aero, suspension, tyres, a
   drivetrain topology graph, ERS/battery, brakes — with a strict, friendly load pipeline (miette
@@ -25,7 +25,10 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
   3D road frame (symbolically verified to 1e-12 in CI), with tyre relaxation, an ideal preview
   driver behind a corner-scaled stability margin, a gear-shift state machine, torque vectoring,
   and regen blending. T2 returns a time-indexed data-logger trace: steering, yaw, sideslip,
-  per-wheel loads/slips, gear, regen power, SoC. (`t3`, the 14-DOF suspension model, is future.)
+  per-wheel loads/slips, gear, regen power, SoC. And **T3**, a 14-DOF tier that adds the four
+  unsprung masses on their own springs, dampers, anti-roll bars and bumpstops, so ride height,
+  pitch and heave are states rather than assumptions — the platform moves under braking and the
+  aero balance moves with it (symbolically verified against the same SymPy derivation as T2).
 - **Tyres**: a steady-state Magic Formula 6.1 model and a physical brush model, with a `.tir` codec
   and a Python MF6.1 fitting pipeline; citation-backed reference `.tyr` sets; first-order slip
   relaxation, live in T2. Plus the **flagship thermal ring + wear/degradation stack** (v0.3): a
@@ -38,6 +41,14 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
   derating; and a Thévenin battery whose SoC-dependent terminal voltage feeds back into the
   drive-unit maps (the Vdc–SoC coupling). Slow states march along a QSS lap — and at T2 the pack
   charges under braking and discharges under power, live in the time loop.
+- **A 2026-style energy manager and fuel mass.** A regulatory `policy:` overlay governs an electric
+  unit's deployment and recovery: a piecewise-linear power-vs-speed taper evaluated exactly as the
+  regulation writes it, a per-lap harvest allowance, an override ("overtake") envelope, and the
+  power-demand ramp-down that makes recharge phases a real constraint. It marches as a slow state
+  across a lap and across a whole race, so state of charge moves in both directions and the ledger
+  closes. Fuel is mass: the load adds to the dry car, drains as the engine burns it, migrates the
+  centre of gravity, and makes the car faster as it goes — with the flow ceiling shrinking the
+  engine's traction envelope rather than being bolted on afterwards.
 - **A 3D track model** (`track.yaml` + `centerline.csv`) with curvature, grade, banking, and the
   road frame by arc length, plus **two racing-line generators**: the minimum-curvature QP and its
   **time-weighted** refinement (weights ∝ time spent, the first step toward the minimum-time
@@ -46,9 +57,9 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
 - **Importers**: OSM+DEM tracks (with closed-lap graph assembly for fragmented circuits), TUMFTM
   tracks, PDT HDF5 powertrains (→ `.ptm` maps, battery params, an `.emotor` thermal network), and
   `.tir` tyre files.
-- **A notebook course** (`notebooks/00`–`10`, CI-executed with committed outputs): from the car as
+- **A notebook course** (`notebooks/00`–`11`, CI-executed with committed outputs): from the car as
   data to reading T2 traces like a race engineer — corner anatomy, the friction circle in action,
-  car balance via what-if overrides.
+  car balance via what-if overrides — closing on a full race distance of energy accounting.
 - **Validation, honestly reported**: the Perantoni & Limebeer 2014 F1 cross-check (top speed
   within 1 %, corner apexes within 5 %); the QSS↔T2 **hull-containment** parity gate (every T2
   operating point inside the T1 grip envelope — measured 0.0 % exceedance on all three reference

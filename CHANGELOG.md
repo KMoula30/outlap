@@ -4,6 +4,85 @@ All notable changes to outlap are documented here. This project follows
 [Conventional Commits](https://www.conventionalcommits.org) and
 [Semantic Versioning](https://semver.org).
 
+## [0.4.0] - 2026-07-27
+
+Milestone **M6** — the car stops being a lap simulator and starts being an *energy* simulator. A
+2026-style energy manager governs deployment and recovery under real regulatory shape; the battery
+gains a second RC pair; fuel becomes mass that drains, moves the centre of gravity and frees the car
+as it burns; and a fourth solver tier, **T3**, puts the four unsprung masses on their own springs,
+dampers, anti-roll bars and bumpstops so ride height, pitch and heave are states instead of
+assumptions. The capstone notebook runs a full 66-lap race distance and closes the energy ledger
+over all of it.
+
+Two schema restructures landed mid-milestone, both breaking and both deliberate. The energy block
+became a generic regulatory `policy:` overlay over a first-class drivetrain graph — the MGU-K is now
+an ordinary unit sharing the engine's crank rather than a special case bolted to the side — and a
+`.ptm` map's `kind` became its pure energy source. That second one fixed a real defect: two petrol
+engines had been labelled with a packaging word that the regen work later read as "can regenerate",
+so both had silently carried a symmetric electric-machine recovery envelope for two milestones.
+
+### Added
+
+- **outlap-powertrain** (new crate): the energy-manager rulebook and ledger. The deployment and
+  override tapers are power-vs-speed curves evaluated by an exact piecewise-linear interpolant —
+  the one recorded exception to the project's monotone-Hermite standard (Decision #30), because a
+  cubic through the regulation's own breakpoints bows up to 78 kW above the legal line mid-segment.
+  Alongside them: the per-lap harvest allowance, the override bonus as *harvest* headroom, the
+  C5.12 power-demand ramp-down that makes recharge phases a constraint rather than a label, and a
+  five-ceiling harvest chain. Zero-allocation `decide`/`record` on the hot path, CI-enforced.
+- **outlap-schema**: the `policy:` overlay (`governs`, deployment/override tapers, recovery budgets,
+  the C5.2.9 regulatory swing window) over a real drivetrain graph — units carry `id`/`output`, the
+  shared `couplers` list carries gearboxes and diffs, an internal reduction is declared once as the
+  unit's `fixed_ratio`, and packs live in an id-keyed `batteries:` map. Plus the optional `fuel:`
+  block, T3 suspension and tyre-vertical fields, an optional second battery RC pair, and named
+  shift maps.
+- **T3, the 14-DOF tier**: unsprung masses, dampers, anti-roll bars and bumpstops, with aero
+  downforce acting on the sprung mass through heave and pitch. The chassis right-hand side is
+  proven against the same SymPy Kane derivation as T2, to 1e-12, in CI.
+- **Fuel as mass**: the load adds to the dry car and drains as the engine burns it, migrating the
+  centre of gravity; the flow ceiling shrinks the engine's traction envelope (`P_mech ≤ η·EF`)
+  rather than clamping the burn afterwards, which is what keeps energy closure honest. Marched in
+  both tiers, carried across stint laps, surfaced per station.
+- **Genuine multi-pack running** in both tiers — net power splits per pack and each marches its own
+  state, with the single-pack path staying byte-identical.
+- **The `u(s)` control vector**: a lift-and-coast hook that caps the driver's reference, named
+  up-shift maps selectable per station, and an `override` flag — all exposed as Python kwargs on the
+  lap and stint entry points.
+- **data**: a semi-virtual MGU-K (real efficiency/loss map, an `.emotor` thermal network, a measured
+  regen envelope, sized 223 N·m at the crank), the synthetic f1 energy store, the f1 aero map, T3
+  suspension data, and `gt_hybrid` promoted from a schema fixture to a runnable reference car.
+- **notebooks**: **`11_race_energy.ipynb`** — a full race distance of coupled energy accounting:
+  state of charge in both directions, the per-lap ledger and which limit binds, fuel burn against
+  pace, the within-lap deploy/harvest/recharge phases, the override mode measured, a transient-tier
+  cross-check, and pitch under braking moving the aero balance.
+
+### Changed (breaking)
+
+- `vehicle/1.x` → **`vehicle/2.1`**: the singleton `ers:` and `battery:` blocks are replaced by the
+  `policy:` overlay and the `batteries:` map, and the drivetrain becomes a graph. Old files fail to
+  load with a curated error; there is no dual-format loader and no migration shim.
+- `ptm/1.x` → **`ptm/2.0`**: `kind` is `combustion` or `electric` — the energy source and nothing
+  else. Where a map is referenced is the unit's business (`fixed_ratio`), not the map's. The retired
+  names are rejected naming both candidates rather than aliased, because auto-mapping the packaging
+  word is exactly how the petrol engines were mislabelled. `meta.upstream_ratio_applied` is deleted.
+- The f1 reference car's ERS figures are re-verified against **FIA 2026 Section C Issue 19** — the
+  deployment taper is two segments with the knee at exactly 2/7 of the cap, and the override curve
+  holds full power to 337.5 km/h. Its golden lap moved accordingly.
+
+### Validation (§13, Decision #48 — assert where robust, record-and-decompose otherwise)
+
+- **Energy closure** is asserted end to end: the pack's state of charge closes against the manager's
+  ledger over a lap, the harvest allowance is never exceeded, and an independent re-march reproduces
+  the production ledger — so the reported numbers are the algebra they claim to be, not a
+  coincidence.
+- **The regulation itself is a test**: the shipped tapers are held to the closed-form C5.2.8
+  formulas at ten thousand random interior speeds, not just at their breakpoints, with the knee
+  asserted exact.
+- **Handling (T3)**: a real ~5 % understeer against the neutral CommonRoad BMW 320i is recorded with
+  its decomposition rather than gated away.
+- QSS↔T2 hull containment and the tyre gates from v0.3 stay green; the no-energy and no-fuel
+  bit-identity invariants hold, so a car without a pack or a fuel block solves exactly as before.
+
 ## [0.3.0] - 2026-07-16
 
 Milestone **M5** — the flagship **tyre thermal ring + wear/degradation** stack, the headline of the
