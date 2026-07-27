@@ -67,6 +67,40 @@ fn taper_matches_the_closed_form_at_interior_speeds() {
     }
 }
 
+/// The SHIPPED reference car reproduces the same closed forms. The tests above build the policy
+/// from an inline fixture, so they stay green while `data/vehicles/f1_2026/vehicle.yaml` drifts —
+/// this is the assertion that pins the shipped figures, knee included.
+#[test]
+fn shipped_f1_2026_taper_matches_the_closed_form() {
+    let rb: ErsRulebook<f64> =
+        ErsRulebook::from_schema(&common::f1_shipped_policy(), F1_PACK_WINDOW, None).unwrap();
+    let mut rng = TestRng::new(0x5EED_0005);
+    for _ in 0..10_000 {
+        let v_kph = rng.range(0.0, 400.0);
+        let v = v_kph * KPH_TO_MPS;
+        let got = rb.deploy_cap_electrical_w(v, false);
+        let expect = deploy_closed_form_w(v_kph);
+        assert!(
+            (got - expect).abs() <= 1e-6 * 350e3,
+            "shipped f1_2026 deploy taper diverges from C5.2.8(i) at {v_kph:.3} kph: \
+             got {got:.1} W, reg {expect:.1} W"
+        );
+        let got_ov = rb.deploy_cap_electrical_w(v, true);
+        let expect_ov = override_closed_form_w(v_kph);
+        assert!(
+            (got_ov - expect_ov).abs() <= 1e-6 * 350e3,
+            "shipped f1_2026 override taper diverges from C5.2.8(ii) at {v_kph:.3} kph: \
+             got {got_ov:.1} W, reg {expect_ov:.1} W"
+        );
+    }
+    // The knee fraction must be the exact 2/7, not a truncated decimal.
+    assert_eq!(
+        rb.deploy_cap_electrical_w(340.0 * KPH_TO_MPS, false),
+        350e3 * (2.0 / 7.0),
+        "shipped knee must be exact"
+    );
+}
+
 /// The knee is EXACTLY 100 kW at 340 km/h — 350·(2/7), the fraction, never a truncated decimal.
 #[test]
 fn knee_is_exactly_two_sevenths() {

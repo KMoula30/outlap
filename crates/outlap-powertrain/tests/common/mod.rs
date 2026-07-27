@@ -65,6 +65,19 @@ pub fn gt_policy() -> Policy {
     resolved.spec.policy.expect("gt_hybrid has a policy block")
 }
 
+/// The SHIPPED `data/vehicles/f1_2026` `policy:` overlay, loaded through the real pipeline. The
+/// [`f1_policy`] fixture above states the verified figures inline, so it cannot catch the shipped
+/// reference car drifting away from them — this loader is what pins the data itself.
+pub fn f1_shipped_policy() -> Policy {
+    let loader = FsLoader::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../data/vehicles/f1_2026"
+    ));
+    let resolved = load_vehicle("vehicle.yaml", &loader, &LoadOptions::default())
+        .expect("the shipped f1_2026 reference car resolves");
+    resolved.spec.policy.expect("f1_2026 has a policy block")
+}
+
 /// A deterministic counter-based test RNG (splitmix64) — fixed seeds, no clock, no rand dep.
 pub struct TestRng(u64);
 
