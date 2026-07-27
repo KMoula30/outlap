@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC ICE map (torque-axis load) — the gt_hybrid reference car's combustion source.
+# The numbers are the SAME synthetic V6 surface as `data/vehicles/f1_2026/ptm/ice_v6.ptm.yaml`
+# (only this provenance header differs): a deliberate reuse, because gt_hybrid is the
+# topology/Option-coverage reference car (D-M6-12), not a performance model of any real GT class.
+# The efficiency/loss sidecar `tables/ice_v6.parquet` is a copy of the f1_2026 one, written by
+# python/tools/gen_f1_ice.py. See data/vehicles/README.md for the per-parameter provenance.
+schema: ptm/2.0
+kind: combustion
+axes:
+  speed_rpm: [1000.0, 4000.0, 8000.0, 12000.0, 15000.0]
+  load_axis:
+    torque_nm: [0.0, 100.0, 200.0, 300.0, 400.0]
+  torque_nm: [0.0, 100.0, 200.0, 300.0, 400.0]
+tables:
+  file: tables/ice_v6.parquet
+limits:
+  max_torque_nm_vs_speed:
+    speed_rpm: [1000.0, 8000.0, 12000.0, 15000.0]
+    torque_nm: [280.0, 390.0, 400.0, 360.0]
+  drag_torque_nm_vs_speed:
+    speed_rpm: [1000.0, 15000.0]
+    torque_nm: [-20.0, -80.0]
+inertia_kgm2: 0.12
+mass_kg: 145.0
+meta:
+  source: "synthetic 1.6L V6 turbo"

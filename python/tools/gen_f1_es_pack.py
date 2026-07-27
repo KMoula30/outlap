@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Generate the SYNTHETIC M6 energy-store packs (f1_2026 ES + the gt_hybrid fixture ES).
+"""Generate the SYNTHETIC M6 energy-store packs (the f1_2026 ES + the gt_hybrid ES).
 
 Writes:
 
@@ -7,15 +7,20 @@ Writes:
   2026-style F1 energy store. **No public team data exists**; every curve is an
   invented smooth surface (firewall, CLAUDE.md hard rule #1). Only the SIZING is
   regulation-derived (D-M6-3): the FIA 2026 C5.2.9 usable window is max−min SoC
-  ≤ 4 MJ *on track*, and the vehicle's ``ers.es`` declares ``capacity_mj: 4.0``
-  over ``soc_window: [0.2, 0.9]`` — so the pack TOTAL is 4.0 / 0.7 ≈ 5.7143 MJ
-  (``e_pack_wh`` ≈ 1587.30) and the battery document's own ``soc_window`` matches
-  the ers block (the load pipeline cross-checks both).
-* ``crates/outlap-schema/tests/fixtures/battery/gt_es.yaml`` + ``gt_es.tables.parquet``
-  — the gt_hybrid fixture's pack (D-M6-12): 2.0 MJ usable over [0.3, 0.85] ⇒
-  ≈3.6364 MJ total (``e_pack_wh`` ≈ 1010.10). Deliberately declares NO
+  ≤ 4 MJ *on track*, and the vehicle's ``policy`` declares
+  ``regulatory_window_mj: 4.0`` over ``soc_window: [0.2, 0.9]`` — so the pack TOTAL
+  is 4.0 / 0.7 ≈ 5.7143 MJ (``e_pack_wh`` ≈ 1587.30) and the battery document's own
+  ``soc_window`` matches the policy (the load pipeline cross-checks both).
+* ``data/vehicles/gt_hybrid/battery/gt_es.yaml`` + ``gt_es.tables.parquet`` — the
+  promoted GT-hybrid reference car's pack (D-M6-12): 2.0 MJ usable over [0.3, 0.85]
+  ⇒ ≈3.6364 MJ total (``e_pack_wh`` ≈ 1010.10), exactly its
+  ``policy.regulatory_window_mj``. Deliberately declares NO
   ``regen_derate_vs_temp`` so the absent-Option charge-acceptance path (and its
-  estimation note) stays exercised by the fixture chain.
+  estimation note) stays exercised by a shipped, runnable car.
+* The ``crates/outlap-schema/tests/fixtures/battery/`` mirrors of both packs (skip
+  them with ``--no-fixtures``). The gt_hybrid FIXTURE keeps its own copy: it serves
+  schema tests and may diverge from the promoted car, so its provenance header
+  differs by design — the YAML body is identical.
 
 Design intents baked into the f1 curves:
 
@@ -33,11 +38,12 @@ Idiom notes (matches ``gen_model3_powertrain.py``): long/tidy DOUBLE parquet col
 (``soc, temp_c, ocv_v, r0_ohm, r1_ohm, tau1_s, dudt_v_per_k``), default pyarrow
 settings, YAML emitted beside its sidecar (the PDT-importer convention).
 
-Run from anywhere:  python python/tools/gen_f1_es_pack.py
+Run from anywhere:  python python/tools/gen_f1_es_pack.py [--no-fixtures]
 """
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +52,9 @@ import pyarrow.parquet as pq
 
 _ROOT = Path(__file__).resolve().parents[2]
 _F1_DIR = _ROOT / "data" / "vehicles" / "f1_2026" / "battery"
-_GT_DIR = _ROOT / "crates" / "outlap-schema" / "tests" / "fixtures" / "battery"
+_GT_DIR = _ROOT / "data" / "vehicles" / "gt_hybrid" / "battery"
+# The schema-fixture mirrors (kept in lock-step so the schema/qss tests see the same packs).
+_FIXTURE_DIR = _ROOT / "crates" / "outlap-schema" / "tests" / "fixtures" / "battery"
 
 
 def _fmt_list(values: np.ndarray, nd: int = 3) -> str:
@@ -156,9 +164,9 @@ meta:
     print(f"wrote {path}")
 
 
-# --- gt_es: the gt_hybrid fixture pack --------------------------------------------------
+# --- gt_es: the gt_hybrid pack ----------------------------------------------------------
 
-# 2.0 MJ usable over [0.3, 0.85] (the fixture's ers.es) ⇒ total = 2.0/0.55 MJ.
+# 2.0 MJ usable over [0.3, 0.85] (the car's policy.regulatory_window_mj) ⇒ total = 2.0/0.55 MJ.
 GT_E_TOTAL_J = 2.0e6 / 0.55
 GT_E_PACK_WH = GT_E_TOTAL_J / 3600.0  # ≈ 1010.101
 GT_NS, GT_NP = 96, 1
@@ -185,14 +193,31 @@ def _emit_gt_tables(path: Path) -> None:
     _write_tables(path, soc, temp, ocv, r0, r1, tau1, dudt)
 
 
-def _emit_gt_yaml(path: Path) -> None:
-    text = f"""\
+#: The gt_es provenance header, per destination. The YAML BODY is identical in both copies — only
+#: these comment lines differ, so the shipped car reads as a car while the schema fixture keeps
+#: describing itself as a fixture (it may diverge from the promoted car by design).
+_GT_HEADER_FIXTURE = """\
 # SPDX-License-Identifier: CC-BY-SA-4.0
 # SYNTHETIC gt_hybrid fixture energy store (D-M6-12). Sized so the fixture's ers.es
 # (2.0 MJ usable over soc_window [0.3, 0.85]) cross-checks: total = 2.0/0.55 ≈ 3.6364 MJ.
 # Deliberately declares NO regen_derate_vs_temp — the absent-Option charge-acceptance
 # path (and its estimation note) stays fixture-exercised.
 # Regenerate the tables with: python python/tools/gen_f1_es_pack.py
+"""
+_GT_HEADER_CAR = """\
+# SPDX-License-Identifier: CC-BY-SA-4.0
+# SYNTHETIC gt_hybrid energy store (D-M6-12) — a privately-regulated GT hybrid's store, not an
+# FIA one. Sized so the car's policy (2.0 MJ regulatory window over soc_window [0.3, 0.85])
+# cross-checks: total = 2.0/0.55 ≈ 3.6364 MJ. Deliberately declares NO regen_derate_vs_temp —
+# the absent-Option charge-acceptance path (and its estimation note) stays exercised by a
+# shipped, runnable car. Regenerate the tables with: python python/tools/gen_f1_es_pack.py
+"""
+
+
+def _emit_gt_yaml(path: Path, *, fixture: bool) -> None:
+    header = _GT_HEADER_FIXTURE if fixture else _GT_HEADER_CAR
+    text = f"""\
+{header}\
 schema: battery/1.0
 model: rc_pairs
 topology:
@@ -265,15 +290,27 @@ def _write_tables(
     print(f"wrote {path} ({path.stat().st_size} bytes)")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--no-fixtures", action="store_true", help="skip the schema-fixture mirrors"
+    )
+    args = ap.parse_args(argv)
+
+    # 1) The shipped reference cars.
     _emit_f1_tables(_F1_DIR / "f1_es.tables.parquet")
     _emit_f1_yaml(_F1_DIR / "f1_es.yaml")
-    # The schema-fixture twin of the f1_2026 vehicle references the same battery path.
-    _emit_f1_tables(_GT_DIR / "f1_es.tables.parquet")
-    _emit_f1_yaml(_GT_DIR / "f1_es.yaml")
     _emit_gt_tables(_GT_DIR / "gt_es.tables.parquet")
-    _emit_gt_yaml(_GT_DIR / "gt_es.yaml")
+    _emit_gt_yaml(_GT_DIR / "gt_es.yaml", fixture=False)
+    # 2) The schema-fixture mirrors: the fixture twin of the f1_2026 vehicle references the same
+    #    battery path, and the gt_hybrid FIXTURE keeps its own copy (same body, fixture header).
+    if not args.no_fixtures:
+        _emit_f1_tables(_FIXTURE_DIR / "f1_es.tables.parquet")
+        _emit_f1_yaml(_FIXTURE_DIR / "f1_es.yaml")
+        _emit_gt_tables(_FIXTURE_DIR / "gt_es.tables.parquet")
+        _emit_gt_yaml(_FIXTURE_DIR / "gt_es.yaml", fixture=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
