@@ -422,18 +422,30 @@ def test_a_shift_cut_interrupts_the_mgu_k_as_well_as_the_engine(
     # The cut is applied EXACTLY ONCE (in the governor). Force and draw are scaled by the SAME
     # factor there, so their ratio — the electrical→wheel efficiency `F·v / P_elec` — is
     # cut-invariant. A second, block-level multiply would square the force only, dragging that
-    # ratio down to `torque_scale × η` on every partially-re-engaged step. Assert the ratio stays
-    # inside a physical efficiency band at EVERY deploying sample, ramps included.
+    # ratio down to `torque_scale × η` on every partially-re-engaged step.
     vx = ds["vx"].to_numpy()
     deploying = (draw > 1e3) & (force > 0.0) & (vx > 5.0)
     assert deploying.any(), "there are deploying samples to check"
-    eta_total = force[deploying] * vx[deploying] / draw[deploying]
-    assert eta_total.min() > 0.6, (
-        f"electrical→wheel efficiency dropped to {eta_total.min():.3f} — the shift cut looks "
-        "applied twice (torque_scale²)"
+    eta_all = force[deploying] * vx[deploying] / draw[deploying]
+    # Energy conservation is universal: no sample may make more wheel work than it draws.
+    assert eta_all.max() <= 1.0 + 1e-9, (
+        f"electrical→wheel efficiency {eta_all.max():.3f} > 1 — the machine cannot create energy"
     )
-    assert eta_total.max() <= 1.0 + 1e-9, (
-        f"electrical→wheel efficiency {eta_total.max():.3f} > 1 — the machine cannot create energy"
+    # The efficiency BAND, though, only means something where the machine is actually loaded. The
+    # MGU-K runs a real η(rpm, τ) map, and a PMSM trickling a few percent of its rated power is
+    # genuinely inefficient — a lap that happens to command ~30 kW at 270 km/h reads η ≈ 0.5 with
+    # nothing wrong. Hold the band where a squared cut would actually be visible (> 50 kW, ~14 % of
+    # the 350 kW cap), and keep the ramps in scope, since they are the discriminating samples.
+    loaded = deploying & (draw > 50e3)
+    assert loaded.any(), "there are loaded deploying samples to check"
+    ramping = loaded & (ts > 0.0) & (ts < 1.0)
+    assert ramping.any(), (
+        "no partially-re-engaged loaded sample — the double-cut guard would be vacuous"
+    )
+    eta_loaded = force[loaded] * vx[loaded] / draw[loaded]
+    assert eta_loaded.min() > 0.6, (
+        f"electrical→wheel efficiency under load dropped to {eta_loaded.min():.3f} — the shift cut "
+        "looks applied twice (torque_scale²)"
     )
 
 
