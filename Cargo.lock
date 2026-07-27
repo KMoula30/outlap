@@ -1377,11 +1377,11 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "outlap-batch"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "outlap-conformance"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "diffsol",
  "outlap-core",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "num-traits",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-powertrain"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "num-traits",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "miette",
  "numpy",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-qss"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "outlap-core",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-raceline"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clarabel",
  "outlap-core",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-schema"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-thermal"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "proptest",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-tire"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "num-traits",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-track"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "outlap-core",
  "outlap-schema",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-transient"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "num-traits",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-vehicle"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dhat",
  "num-traits",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "outlap-wasm"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "parking_lot"
