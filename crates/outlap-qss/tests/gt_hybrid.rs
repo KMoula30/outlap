@@ -10,8 +10,9 @@
 //!    plain `solve_lap` cannot show that (its `LapResult` has no energy channels), so this runs the
 //!    coupled `solve_t0` path the ERS march uses.
 //!
-//! The lap-time band is deliberately generous. This car carries the f1_2026 synthetic ICE, MGU-K
-//! and slick (KTD5), so its pace is not a GT-class prediction — only its magnitude is meaningful.
+//! The lap-time band brackets the measured pace rather than asserting a target: this car carries
+//! the f1_2026 synthetic ICE, MGU-K and slick, so its pace is not a GT-class prediction. The band
+//! exists to catch a regression in the car's data, not to validate the number itself.
 #![allow(clippy::doc_markdown)]
 
 use outlap_core::GriddedTable;
@@ -140,11 +141,22 @@ fn gt_hybrid_loads_clean_and_hybridises_over_a_lap() {
         state,
     } = assemble_gt();
 
-    // The promotion contract: the shipped car must not need a degradation waiver.
+    // The promotion contract. `assemble` above already refuses a degradation waiver (that is what
+    // `allow_degraded: false` buys), so asserting `report.degraded.is_empty()` here would be
+    // vacuous — the loader only fills that list when the waiver was granted. Assert instead on
+    // what this car actually promises: its estimated entries are the documented suspension and
+    // driver substitutions, and nothing has silently joined them.
+    let estimated: Vec<&str> = resolved
+        .report
+        .estimated
+        .iter()
+        .map(|e| e.pointer.as_str())
+        .collect();
     assert!(
-        resolved.report.degraded.is_empty(),
-        "a shipped reference car must not load degraded: {:?}",
-        resolved.report.degraded
+        estimated
+            .iter()
+            .all(|p| p.starts_with("/suspension/") || p.starts_with("/driver/")),
+        "a shipped reference car gained an undocumented estimated value: {estimated:?}"
     );
 
     let track = Track::load(
@@ -188,9 +200,11 @@ fn gt_hybrid_loads_clean_and_hybridises_over_a_lap() {
     )
     .expect("the managed lap solves");
 
+    // Banded around the measured 111.7 s. Wide enough to absorb solver noise and a coarse
+    // envelope, tight enough that losing the aero block, the ERS or a chunk of grip fails here.
     let t = lap.lap.lap_time_s;
     assert!(
-        t.is_finite() && (60.0..180.0).contains(&t),
+        t.is_finite() && (100.0..125.0).contains(&t),
         "gt_hybrid Catalunya lap time out of band: {t:.2} s"
     );
 
@@ -210,9 +224,63 @@ fn gt_hybrid_loads_clean_and_hybridises_over_a_lap() {
         ers_log.ledger_harvest_j > 0.0,
         "no energy harvested over the lap"
     );
+    // …and it hybridises within the limits the car itself declares: this policy allows 3.0 MJ of
+    // harvest per lap, so a regression that ignored the budget would read as "hybridising" under
+    // a bare > 0 check.
+    let harvest_budget_j = resolved
+        .spec
+        .policy
+        .as_ref()
+        .expect("gt_hybrid declares a policy")
+        .recovery
+        .per_lap_harvest_mj
+        * 1e6;
+    assert!(
+        ers_log.ledger_harvest_j <= harvest_budget_j + 1.0,
+        "harvested {:.3} MJ against a declared {:.3} MJ per-lap allowance",
+        ers_log.ledger_harvest_j * 1e-6,
+        harvest_budget_j * 1e-6
+    );
     eprintln!(
         "gt_hybrid Catalunya T0: {t:.2} s, deployed {:.3} MJ, harvested {:.3} MJ",
         ers_log.ledger_deploy_j * 1e-6,
         ers_log.ledger_harvest_j * 1e-6
     );
+}
+
+/// The promoted car's powertrain maps and tyre are hand copies of the f1_2026 ones, and no
+/// generator writes the gt side — so the next time the f1 surfaces are recalibrated (it has
+/// already happened twice this milestone) the two cars would silently diverge while both files
+/// still claim identical numbers. This fails when that happens.
+#[test]
+fn gt_hybrid_shares_the_f1_powertrain_and_tyre_surfaces() {
+    let data = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/vehicles");
+    for rel in [
+        "ptm/tables/ice_v6.parquet",
+        "ptm/tables/mgu_k.parquet",
+        "tyr/slick.tyr.yaml",
+        "ptm/ice_v6.ptm.yaml",
+        "ptm/mgu_k.ptm.yaml",
+    ] {
+        let f1 = std::fs::read(format!("{data}/f1_2026/{rel}")).expect("f1 source exists");
+        let gt = std::fs::read(format!("{data}/gt_hybrid/{rel}")).expect("gt copy exists");
+        if rel.ends_with(".parquet") {
+            assert_eq!(f1, gt, "{rel} drifted between f1_2026 and gt_hybrid");
+        } else {
+            // The YAML copies differ only in their leading provenance comments by design.
+            let strip = |b: Vec<u8>| {
+                String::from_utf8(b)
+                    .expect("utf8")
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with('#'))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            assert_eq!(
+                strip(f1),
+                strip(gt),
+                "{rel} drifted between f1_2026 and gt_hybrid (ignoring comments)"
+            );
+        }
+    }
 }
