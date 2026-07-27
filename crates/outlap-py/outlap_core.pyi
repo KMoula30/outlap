@@ -62,6 +62,8 @@ class Lap:
     tier: str
     fz_coupling: str
     flat_track: bool
+    path_curvature_smooth_m: float
+    vertical_baseline_m: float
     wheels: list[str]
     notes: list[str]
     resolved_hash: str
@@ -108,6 +110,8 @@ class TransientLap:
     tier: str
     fz_coupling: str
     flat_track: bool
+    path_curvature_smooth_m: float
+    vertical_baseline_m: float
     dt_s: float
     integrator_order: int
     speed_margin: float
@@ -175,6 +179,8 @@ class QssStint:
     tier: str
     fz_coupling: str
     flat_track: bool
+    path_curvature_smooth_m: float
+    vertical_baseline_m: float
     resolved_hash: str
     notes: list[str]
     def __len__(self) -> int: ...
@@ -210,6 +216,8 @@ class TransientStint:
     tier: str
     fz_coupling: str
     flat_track: bool
+    path_curvature_smooth_m: float
+    vertical_baseline_m: float
     dt_s: float
     integrator_order: int
     speed_margin: float

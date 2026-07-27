@@ -76,6 +76,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             notes: t0.notes().to_vec(),
             fz_coupling: sim.resolved_fz_coupling(),
             flat_track: true,
+            path_curvature_smooth_m: path.curv_smooth_m,
+            vertical_baseline_m: sim.vertical_baseline_m,
         },
     )?;
 

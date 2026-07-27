@@ -56,12 +56,30 @@ pub struct Sim {
     /// cross-check). A recorded simulation setting; the physical track file is left untouched.
     #[serde(default)]
     pub flat_track: bool,
+    /// Curvature-smoothing window for the sampled QSS path, metres — the full arc-length span of
+    /// the centred noise-rejection boxcar applied to the path curvatures (`κ_l`/`κ_n`). `None`
+    /// (the default) resolves per consumer, preserving each consumer's historical behavior
+    /// exactly: the QSS path sampler keeps its legacy 6-station half-width (a ~25 m window at the
+    /// default 2 m step), and the racing-line QP keeps reading the raw spline curvature (no
+    /// smoothing). An explicit value is honoured by the QSS path sampler, rounded to whole
+    /// stations at its step; `0.0` disables smoothing. The *applied* window is recorded in every
+    /// result artifact (the `fz_coupling` pattern); collapsing both consumers onto one shared κ
+    /// definition is a separate, numbers-moving change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_curvature_smooth_m: Option<f64>,
+    /// Arc-length baseline, metres, over which the track's road grade and vertical curvature are
+    /// estimated by central finite difference instead of the elevation spline's analytic
+    /// derivatives (an interpolating spline through DEM samples rings in its second derivative —
+    /// differencing just above the DEM ground resolution recovers the physical profile). The
+    /// default 30.0 sits just above a typical 25 m DEM resolution. A recorded simulation setting.
+    #[serde(default = "default_vertical_baseline_m")]
+    pub vertical_baseline_m: f64,
 }
 
 impl Default for Sim {
     fn default() -> Self {
         Self {
-            schema: SchemaVersion::new(crate::schema_name::SIM, crate::SCHEMA_MAJOR, 2),
+            schema: SchemaVersion::new(crate::schema_name::SIM, crate::SCHEMA_MAJOR, 3),
             tier: Tier::default(),
             dt_s: default_dt_s(),
             fz_coupling: None,
@@ -72,6 +90,8 @@ impl Default for Sim {
             raceline: Raceline::default(),
             allow_degraded: false,
             flat_track: false,
+            path_curvature_smooth_m: None,
+            vertical_baseline_m: default_vertical_baseline_m(),
         }
     }
 }
@@ -229,4 +249,8 @@ fn default_dt_s() -> f64 {
 
 fn default_slow_decimation() -> u32 {
     20
+}
+
+fn default_vertical_baseline_m() -> f64 {
+    30.0
 }

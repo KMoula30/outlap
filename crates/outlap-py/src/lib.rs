@@ -43,7 +43,7 @@ pub(crate) mod prelude {
     pub(crate) use outlap_qss::{
         solve_t0, solve_t1, Couplings, ErsCoupling, GgvEnvelope, LapRequest, LineDescriptor,
         MachineThermal, Pack, PackState, QssLap, SetupLog, SlowCoupling, SlowLog, T0Options,
-        T0Path, T0Vehicle, T1Vehicle, TireSlowLog, TireStateRes, TireThermalMarch,
+        T0Path, T0PathOptions, T0Vehicle, T1Vehicle, TireSlowLog, TireStateRes, TireThermalMarch,
         TireThermalState, WheelLog, DEFAULT_DS_M, WHEEL_ORDER,
     };
     pub(crate) use outlap_raceline::{

@@ -193,6 +193,8 @@ fn plan<'a>(h: &'a Hybrid, ers: &'a ErsCoupling, path: &'a T0Path) -> StintPlan<
             notes: vec![],
             fz_coupling: FzCoupling::OneStepLag,
             flat_track: false,
+            path_curvature_smooth_m: 0.0,
+            vertical_baseline_m: 30.0,
         },
     }
 }

@@ -312,14 +312,25 @@ pub(crate) fn time_weighted(
     let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &t0_opts).map_err(err)?;
     let flat = sim_cfg.flat_track;
     let fzc = sim_cfg.resolved_fz_coupling();
+    // The recorded track/path sim numerics (MT) govern the speed pre-pass exactly as they govern a
+    // solve: the baseline override rides on the parent track (offset lines inherit it) and the
+    // smoothing window shapes each candidate's sampled path. Defaults reproduce today's behavior
+    // bit-for-bit; the QP itself keeps reading the raw spline curvature.
+    let track_eval = track
+        .inner
+        .clone()
+        .with_vertical_baseline_m(sim_cfg.vertical_baseline_m);
 
     // A T0/GGV speed pre-pass on `line`, returning its per-station (s, v) and modelled lap time.
     let prepass = |line: &outlap_track::Track| -> PyResult<(Vec<f64>, Vec<f64>, f64)> {
-        let path = if flat {
-            T0Path::from_track_flat(line, ds_m)
-        } else {
-            T0Path::from_track(line, ds_m)
-        };
+        let path = T0Path::from_track_with(
+            line,
+            ds_m,
+            outlap_qss::T0PathOptions {
+                flat,
+                curvature_smooth_m: sim_cfg.path_curvature_smooth_m,
+            },
+        );
         let lap = solve_t0(
             &t0v,
             env.clone(),
@@ -331,6 +342,8 @@ pub(crate) fn time_weighted(
                 notes: Vec::new(),
                 fz_coupling: fzc,
                 flat_track: flat,
+                path_curvature_smooth_m: path.curv_smooth_m,
+                vertical_baseline_m: sim_cfg.vertical_baseline_m,
             },
         )
         .map_err(err)?
@@ -340,7 +353,7 @@ pub(crate) fn time_weighted(
 
     // Resample a pre-pass speed profile onto the QP's `n` stations by fractional lap position, and
     // return the weights wᵢ = 1/vᵢ (∝ Δt on the uniform grid).
-    let stations = raceline_stations(&track.inner, ds_m);
+    let stations = raceline_stations(&track_eval, ds_m);
     let weights_from = |v: &[f64]| -> Vec<f64> {
         let p = v.len().max(1);
         let n = stations.len();
@@ -358,13 +371,13 @@ pub(crate) fn time_weighted(
     };
 
     // --- outer reweight loop: keep the fastest line, stop on lap-time convergence ----------------
-    let mut best = min_curvature_line(&track.inner, half_width_m, &opts).map_err(err)?;
+    let mut best = min_curvature_line(&track_eval, half_width_m, &opts).map_err(err)?;
     let (_, mut best_v, mut best_time) = prepass(&best.line)?;
     let mut ran = 1usize;
     for _ in 1..iterations {
         let w = weights_from(&best_v);
         let cand =
-            min_curvature_line_weighted(&track.inner, half_width_m, &w, &opts).map_err(err)?;
+            min_curvature_line_weighted(&track_eval, half_width_m, &w, &opts).map_err(err)?;
         let (_, cand_v, cand_time) = prepass(&cand.line)?;
         ran += 1;
         if cand_time < best_time - tol * best_time {

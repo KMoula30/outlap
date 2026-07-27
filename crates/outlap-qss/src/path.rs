@@ -12,12 +12,27 @@ use outlap_track::Track;
 
 /// The minimum number of stations, so the passes and lap-time sum are well defined.
 const MIN_STATIONS: usize = 8;
-/// Half-width (stations) of the curvature noise-rejection moving average. Imported real-world
-/// centerlines (OSM geometry + DEM elevation) carry sub-car-length position noise that an
-/// interpolating spline amplifies into spurious curvature spikes; a light centred average over
+/// Default half-width (stations) of the curvature noise-rejection moving average. Imported
+/// real-world centerlines (OSM geometry + DEM elevation) carry sub-car-length position noise that
+/// an interpolating spline amplifies into spurious curvature spikes; a light centred average over
 /// ~2·radius·ds metres removes them while preserving genuine corners (which span many stations).
 /// This is a pragmatic mitigation — the principled fix for a fair lap is the min-curvature line.
+/// Overridable per run via [`T0PathOptions::curvature_smooth_m`] (`sim.path_curvature_smooth_m`).
 const CURV_SMOOTH_RADIUS: usize = 6;
+
+/// Sampling options for [`T0Path::from_track_with`] — the recorded simulation settings that shape
+/// the sampled path. The default value reproduces [`T0Path::from_track`] exactly.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct T0PathOptions {
+    /// Flat-track analysis mode: zero grade, banking, and vertical curvature (see
+    /// [`T0Path::from_track_flat`]).
+    pub flat: bool,
+    /// Curvature-smoothing window override, metres (`sim.path_curvature_smooth_m`): the full
+    /// arc-length span of the centred boxcar applied to `kappa_l`/`kappa_n`, rounded to whole
+    /// stations at the sampled step (`Some(0.0)` disables smoothing). `None` keeps the legacy
+    /// noise-rejection default — a 6-station half-width, ~25 m at the default 2 m step.
+    pub curvature_smooth_m: Option<f64>,
+}
 
 /// Per-station geometry for the T0 velocity passes (SoA; queried by index).
 #[derive(Clone, Debug)]
@@ -40,13 +55,18 @@ pub struct T0Path {
     pub ds: f64,
     /// Whether the path is a closed loop.
     pub closed: bool,
+    /// The **applied** curvature-smoothing window, metres — the full arc-length span (`2·r·ds`) of
+    /// the centred boxcar actually applied to `kappa_l`/`kappa_n`, `0.0` when smoothing was
+    /// disabled or degenerate (too few stations). The resolved value of the recorded
+    /// `sim.path_curvature_smooth_m` setting, carried into every result artifact.
+    pub curv_smooth_m: f64,
 }
 
 impl T0Path {
     /// Sample a track into a uniform-station path. `ds_target` is rounded so the step divides the
     /// length exactly (the wrap segment of a closed lap is then also `ds`).
     pub fn from_track(track: &Track, ds_target: f64) -> Self {
-        Self::from_track_opts(track, ds_target, false)
+        Self::from_track_with(track, ds_target, T0PathOptions::default())
     }
 
     /// Sample a track in **flat-track** mode: the road-plane lateral curvature `κ_l` keeps the
@@ -54,13 +74,20 @@ impl T0Path {
     /// g-g-g-v envelope collapses to a flat g-g (`g_normal ≡ g`). This is the 2-D oracle-comparison
     /// mode (`sim.flat_track`); the physical [`Track`] is untouched. Recorded in the result.
     pub fn from_track_flat(track: &Track, ds_target: f64) -> Self {
-        Self::from_track_opts(track, ds_target, true)
+        Self::from_track_with(
+            track,
+            ds_target,
+            T0PathOptions {
+                flat: true,
+                ..T0PathOptions::default()
+            },
+        )
     }
 
-    /// Shared sampler. `flat` zeroes grade/banking/vertical curvature (see [`from_track_flat`]).
-    ///
-    /// [`from_track_flat`]: Self::from_track_flat
-    fn from_track_opts(track: &Track, ds_target: f64, flat: bool) -> Self {
+    /// Sample a track with explicit [`T0PathOptions`] — the recorded simulation settings
+    /// (`sim.flat_track`, `sim.path_curvature_smooth_m`). `T0PathOptions::default()` reproduces
+    /// [`Self::from_track`] exactly.
+    pub fn from_track_with(track: &Track, ds_target: f64, opts: T0PathOptions) -> Self {
         let length = track.length();
         let closed = track.is_closed();
         let n_seg = ((length / ds_target).round() as usize).max(MIN_STATIONS);
@@ -78,7 +105,9 @@ impl T0Path {
             grip: Vec::with_capacity(n_stations),
             ds,
             closed,
+            curv_smooth_m: 0.0,
         };
+        let flat = opts.flat;
         for i in 0..n_stations {
             let s = i as f64 * ds;
             let kappa_h = track.curvature_h(s);
@@ -96,9 +125,23 @@ impl T0Path {
             p.sin_g.push(sg);
             p.grip.push(track.grip_scale(s));
         }
-        // Reject import/DEM curvature noise (see CURV_SMOOTH_RADIUS).
-        p.kappa_l = smooth(&p.kappa_l, CURV_SMOOTH_RADIUS, closed);
-        p.kappa_n = smooth(&p.kappa_n, CURV_SMOOTH_RADIUS, closed);
+        // Reject import/DEM curvature noise (see CURV_SMOOTH_RADIUS). An explicit window in metres
+        // rounds to whole stations at this path's step; `None` keeps the legacy station default so
+        // existing runs stay bit-identical at every `ds`.
+        let radius = match opts.curvature_smooth_m {
+            None => CURV_SMOOTH_RADIUS,
+            // Cap at the station count: any wider window is already a smooth() no-op, and the cap
+            // keeps `2·radius + 1` from overflowing on a pathological (validated-finite) input.
+            Some(w) => ((0.5 * w.max(0.0) / ds).round() as usize).min(n_stations),
+        };
+        p.kappa_l = smooth(&p.kappa_l, radius, closed);
+        p.kappa_n = smooth(&p.kappa_n, radius, closed);
+        // Record what was APPLIED: the full window span, or 0.0 when smooth() was a no-op.
+        p.curv_smooth_m = if radius == 0 || n_stations < 2 * radius + 1 {
+            0.0
+        } else {
+            2.0 * radius as f64 * ds
+        };
         p
     }
 

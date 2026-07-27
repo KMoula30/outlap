@@ -54,6 +54,14 @@
       "$ref": "#/$defs/Integrator",
       "default": "heun"
     },
+    "path_curvature_smooth_m": {
+      "description": "Curvature-smoothing window for the sampled QSS path, metres — the full arc-length span of\nthe centred noise-rejection boxcar applied to the path curvatures (`κ_l`/`κ_n`). `None`\n(the default) resolves per consumer, preserving each consumer's historical behavior\nexactly: the QSS path sampler keeps its legacy 6-station half-width (a ~25 m window at the\ndefault 2 m step), and the racing-line QP keeps reading the raw spline curvature (no\nsmoothing). An explicit value is honoured by the QSS path sampler, rounded to whole\nstations at its step; `0.0` disables smoothing. The *applied* window is recorded in every\nresult artifact (the `fz_coupling` pattern); collapsing both consumers onto one shared κ\ndefinition is a separate, numbers-moving change.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
     "raceline": {
       "description": "Racing-line source.",
       "$ref": "#/$defs/Raceline",
@@ -76,6 +84,12 @@
       "description": "Solver tier.",
       "$ref": "#/$defs/Tier",
       "default": "t1"
+    },
+    "vertical_baseline_m": {
+      "description": "Arc-length baseline, metres, over which the track's road grade and vertical curvature are\nestimated by central finite difference instead of the elevation spline's analytic\nderivatives (an interpolating spline through DEM samples rings in its second derivative —\ndifferencing just above the DEM ground resolution recovers the physical profile). The\ndefault 30.0 sits just above a typical 25 m DEM resolution. A recorded simulation setting.",
+      "type": "number",
+      "format": "double",
+      "default": 30.0
     }
   },
   "required": [

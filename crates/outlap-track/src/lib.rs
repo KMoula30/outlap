@@ -170,6 +170,9 @@ pub struct Track {
     width_left: MonotoneCubic<f64>,
     width_right: MonotoneCubic<f64>,
     grip: MonotoneCubic<f64>,
+    // Vertical finite-difference baseline, metres ([`VERTICAL_BASELINE_M`] unless overridden by
+    // `with_vertical_baseline_m` — a recorded simulation setting, `sim.vertical_baseline_m`).
+    vertical_baseline_m: f64,
 }
 
 impl Track {
@@ -262,6 +265,7 @@ impl Track {
             width_left,
             width_right,
             grip,
+            vertical_baseline_m: VERTICAL_BASELINE_M,
         })
     }
 
@@ -278,6 +282,27 @@ impl Track {
     /// Whether this track is a closed loop.
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// The arc-length baseline (metres) over which grade and vertical curvature are estimated by
+    /// central finite difference (see [`Self::elevation_derivs`] on why this is not the spline's
+    /// analytic derivative). 30 m — just above a typical DEM ground resolution — unless overridden
+    /// by [`Self::with_vertical_baseline_m`].
+    pub fn vertical_baseline_m(&self) -> f64 {
+        self.vertical_baseline_m
+    }
+
+    /// This track with the vertical finite-difference baseline replaced — the recorded simulation
+    /// setting `sim.vertical_baseline_m` (the sim schema's semantic check owns rejecting
+    /// non-positive/non-finite values; this defensively floors at `f64::MIN_POSITIVE`).
+    #[must_use]
+    pub fn with_vertical_baseline_m(mut self, baseline_m: f64) -> Self {
+        debug_assert!(
+            baseline_m.is_finite() && baseline_m > 0.0,
+            "vertical baseline must be a positive, finite length in metres, got {baseline_m}"
+        );
+        self.vertical_baseline_m = baseline_m.max(f64::MIN_POSITIVE);
+        self
     }
 
     /// Reduce a query station into the valid range: wrap for closed, clamp for open.
@@ -325,14 +350,16 @@ impl Track {
     /// and an *interpolating* cubic spline forced through those samples reproduces `z` faithfully but
     /// its **second derivative rings violently** — on `catalunya_osm` the analytic `z''` implies a
     /// vertical radius of ~3 m (a 34° grade and a `κ_v·v²` normal-load term of ~250 g at speed), which
-    /// is DEM noise, not road geometry. Differencing over [`VERTICAL_BASELINE_M`] — just above the DEM
-    /// resolution — averages that ringing out and recovers the physical profile (radius ~200 m, grade
-    /// ~7°). Finer detail than the baseline is not resolvable from the DEM and is not road curvature.
+    /// is DEM noise, not road geometry. Differencing over the baseline — [`VERTICAL_BASELINE_M`] by
+    /// default, just above the DEM resolution; overridable via [`Self::with_vertical_baseline_m`]
+    /// (the recorded `sim.vertical_baseline_m`) — averages that ringing out and recovers the physical
+    /// profile (radius ~200 m, grade ~7°). Finer detail than the baseline is not resolvable from the
+    /// DEM and is not road curvature.
     ///
     /// Exact for polynomial elevation (a central difference reproduces a quadratic's derivatives
     /// exactly), so the closed-form geometry tests are unaffected.
     fn elevation_derivs(&self, s: f64) -> (f64, f64) {
-        let h = 0.5 * VERTICAL_BASELINE_M;
+        let h = 0.5 * self.vertical_baseline_m;
         let (zm, z0, zp) = (self.z_at(s - h), self.z_at(s), self.z_at(s + h));
         let zt = (zp - zm) / (2.0 * h);
         let ztt = (zp - 2.0 * z0 + zm) / (h * h);
@@ -507,7 +534,10 @@ pub fn offset_track(track: &Track, s: &[f64], n: &[f64], name: &str) -> Result<T
         banking_keypoints: Vec::new(),
         meta: TrackMeta::default(),
     };
+    // The offset line inherits the parent's vertical finite-difference baseline, so a recorded
+    // `sim.vertical_baseline_m` override survives racing-line generation.
     Track::from_doc(&doc, &Centerline { rows })
+        .map(|t| t.with_vertical_baseline_m(track.vertical_baseline_m()))
 }
 
 /// Fit the three geometry splines for a closed loop, returning them plus the loop length.

@@ -24,10 +24,13 @@ pub(crate) fn build_sim(
         r.entry("generator").or_insert(serde_json::Value::Null);
         r.entry("file").or_insert(serde_json::Value::Null);
     }
-    // `fz_coupling` is Option<FzCoupling> (None = tier-resolved auto), so the serialized base
-    // omits it too — inject a null so the documented `sim={"fz_coupling": "fixed_point"}` works.
+    // `fz_coupling` / `path_curvature_smooth_m` are Options (None = the resolved per-consumer
+    // default), so the serialized base omits them too — inject nulls so the documented
+    // `sim={"fz_coupling": "fixed_point"}` / `sim={"path_curvature_smooth_m": 0.0}` work.
     if let Some(o) = value.as_object_mut() {
         o.entry("fz_coupling").or_insert(serde_json::Value::Null);
+        o.entry("path_curvature_smooth_m")
+            .or_insert(serde_json::Value::Null);
     }
     if let Some(patch) = sim_patch {
         merge_json(&mut value, &py_to_json(patch.as_any())?, "sim")?;

@@ -324,6 +324,10 @@ def lap_dataset(lap: Lap) -> xr.Dataset:
             "fz_coupling": lap.fz_coupling,
             # int, not bool: netCDF attrs have no bool type.
             "flat_track": int(lap.flat_track),
+            # The recorded track/path numerics: the applied curvature-smoothing window
+            # (0.0 = none) and the vertical finite-difference baseline, metres.
+            "path_curvature_smooth_m": lap.path_curvature_smooth_m,
+            "vertical_baseline_m": lap.vertical_baseline_m,
             # Tuple of str, not list/bool: keeps the attrs netCDF-serializable (no bool attr
             # type in netCDF; empty-list attrs coerce badly).
             "notes": tuple(lap.notes),
@@ -571,6 +575,10 @@ def transient_lap_dataset(lap: TransientLap) -> xr.Dataset:
             "speed_margin": lap.speed_margin,
             # int, not bool: netCDF attrs have no bool type.
             "flat_track": int(lap.flat_track),
+            # The recorded track/path numerics: the applied curvature-smoothing window
+            # (0.0 = none) and the vertical finite-difference baseline, metres.
+            "path_curvature_smooth_m": lap.path_curvature_smooth_m,
+            "vertical_baseline_m": lap.vertical_baseline_m,
             "completed": int(lap.completed),
             "notes": tuple(lap.notes),
             # End-of-lap fuel mass, kg — omitted entirely when the car carries no `fuel:` block
@@ -690,6 +698,10 @@ def stint_dataset(stint: QssStint) -> xr.Dataset:
             "fz_coupling": stint.fz_coupling,
             # int, not bool: netCDF attrs have no bool type.
             "flat_track": int(stint.flat_track),
+            # The recorded track/path numerics: the applied curvature-smoothing window
+            # (0.0 = none) and the vertical finite-difference baseline, metres.
+            "path_curvature_smooth_m": stint.path_curvature_smooth_m,
+            "vertical_baseline_m": stint.vertical_baseline_m,
             "n_laps": stint.n_laps,
             "notes": tuple(stint.notes),
         },
@@ -789,6 +801,10 @@ def transient_stint_dataset(stint: TransientStint) -> xr.Dataset:
             "speed_margin": stint.speed_margin,
             # int, not bool: netCDF attrs have no bool type.
             "flat_track": int(stint.flat_track),
+            # The recorded track/path numerics: the applied curvature-smoothing window
+            # (0.0 = none) and the vertical finite-difference baseline, metres.
+            "path_curvature_smooth_m": stint.path_curvature_smooth_m,
+            "vertical_baseline_m": stint.vertical_baseline_m,
             "completed": int(stint.completed),
             "requested_laps": stint.requested_laps,
             "n_laps": stint.n_laps,
