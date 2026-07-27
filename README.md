@@ -18,7 +18,7 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
   drivetrain topology graph, ERS/battery, brakes — with a strict, friendly load pipeline (miette
   spans, did-you-mean, plain-language topology errors). Powertrains enter *only* as neutral `.ptm`
   map files (the firewall).
-- **Three solver tiers.** **T0**, a point-mass forward/backward velocity-profile solve on the 3D
+- **Four solver tiers.** **T0**, a point-mass forward/backward velocity-profile solve on the 3D
   ribbon; **T1**, a double-track per-station trim that emits per-wheel loads, slips, and forces
   plus setup metrics, and generates a **g-g-g-v envelope** the fast T0 path then consumes; and
   **T2, the transient tier** — a 7-DOF chassis integrated through time at 1 ms in the curvilinear
@@ -52,8 +52,9 @@ agreement is in [`CLAUDE.md`](CLAUDE.md).
 - **A 3D track model** (`track.yaml` + `centerline.csv`) with curvature, grade, banking, and the
   road frame by arc length, plus **two racing-line generators**: the minimum-curvature QP and its
   **time-weighted** refinement (weights ∝ time spent, the first step toward the minimum-time
-  line). Ships 27 circuits: the 3D `catalunya_osm` and `spa_osm` (OSM + DEM; Spa carries its real
-  ~100 m of elevation) and 25 flat TUMFTM circuits (LGPL-3.0).
+  line). Ships 28 circuits: the 3D `catalunya_osm` and `spa_osm` (OSM + DEM; Spa carries its real
+  ~100 m of elevation), `barcelona_real_2026` (the geometry the f1 reference car is calibrated
+  against), and 25 flat TUMFTM circuits (LGPL-3.0).
 - **Importers**: OSM+DEM tracks (with closed-lap graph assembly for fragmented circuits), TUMFTM
   tracks, PDT HDF5 powertrains (→ `.ptm` maps, battery params, an `.emotor` thermal network), and
   `.tir` tyre files.

@@ -51,6 +51,11 @@ so both had silently carried a symmetric electric-machine recovery envelope for 
 - **data**: a semi-virtual MGU-K (real efficiency/loss map, an `.emotor` thermal network, a measured
   regen envelope, sized 223 N·m at the crank), the synthetic f1 energy store, the f1 aero map, T3
   suspension data, and `gt_hybrid` promoted from a schema fixture to a runnable reference car.
+- **f1_2026 grip re-calibration** against 2026 Barcelona telemetry (pooled corner apexes): the
+  reference car's tyre and downforce coefficients were roughly a factor of two low, which had been
+  flattering its cornering speeds. The `barcelona_real_2026` track ships alongside it as the
+  geometry that calibration is anchored to — real-circuit geometry matters more than solver
+  fidelity once the car itself is calibrated.
 - **notebooks**: **`11_race_energy.ipynb`** — a full race distance of coupled energy accounting:
   state of charge in both directions, the per-lap ledger and which limit binds, fuel burn against
   pace, the within-lap deploy/harvest/recharge phases, the override mode measured, a transient-tier

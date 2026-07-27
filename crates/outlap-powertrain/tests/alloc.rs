@@ -8,9 +8,12 @@
 //! The count is process-global, so a loaded CI runner can land an ambient one-off block inside
 //! the window (e.g. the test harness's coordinator thread waking mid-measurement — observed
 //! 2026-07-26, +4 blocks over 8192 calls, unreproducible on the same content and toolchain). A
-//! stray window therefore re-measures once on the same warmed state: a genuine per-step
-//! allocation reproduces (and scales with the step count); an ambient artifact does not. The
-//! gate stays exact — the deciding window must allocate nothing.
+//! stray window therefore REPLAYS: the seed, the ledger and the warm-up are rebuilt so the second
+//! window feeds `decide`/`record` the identical call sequence. A genuine per-step allocation
+//! reproduces on identical inputs; an ambient artifact does not. Replaying rather than continuing
+//! matters — the lap ledger is monotonic, so a continued window would run with the harvest budget
+//! already spent and take a different branch mix, which is not the thing under test. The gate
+//! stays exact: the deciding window must allocate nothing.
 
 mod common;
 
@@ -68,18 +71,19 @@ fn decide_and_record_are_zero_alloc() {
     );
 
     for mgr in [&rule_based, &scheduled] {
-        let mut rng = TestRng::new(0xA110C);
-        let mut ledger = LapEnergyLedger::new();
-        let mut prev = ErsCommand::idle();
-        // Warm.
-        for _ in 0..64 {
-            let inp = step(&mut rng, &prev);
-            prev = mgr.decide(&inp, &ledger);
-            ledger.record(&prev, 0.02);
-        }
-        // Measured window; a stray (ambient) block re-measures once — see the module doc.
-        let mut delta = 0;
-        for attempt in 0..2 {
+        // One measured pass from a FRESH state: same seed, same empty ledger, same warm-up. The
+        // state must be rebuilt per pass — carrying it forward would make a second pass a
+        // continuation rather than a replay, and the lap ledger is monotonic, so a continued
+        // window runs with the harvest budget already spent and exercises a different branch mix.
+        let measure = || {
+            let mut rng = TestRng::new(0xA110C);
+            let mut ledger = LapEnergyLedger::new();
+            let mut prev = ErsCommand::idle();
+            for _ in 0..64 {
+                let inp = step(&mut rng, &prev);
+                prev = mgr.decide(&inp, &ledger);
+                ledger.record(&prev, 0.02);
+            }
             let before = dhat::HeapStats::get();
             for _ in 0..4096 {
                 let inp = step(&mut rng, &prev);
@@ -87,17 +91,20 @@ fn decide_and_record_are_zero_alloc() {
                 ledger.record(&prev, 0.02);
             }
             let after = dhat::HeapStats::get();
-            delta = after.total_blocks - before.total_blocks;
-            if delta == 0 {
-                break;
-            }
-            if attempt == 0 {
-                eprintln!("alloc gate: first window saw {delta} stray block(s); re-measuring once");
-            }
+            (after.total_blocks - before.total_blocks, ledger)
+        };
+
+        // A stray block replays the identical window once — see the module doc.
+        let (mut delta, mut ledger) = measure();
+        if delta != 0 {
+            eprintln!("alloc gate: first window saw {delta} stray block(s); replaying it once");
+            let replay = measure();
+            delta = replay.0;
+            ledger = replay.1;
         }
         assert_eq!(
             delta, 0,
-            "decide/record allocated {delta} block(s), reproduced across consecutive windows"
+            "decide/record allocated {delta} block(s) on an identical replay"
         );
         ledger.reset();
         #[allow(clippy::float_cmp)] // reset is exact zero by construction
