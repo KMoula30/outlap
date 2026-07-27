@@ -509,13 +509,16 @@ fn a_rising_taper_power_frac_is_rejected() {
         .expect("fixture resolves")
         .spec;
     let mut broken = base;
+    // Drop the first knot below the second so the taper RISES out of the plateau. Mutating in
+    // place keeps the arity the fixture happens to declare, so this stays about monotonicity
+    // rather than tripping the equal-length check when the taper gains a breakpoint.
     broken
         .policy
         .as_mut()
         .expect("f1_2026 has policy")
         .deployment
         .taper_vs_speed
-        .power_frac = vec![0.5, 1.0, 0.0];
+        .power_frac[0] = 0.5;
     let err = resolve_vehicle(&broken, &Overrides::default(), &l, &LoadOptions::default())
         .expect_err("a rising taper must be rejected");
     assert!(
