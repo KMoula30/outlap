@@ -89,10 +89,12 @@ class PenalisedSolver(Protocol):
     """The per-λ penalised solve closure (coefficients, per-axis residual RMS).
 
     Part of the shared smoother kernel (see the section below): the elevation fuser passes its
-    own 1-D closure of this shape to :func:`match_noise`.
+    own 1-D closure of this shape to :func:`match_noise`. The penalty weights are fixed for a
+    whole search, so the closure captures them (via :func:`penalty_matrix`) rather than taking
+    them per call.
     """
 
-    def __call__(self, lam: float, weights: F) -> tuple[F, float]: ...
+    def __call__(self, lam: float) -> tuple[F, float]: ...
 
 
 #: Minimum number of distinct input points for a centerline fit.
@@ -268,24 +270,30 @@ def fit_centerline(
     btz = b_mat.T @ z
     d_mat = second_difference(cells, closed)
 
-    def solve(lam: float, weights: F) -> tuple[F, float]:
-        coeff = np.linalg.solve(system_matrix(btb, d_mat, lam, weights), btz)
+    uniform = np.ones(d_mat.shape[0], dtype=np.float64)
+    # λ-invariant, so it is rebuilt only when the penalty weights change (never per solve).
+    pen, scale = penalty_matrix(d_mat, btb, uniform)
+
+    def solve(lam: float) -> tuple[F, float]:
+        coeff = np.linalg.solve(penalised_system(btb, pen, scale, lam), btz)
         resid = z - b_mat @ coeff
         rms = float(np.sqrt(np.mean(resid**2)))  # per-axis RMS (isotropic noise)
         return coeff, rms
 
-    uniform = np.ones(d_mat.shape[0], dtype=np.float64)
-    weights = uniform
     if smoothing is not None:
         lam = max(float(smoothing), LAMBDA_FLOOR)
-        coeff, rms = solve(lam, uniform)
+        coeff, rms = solve(lam)
     else:
-        lam, coeff, rms = match_noise(solve, uniform, noise_std_m)
+        lam, coeff, rms = match_noise(solve, noise_std_m)
         if adaptive and noise_std_m > 0.0:
-            weights = _adaptive_weights(
-                coeff, cells, closed, ncoef, adapt_radius_m=adapt_radius_m
+            pen, scale = penalty_matrix(
+                d_mat,
+                btb,
+                _adaptive_weights(
+                    coeff, cells, closed, ncoef, adapt_radius_m=adapt_radius_m
+                ),
             )
-            lam, coeff, rms = match_noise(solve, weights, noise_std_m)
+            lam, coeff, rms = match_noise(solve, noise_std_m)
 
     # One guarded twicing step at the λ the discrepancy search picked (module docstring);
     # an explicit λ means "give me exactly that operator", so it skips the correction.
@@ -294,7 +302,7 @@ def fit_centerline(
         btb,
         z,
         coeff,
-        system_matrix(btb, d_mat, lam, weights),
+        penalised_system(btb, pen, scale, lam),
         noise_std_m=noise_std_m,
         enabled=bias_correction and smoothing is None,
     )
@@ -365,10 +373,12 @@ def _chord_parameter(pts: F, *, closed: bool) -> tuple[F, float]:
 # interpolation rule). The names in this section are the stable seam the elevation fuser
 # (``outlap.importers.lidar_dem.fuse_elevation``) composes into its own 1-D fit: the basis
 # (:func:`design_matrix`, :func:`eval_spline`), the penalty (:func:`second_difference`), the
-# normal-equation matrix (:func:`system_matrix`), the discrepancy search (:func:`match_noise`)
-# and the bias correction (:func:`bias_correct`). They are public *for that caller* — not part
-# of the curated ``outlap.trackcal`` API re-exported from the package root — and change only
-# with both call sites. Anything still spelled with a leading ``_`` is private to this module.
+# normal-equation matrix (:func:`system_matrix`, or its λ-invariant/per-λ halves
+# :func:`penalty_matrix` + :func:`penalised_system`), the discrepancy search
+# (:func:`match_noise`) and the bias correction (:func:`bias_correct`). They are public *for
+# that caller* — not part of the curated ``outlap.trackcal`` API re-exported from the package
+# root — and change only with both call sites. Anything still spelled with a leading ``_`` is
+# private to this module.
 
 
 def _basis_weights(t: F, order: int) -> F:
@@ -467,43 +477,61 @@ def second_difference(cells: int, closed: bool) -> F:
 # --- regularization selection + bias correction (shared smoother kernel) --------------------
 
 
-def system_matrix(btb: F, d_mat: F, lam: float, weights: F) -> F:
-    """The penalised normal-equation matrix ``M = BᵀB + λ s D₂ᵀΛD₂`` (Eilers & Marx 1996).
+def penalty_matrix(d_mat: F, btb: F, weights: F) -> tuple[F, float]:
+    """The weighted roughness penalty ``D₂ᵀΛD₂`` and the ``λ``-normalising scale ``s``.
 
+    Both depend only on the basis and the penalty weights, never on ``λ`` — so the
+    :func:`match_noise` bisection computes this **once** and reuses it across its ~43 solves
+    (the ``K×K`` matmul here costs the same order as the solve it feeds).
     ``s = tr(BᵀB) / tr(D₂ᵀΛD₂)`` makes ``λ`` dimensionless, so one search range serves any
     problem scale; ``weights`` are the per-region penalty weights ``Λ = diag(w)``.
     """
     pen = d_mat.T @ (weights[:, None] * d_mat)
     scale = float(np.trace(btb)) / max(float(np.trace(pen)), 1e-300)
+    return pen, scale
+
+
+def penalised_system(btb: F, pen: F, scale: float, lam: float) -> F:
+    """The penalised normal-equation matrix ``M = BᵀB + λ s D₂ᵀΛD₂`` (Eilers & Marx 1996).
+
+    The per-``λ`` half of :func:`system_matrix`, taking the penalty and scale
+    :func:`penalty_matrix` already computed.
+    """
     return btb + (lam * scale) * pen
 
 
-def match_noise(
-    solve: PenalisedSolver,
-    weights: F,
-    noise_std_m: float,
-) -> tuple[float, F, float]:
+def system_matrix(btb: F, d_mat: F, lam: float, weights: F) -> F:
+    """``M = BᵀB + λ s D₂ᵀΛD₂`` built in one shot from the basis and the penalty weights.
+
+    The convenience form for callers that build ``M`` once; inside a ``λ`` search use
+    :func:`penalty_matrix` + :func:`penalised_system` so the penalty is not rebuilt per solve.
+    """
+    pen, scale = penalty_matrix(d_mat, btb, weights)
+    return penalised_system(btb, pen, scale, lam)
+
+
+def match_noise(solve: PenalisedSolver, noise_std_m: float) -> tuple[float, F, float]:
     """Morozov discrepancy: bisect ``log λ`` until residual RMS matches ``noise_std_m``."""
     lo, hi = np.log10(LAMBDA_FLOOR), _LOG_LAMBDA_MAX
-    coeff, rms = solve(LAMBDA_FLOOR, weights)
+    coeff, rms = solve(LAMBDA_FLOOR)
     if (
         rms >= noise_std_m
     ):  # even the floor over-smooths (or exact data): keep the floor
         return LAMBDA_FLOOR, coeff, rms
-    coeff_hi, rms_hi = solve(10.0**hi, weights)
+    coeff_hi, rms_hi = solve(10.0**hi)
     if (
         rms_hi <= noise_std_m
     ):  # the ceiling cannot reach it: the caller flags lambda_capped
         return 10.0**hi, coeff_hi, rms_hi
     for _ in range(_BISECT_ITERS):
         mid = 0.5 * (lo + hi)
-        _, rms_mid = solve(10.0**mid, weights)
+        _, rms_mid = solve(10.0**mid)
         if rms_mid < noise_std_m:
             lo = mid
         else:
             hi = mid
     lam = 10.0 ** (0.5 * (lo + hi))
-    coeff, rms = solve(lam, weights)
+    coeff, rms = solve(lam)
     return lam, coeff, rms
 
 
@@ -556,6 +584,9 @@ def bias_correct(
     rms = float(np.sqrt(np.mean(resid**2)))
     # A = M⁻¹BᵀB is similar to the hat matrix S = BM⁻¹Bᵀ, so tr(S) = tr(A) and
     # tr(S²) = tr(A²) = Σ A ⊙ Aᵀ — both from K-sized solves, never an inverse.
+    # The three solves here share `system` but must stay three: batching A with the twicing
+    # step into one multi-RHS solve moved the fitted coefficients by ~1e-13 (LAPACK blocks the
+    # back-substitution differently per NRHS), and this pipeline pins emitted bytes.
     a_hat = np.linalg.solve(system, btb)
     trace_s = float(np.trace(a_hat))
     if not enabled or noise_std_m <= 0.0:

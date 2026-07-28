@@ -68,8 +68,9 @@ from outlap.trackcal.geometry import (
     design_matrix,
     eval_spline,
     match_noise,
+    penalised_system,
+    penalty_matrix,
     second_difference,
-    system_matrix,
 )
 
 if TYPE_CHECKING:
@@ -85,9 +86,9 @@ F = NDArray[np.float64]
 #: Minimum number of stations for an elevation fusion (mirrors trackcal's fit guard).
 MIN_PROFILE_POINTS = 10
 
-# The OSM importer's equirectangular ENU sphere radius — kept identical so both speak the
-# same local frame.
-_EARTH_R = 6_371_000.0
+#: Sphere radius of the equirectangular ENU projection (:class:`EnuFrame`), in metres. The OSM
+#: importer imports it rather than declaring its own, so both speak exactly the same local frame.
+EARTH_RADIUS_M = 6_371_000.0
 
 # Residual-scatter floor so exact synthetic sections do not divide by zero in the SNR gate.
 _SIGMA_FLOOR = 1e-9
@@ -98,6 +99,7 @@ _DSM_MARKERS = re.compile(
 )
 
 __all__ = [
+    "EARTH_RADIUS_M",
     "MIN_PROFILE_POINTS",
     "PRESETS",
     "BankingProfile",
@@ -211,8 +213,8 @@ class EnuFrame:
         lat = np.asarray(lat_deg, dtype=np.float64)
         lon = np.asarray(lon_deg, dtype=np.float64)
         coslat = math.cos(math.radians(self.lat0_deg))
-        x = np.radians(lon - self.lon0_deg) * _EARTH_R * coslat
-        y = np.radians(lat - self.lat0_deg) * _EARTH_R
+        x = np.radians(lon - self.lon0_deg) * EARTH_RADIUS_M * coslat
+        y = np.radians(lat - self.lat0_deg) * EARTH_RADIUS_M
         return x, y
 
     def to_latlon(self, x_m: F, y_m: F) -> tuple[F, F]:
@@ -220,8 +222,8 @@ class EnuFrame:
         x = np.asarray(x_m, dtype=np.float64)
         y = np.asarray(y_m, dtype=np.float64)
         coslat = math.cos(math.radians(self.lat0_deg))
-        lon = self.lon0_deg + np.degrees(x / (_EARTH_R * coslat))
-        lat = self.lat0_deg + np.degrees(y / _EARTH_R)
+        lon = self.lon0_deg + np.degrees(x / (EARTH_RADIUS_M * coslat))
+        lat = self.lat0_deg + np.degrees(y / EARTH_RADIUS_M)
         return lat, lon
 
 
@@ -590,17 +592,20 @@ def fuse_elevation(
     btz = b_mat.T @ z
     d_mat = second_difference(cells, closed)
 
-    def solve(lam: float, weights: F) -> tuple[F, float]:
-        coeff = np.linalg.solve(system_matrix(btb, d_mat, lam, weights), btz)
+    uniform = np.ones(d_mat.shape[0], dtype=np.float64)
+    # λ-invariant: built once for the whole discrepancy search, never per solve.
+    pen, scale = penalty_matrix(d_mat, btb, uniform)
+
+    def solve(lam: float) -> tuple[F, float]:
+        coeff = np.linalg.solve(penalised_system(btb, pen, scale, lam), btz)
         resid = z - b_mat @ coeff
         return coeff, float(np.sqrt(np.mean(resid**2)))
 
-    uniform = np.ones(d_mat.shape[0], dtype=np.float64)
     if smoothing is not None:
         lam = max(float(smoothing), LAMBDA_FLOOR)
-        coeff, rms = solve(lam, uniform)
+        coeff, rms = solve(lam)
     else:
-        lam, coeff, rms = match_noise(solve, uniform, noise_std_m)
+        lam, coeff, rms = match_noise(solve, noise_std_m)
 
     # One guarded twicing step at the λ the discrepancy search picked (shared with the
     # centerline fit); an explicit λ means "give me exactly that operator", so it skips.
@@ -609,7 +614,7 @@ def fuse_elevation(
         btb,
         z,
         coeff,
-        system_matrix(btb, d_mat, lam, uniform),
+        penalised_system(btb, pen, scale, lam),
         noise_std_m=noise_std_m,
         enabled=bias_correction and smoothing is None,
     )

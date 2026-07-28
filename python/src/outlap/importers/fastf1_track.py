@@ -64,8 +64,10 @@ the same physical point, read off the georeferenced source (OSM start/finish nod
 unambiguous corner apexes).
 
 Builds are atomic and ``--force`` is required over existing outputs — the write path is
-:func:`outlap.importers.osm_track.write_track_dir`, shared so both importers have exactly one
-atomic-write and one CSV-rendering implementation between them.
+:func:`outlap.importers.osm_track.write_track_dir`. That module owns the whole emitted-format
+surface (the CSV and YAML renderers, the manifest hashes, the station headings) and this one
+imports it, so there is exactly one implementation of each between the two importers and the
+byte layout cannot drift.
 
 ``fastf1`` is imported lazily (inside the loader) and lives in the ``wear-cal`` extra; CI never
 installs it and never runs this module.
@@ -93,13 +95,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import yaml
 from numpy.typing import NDArray
 
 from outlap.importers.lidar_dem import EnuFrame
 from outlap.importers.osm_track import (
     FittedCenterline,
+    headings,
     render_centerline_csv,
+    render_yaml,
+    sha256_file,
+    sha256_text,
     write_track_dir,
 )
 from outlap.trackcal.corners import detect_corners
@@ -223,12 +228,18 @@ class Anchor:
 
 @dataclass(frozen=True)
 class Georeference:
-    """A gated similarity fit: the transform, its residuals, and the frame it targets."""
+    """A gated similarity fit: the transform, its residuals, and the frame it targets.
+
+    ``worst_residual_m`` is *measured* — how far the fit misses its worst anchor;
+    ``residual_ceiling_m`` is *declared* — the bar the caller set the RMS residual against
+    (:data:`MAX_ANCHOR_RESIDUAL_M` by default). Both are recorded so a manifest states the
+    gate and its outcome, never one without the other.
+    """
 
     transform: GeorefTransform
     frame: EnuFrame
-    residual_max_m: float
-    max_residual_m: float
+    worst_residual_m: float
+    residual_ceiling_m: float
     labels: tuple[str, ...]
 
     @property
@@ -245,8 +256,8 @@ class Georeference:
             "tx_m": float(self.transform.tx_m),
             "ty_m": float(self.transform.ty_m),
             "residual_rms_m": float(self.transform.residual_rms_m),
-            "residual_max_m": float(self.residual_max_m),
-            "max_residual_m": float(self.max_residual_m),
+            "worst_residual_m": float(self.worst_residual_m),
+            "residual_ceiling_m": float(self.residual_ceiling_m),
             "enu_origin": {
                 "lat_deg": self.frame.lat0_deg,
                 "lon_deg": self.frame.lon0_deg,
@@ -395,8 +406,8 @@ def georeference(
     return Georeference(
         transform=transform,
         frame=frame,
-        residual_max_m=float(residuals[worst]),
-        max_residual_m=float(max_residual_m),
+        worst_residual_m=float(residuals[worst]),
+        residual_ceiling_m=float(max_residual_m),
         labels=tuple(a.label for a in anchors),
     )
 
@@ -569,21 +580,6 @@ class ImportResult:
     files: tuple[str, ...]
 
 
-def _headings(x: F, y: F) -> F:
-    """Travel direction ψ from +x per station (wrapped central differences; closed loop)."""
-    return np.arctan2(np.roll(y, -1) - np.roll(y, 1), np.roll(x, -1) - np.roll(x, 1))
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _render_yaml(doc: dict[str, Any], header: str) -> str:
-    return header + yaml.safe_dump(
-        doc, sort_keys=False, allow_unicode=True, default_flow_style=False
-    )
-
-
 def _render_metrics(metrics: TrackMetrics) -> str:
     """Render the metrics CSV to text so it joins the atomic write batch.
 
@@ -672,7 +668,7 @@ def run_import(
         x=samples.x_m,
         y=samples.y_m,
         kappa=samples.kappa_per_m,
-        heading=_headings(samples.x_m, samples.y_m),
+        heading=headings(samples.x_m, samples.y_m, closed=True),
         lat=lat,
         lon=lon,
         frame=georef.frame,
@@ -762,7 +758,7 @@ def run_import(
         "inputs": {
             "anchors": {
                 "file": anchors_path.name,
-                "sha256": hashlib.sha256(anchors_path.read_bytes()).hexdigest(),
+                "sha256": sha256_file(anchors_path),
                 "count": len(anchors),
             },
             "positions": {
@@ -790,18 +786,18 @@ def run_import(
             "n_corners": len(corners),
             "tightest_radius_m": float(tightest),
         },
-        "outputs": {"centerline_csv_sha256": _sha256_text(csv_text)},
+        "outputs": {"centerline_csv_sha256": sha256_text(csv_text)},
     }
 
     files: dict[str, str] = {
         "centerline.csv": csv_text,
         METRICS_FILE: metrics_text,
-        "track.yaml": _render_yaml(
+        "track.yaml": render_yaml(
             track_doc,
             "# Imported by outlap.importers.fastf1_track — derived driven line, "
             "not a corridor.\n",
         ),
-        MANIFEST_FILE: _render_yaml(
+        MANIFEST_FILE: render_yaml(
             manifest,
             "# Input manifest (KTD7): the session, anchors and numerics this import is a "
             "pure function of.\n",

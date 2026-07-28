@@ -37,6 +37,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from outlap.importers import width_trace as wt
+from outlap.importers.osm_track import headings
 
 mpl.use("Agg", force=True)  # QA renders headless (CI, remote sessions)
 
@@ -72,13 +73,6 @@ _ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_OUT = _ROOT / "scratch_figs" / "track_width_qa.png"
 
 
-def _headings_closed(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Travel heading ψ per station of a closed loop (central differences over the seam)."""
-    dx = np.roll(x, -1) - np.roll(x, 1)
-    dy = np.roll(y, -1) - np.roll(y, 1)
-    return np.arctan2(dy, dx)
-
-
 def _load_track_stations(track_dir: Path) -> wt.Stations:
     """Stations from a track dir's ``centerline.csv`` (columns by NAME, never position)."""
     csv_path = track_dir / "centerline.csv"
@@ -96,7 +90,7 @@ def _load_track_stations(track_dir: Path) -> wt.Stations:
     s, x, y = data[:, col["s_m"]], data[:, col["x_m"]], data[:, col["y_m"]]
     length = float(s[-1] + math.hypot(x[0] - x[-1], y[0] - y[-1]))
     return wt.Stations(
-        s_m=s, x_m=x, y_m=y, heading_rad=_headings_closed(x, y), length_m=length
+        s_m=s, x_m=x, y_m=y, heading_rad=headings(x, y, closed=True), length_m=length
     )
 
 
