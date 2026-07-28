@@ -25,6 +25,7 @@ from outlap.importers.lidar_dem import (
     PRESETS,
     BankingProfile,
     DemSource,
+    ElevationProfile,
     EnuFrame,
     LidarDemError,
     MissingTileError,
@@ -262,6 +263,15 @@ def test_banking_sign_positive_raises_the_left_edge() -> None:
 
 
 def test_fuse_elevation_recovers_a_smooth_closed_profile() -> None:
+    """The fused profile must beat the raw samples, and report itself without a tautology.
+
+    ``discrepancy_rms_m`` is the residual the λ search matched, so it equals the declaration
+    exactly — that is the identity worth asserting. ``residual_rms_m`` is the *reported*
+    curve's residual and drops below the declaration once the twicing step runs (0.1000 →
+    0.0833 here), so it is no longer the same number wearing two hats. The accuracy bar
+    tightened with it: this fixture's error against truth was 0.0568 m uncorrected and is
+    0.0261 m now, against 0.0882 m of raw sample noise.
+    """
     length = 1000.0
     n = 200
     s = np.arange(n, dtype=np.float64) * (length / n)
@@ -274,8 +284,12 @@ def test_fuse_elevation_recovers_a_smooth_closed_profile() -> None:
     profile = fuse_elevation(s, z_noisy, closed=True, length_m=length, noise_std_m=0.1)
     assert profile.z_m.shape == s.shape
     rms_error = float(np.sqrt(np.mean((profile.z_m - z_true) ** 2)))
-    assert rms_error < 0.06  # the fit beats the raw noise by averaging
-    assert profile.residual_rms_m == pytest.approx(0.1, rel=0.35)
+    assert rms_error < 0.035  # the fit beats the raw noise (0.088) by averaging
+    assert profile.discrepancy_rms_m == pytest.approx(0.1, rel=1e-6)
+    assert not profile.lambda_capped
+    assert profile.bias_corrected
+    assert profile.residual_rms_m < profile.discrepancy_rms_m
+    assert 0.0 < profile.effective_dof <= float(n)
 
 
 def test_fused_elevation_is_c2_across_the_seam() -> None:
@@ -297,6 +311,9 @@ def test_fuse_elevation_open_profile_and_degenerate_input() -> None:
     z = 0.02 * s + 3.0 * np.sin(2.0 * np.pi * s / 250.0)
     profile = fuse_elevation(s, z, closed=False, noise_std_m=0.0)
     assert float(np.max(np.abs(profile.z_m - z))) < 0.05
+    # Exact data (noise_std_m = 0) is a hard skip: λ is pinned at the floor, nothing to undo.
+    assert profile.bias_corrected is False
+    assert profile.discrepancy_rms_m == profile.residual_rms_m
 
     with pytest.raises(LidarDemError):
         fuse_elevation(s[:5], z[:5], closed=False)
@@ -304,6 +321,116 @@ def test_fuse_elevation_open_profile_and_degenerate_input() -> None:
     bad[3] = np.nan
     with pytest.raises(LidarDemError):
         fuse_elevation(s, bad, closed=False)
+
+
+# The two densities ``osm_track`` actually fuses at. The DEM chain samples the pinned
+# opentopodata elevations every ``_DEM_STEP_M`` = 20 m and fuses at ``_DEM_KNOT_SPACING_M``
+# = 40 m knots with a 1.0 m declaration; the LiDAR stage fuses the DTM sampled at every
+# fitted station (``ds_m`` = 3 m) with ``_LIDAR_KNOT_SPACING_M`` = 20 m knots and the
+# source's published noise floor. The station-to-knot redundancy differs by 3×, and the
+# twicing veto is sensitive to exactly that — hence both are exercised here.
+_DEM_STEP_M = 20.0
+_DEM_KNOT_M = 40.0
+_LIDAR_STEP_M = 3.0
+_LIDAR_KNOT_M = 20.0
+
+_LAP_M = 4600.0
+_UNDULATION_WAVELENGTH_M = 460.0
+_UNDULATION_AMPLITUDE_M = 3.0
+
+
+def _undulation(step_m: float, *, noise_m: float = 0.0, seed: int = 0) -> tuple[F, F]:
+    """Stations and samples for a 3 m / 460 m elevation undulation over a 4.6 km lap."""
+    n = int(round(_LAP_M / step_m))
+    s = np.arange(n, dtype=np.float64) * (_LAP_M / n)
+    z = _UNDULATION_AMPLITUDE_M * np.sin(2.0 * np.pi * s / _UNDULATION_WAVELENGTH_M)
+    if noise_m > 0.0:
+        z = z + np.random.default_rng(seed).normal(0.0, noise_m, n)
+    return s, z
+
+
+def _amplitude_error_pct(s: F, z_fit: F) -> float:
+    """Fitted undulation amplitude vs truth, in percent (exact projection on the tone)."""
+    basis = np.sin(2.0 * np.pi * s / _UNDULATION_WAVELENGTH_M)
+    fitted = 2.0 * float(
+        np.mean(z_fit * basis)
+    )  # whole periods ⇒ the projection is exact
+    return 100.0 * (fitted / _UNDULATION_AMPLITUDE_M - 1.0)
+
+
+def _fuse_dem_density(s: F, z: F, *, bias_correction: bool) -> ElevationProfile:
+    """Fuse at the DEM chain's declared noise, station step and knot spacing."""
+    return fuse_elevation(
+        s,
+        z,
+        closed=True,
+        length_m=_LAP_M,
+        noise_std_m=1.0,
+        knot_spacing_m=_DEM_KNOT_M,
+        bias_correction=bias_correction,
+    )
+
+
+def test_undulation_amplitude_survives_the_discrepancy_shrink() -> None:
+    """T9: the 1-D half of the ``√2 σ`` shrink, at the densities the importer really fuses at.
+
+    Constraining the *residual* to the declared noise shrinks a smooth undulation's amplitude,
+    and here that error lands in grade and vertical curvature. On exact samples at the DEM
+    chain's density and its 1.0 m declaration the uncorrected fit reads the 3 m / 460 m
+    undulation **−47.1%** small; the shared twicing step brings it to −22.2%, so the bar is
+    25%. The correction is a strict improvement, never a coin flip: it either runs (and pays)
+    or vetoes into exactly the uncorrected curve.
+    """
+    s, z = _undulation(_DEM_STEP_M)
+    off = _fuse_dem_density(s, z, bias_correction=False)
+    on = _fuse_dem_density(s, z, bias_correction=True)
+    assert off.bias_corrected is False
+    assert (
+        on.bias_corrected is True
+    )  # exact-but-declared data always has signal to recover
+    assert _amplitude_error_pct(s, off.z_m) < -40.0  # the defect this guard exists for
+    assert abs(_amplitude_error_pct(s, on.z_m)) < 25.0
+
+
+def test_undulation_amplitude_within_10pct_when_noise_is_declared_honestly() -> None:
+    """T9 (cont.): true noise = declaration is the regime the correction is tuned for.
+
+    At the DEM chain's density (20 m stations against 40 m knots — barely 2:1 redundancy) the
+    twicing veto legitimately fires on a minority of noise realisations: with λ that low the
+    residual is mostly noise, which is exactly what the veto is for. So ``bias_corrected`` is
+    asserted, not assumed — when the step runs the amplitude lands inside 10% (measured mean
+    −3.8%, worst 9.2% over 20 seeds), and when it vetoes the profile is bit-identical to the
+    uncorrected fit. Measured 13/20 seeds corrected; the step is never worse than skipping it.
+    """
+    corrected = 0
+    for seed in range(8):
+        s, z = _undulation(_DEM_STEP_M, noise_m=1.0, seed=seed)
+        off = _fuse_dem_density(s, z, bias_correction=False)
+        on = _fuse_dem_density(s, z, bias_correction=True)
+        error_off = _amplitude_error_pct(s, off.z_m)
+        error_on = _amplitude_error_pct(s, on.z_m)
+        if on.bias_corrected:
+            corrected += 1
+            assert abs(error_on) < 10.0, f"seed {seed}: {error_on:+.2f}%"
+            assert abs(error_on) < abs(error_off)  # running the step always pays
+        else:
+            assert np.array_equal(on.z_m, off.z_m)  # a veto is a full skip
+    assert corrected >= 4, f"the step vetoed on {8 - corrected}/8 seeds"
+
+    # The LiDAR stage fuses 3 m stations against 20 m knots: well-conditioned, so the
+    # correction runs on nearly every realisation and lands inside 1%.
+    for seed in range(4):
+        s, z = _undulation(_LIDAR_STEP_M, noise_m=0.15, seed=seed)
+        profile = fuse_elevation(
+            s,
+            z,
+            closed=True,
+            length_m=_LAP_M,
+            noise_std_m=0.15,
+            knot_spacing_m=_LIDAR_KNOT_M,
+        )
+        if profile.bias_corrected:
+            assert abs(_amplitude_error_pct(s, profile.z_m)) < 1.0
 
 
 # --- CRS round-trip (pyproj) ----------------------------------------------------------------

@@ -580,15 +580,6 @@ def bias_correct(
     )
 
 
-# Transitional aliases: ``outlap.importers.lidar_dem`` still imports the kernel under its old
-# private names and switches to the public spelling with the elevation-fusion follow-up.
-_LAMBDA_FLOOR = LAMBDA_FLOOR
-_design_matrix = design_matrix
-_eval_spline = eval_spline
-_second_difference = second_difference
-_match_noise = match_noise
-
-
 # --- internals ------------------------------------------------------------------------------
 
 
