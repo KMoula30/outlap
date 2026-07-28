@@ -666,11 +666,24 @@ pub fn load_battery(path: &str, loader: &dyn SourceLoader) -> Result<crate::batt
 
 /// Load and validate a standalone `track.yaml` document (the referenced `centerline.csv` is parsed
 /// by the `outlap-track` crate, which owns the geometry).
+///
+/// One cross-file check runs here (KTD9, track/1.1): when the document carries
+/// `banking_keypoints`, the referenced centerline's dense `banking_deg` column must be all
+/// zero — two competing banking declarations are a config error. A centerline that fails to
+/// load or parse is NOT an error at this stage (the geometry layer owns those diagnostics);
+/// the conflict check simply runs only when the sidecar is readable.
 pub fn load_track_doc(path: &str, loader: &dyn SourceLoader) -> Result<crate::track::TrackDoc> {
     let mut sources = Sources::new();
     let (doc, id, index, _) =
         load_typed::<crate::track::TrackDoc>(path, schema_name::TRACK, loader, &mut sources)?;
     semantic::check_track(&doc, &index, &sources, id)?;
+    if !doc.banking_keypoints.is_empty() {
+        if let Ok(csv) = loader.load(doc.centerline.as_str()) {
+            if let Ok(centerline) = crate::centerline::parse_centerline(&csv, 1) {
+                semantic::check_track_banking_conflict(&doc, &centerline, &index, &sources, id)?;
+            }
+        }
+    }
     Ok(doc)
 }
 

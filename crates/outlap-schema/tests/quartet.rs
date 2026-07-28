@@ -3,7 +3,7 @@
 // Fixture values parse exactly, so exact float comparison is intentional.
 #![allow(clippy::float_cmp)]
 
-use outlap_schema::io::FsLoader;
+use outlap_schema::io::{FsLoader, MemLoader};
 use outlap_schema::sim::{FzCoupling, RacelineGenerator, Tier};
 use outlap_schema::{load_conditions, load_sim, load_track_doc};
 
@@ -21,6 +21,61 @@ fn track_doc_loads() {
         doc.meta.accuracy_class,
         Some(outlap_schema::track::AccuracyClass::C)
     );
+    // The track/1.1 provenance meta round-trips through the loader (MT/U5).
+    assert_eq!(doc.meta.width_source.as_deref(), Some("declared"));
+    assert_eq!(doc.meta.importer_version.as_deref(), Some("fixture/1"));
+    assert_eq!(doc.meta.stages, Some(vec!["base".to_owned()]));
+}
+
+/// A minimal in-memory track dir: a `track.yaml` (with optional keypoints) plus a 4-row
+/// centerline whose `banking_deg` column is the given values.
+fn mem_track(keypoints: bool, banking: [f64; 4]) -> MemLoader {
+    let kp = if keypoints {
+        "banking_keypoints:\n  - { s_m: 0.0, banking_deg: 0.0 }\n  - { s_m: 20.0, banking_deg: 5.0 }\n"
+    } else {
+        ""
+    };
+    let yaml = format!(
+        "schema: track/1.1\nname: Mem Track\nclosed: false\ncenterline: centerline.csv\n{kp}"
+    );
+    let mut csv = String::from("s_m,x_m,y_m,z_m,banking_deg,width_left_m,width_right_m,grip_scale\n");
+    for (i, b) in banking.iter().enumerate() {
+        let s = i as f64 * 10.0;
+        csv.push_str(&format!("{s:.1},{s:.1},0.0,0.0,{b:.3},6.0,6.0,1.0\n"));
+    }
+    MemLoader::new()
+        .with("track.yaml", yaml)
+        .with("centerline.csv", csv)
+}
+
+#[test]
+fn track_both_banking_forms_conflict() {
+    // KTD9: keypoints + a non-zero dense `banking_deg` column is a config error.
+    let err = load_track_doc("track.yaml", &mem_track(true, [0.0, 2.5, 0.0, 0.0])).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("banking") && msg.contains("twice"),
+        "unexpected message: {msg}"
+    );
+}
+
+#[test]
+fn track_keypoints_over_zero_column_stay_valid() {
+    // The hand-annotation path: keypoints + an all-zero placeholder column loads fine.
+    let doc = load_track_doc("track.yaml", &mem_track(true, [0.0; 4])).unwrap();
+    assert_eq!(doc.banking_keypoints.len(), 2);
+    // And a non-zero column WITHOUT keypoints is the normal dense path.
+    let doc = load_track_doc("track.yaml", &mem_track(false, [0.0, 2.5, 0.0, 0.0])).unwrap();
+    assert!(doc.banking_keypoints.is_empty());
+}
+
+#[test]
+fn track_unknown_meta_field_is_rejected() {
+    // The unknown-field walk still hard-errors on a bogus non-`x-` field in track/1.1 meta.
+    let yaml = "schema: track/1.1\nname: Mem Track\ncenterline: centerline.csv\nmeta:\n  bogus_field: 1\n";
+    let err = load_track_doc("track.yaml", &MemLoader::new().with("track.yaml", yaml)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("bogus_field"), "unexpected message: {msg}");
 }
 
 #[test]

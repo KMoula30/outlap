@@ -1375,6 +1375,49 @@ pub fn check_track(
     Ok(())
 }
 
+/// KTD9: a track must declare banking exactly ONE way. Sparse `banking_keypoints` and a
+/// non-zero dense `banking_deg` centerline column are competing declarations (keypoints used
+/// to silently override the column) — carrying both is a config error, not a precedence rule.
+/// Keypoints over an all-zero placeholder column remain valid: that is the hand-annotation
+/// path the importer writes when per-row LiDAR banking is not available.
+pub fn check_track_banking_conflict(
+    t: &TrackDoc,
+    centerline: &crate::centerline::Centerline,
+    index: &SpanIndex,
+    sources: &Sources,
+    file: crate::diagnostics::SourceId,
+) -> Result<()> {
+    if t.banking_keypoints.is_empty() {
+        return Ok(());
+    }
+    if let Some((i, row)) = centerline
+        .rows
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.banking_deg != 0.0)
+    {
+        let s = Spans { index, file };
+        return Err(SchemaError::semantic(
+            sources,
+            s.at("/banking_keypoints"),
+            format!(
+                "this track declares banking twice: `banking_keypoints` here AND a non-zero \
+                 `banking_deg` column in `{}` (data row {}, s = {} m, {} deg)",
+                t.centerline.as_str(),
+                i + 1,
+                row.s_m,
+                row.banking_deg
+            ),
+            Some(
+                "keep exactly one source: drop the keypoints (per-row LiDAR banking in the \
+                 column) or zero the column (sparse hand-annotated keypoints)"
+                    .into(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Semantic checks for a `conditions.yaml` document.
 pub fn check_conditions(
     c: &Conditions,

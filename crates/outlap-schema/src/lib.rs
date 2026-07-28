@@ -141,7 +141,11 @@ pub fn current_major(name: &str) -> u16 {
 /// `battery`: 1.1 `regen_derate_vs_temp` (§7.6), 1.2 optional 2nd RC pair (`ecm.rc_pairs: 2` +
 /// `r2_ohm`/`tau2_s` sidecar columns, §8.4, M6/PR4); `sim`: 1.1 `flat_track` analysis flag, 1.2 the
 /// split-integrator numerics (`fz_coupling` auto, `slow_decimation`, `fixed_point`), 1.3 the
-/// recorded track/path numerics (`path_curvature_smooth_m`, `vertical_baseline_m`, MT).
+/// recorded track/path numerics (`path_curvature_smooth_m`, `vertical_baseline_m`, MT);
+/// `track`: 1.1 the staged-importer provenance meta (`width_source`,
+/// `width_control_points_sha`, `lidar_dataset`, `lidar_tiles`, `georef_transform`,
+/// `importer_version`, `stages`) plus the dense-banking/keypoints conflict check (MT/U5,
+/// KTD9/KTD10 — additive; `track/1.0` files keep loading unchanged).
 ///
 /// # Validation-tightening policy
 ///
@@ -162,8 +166,8 @@ pub fn current_minor(name: &str) -> u16 {
     match name {
         schema_name::SIM => 3,
         schema_name::BATTERY | schema_name::TYR => 2,
-        schema_name::VEHICLE => 1,
-        // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/track/conditions
+        schema_name::VEHICLE | schema_name::TRACK => 1,
+        // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/conditions
         // (and anything unknown) have had no additive change since their `.0`.
         _ => 0,
     }
