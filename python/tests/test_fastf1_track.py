@@ -545,7 +545,7 @@ def test_manifest_pins_the_session_transform_and_counts(
 
     georef = manifest["georeference"]
     assert georef["method"] == "umeyama-similarity-2d"
-    assert georef["max_residual_m"] == MAX_ANCHOR_RESIDUAL_M
+    assert georef["residual_ceiling_m"] == MAX_ANCHOR_RESIDUAL_M
     assert georef["residual_rms_m"] < MAX_ANCHOR_RESIDUAL_M
     assert georef["scale"] == pytest.approx(TRUTH.scale, rel=5e-3)
     assert manifest["parameters"]["noise_std_m"] == pytest.approx(NOISE_M)

@@ -238,13 +238,9 @@ def test_base_only_import_emits_honest_meta_and_manifest(tmp_path: Path) -> None
     assert manifest["inputs"]["half_width_m"] == 6.0
     snap = manifest["inputs"]["osm_snapshot"]
     assert snap["file"] == SNAPSHOT_FILE
-    assert snap["sha256"] == osm_track._sha256_file(  # pyright: ignore[reportPrivateUsage]
-        track_dir / SNAPSHOT_FILE
-    )
+    assert snap["sha256"] == osm_track.sha256_file(track_dir / SNAPSHOT_FILE)
     out_sha = manifest["outputs"]["centerline_csv_sha256"]
-    assert out_sha == osm_track._sha256_file(  # pyright: ignore[reportPrivateUsage]
-        track_dir / "centerline.csv"
-    )
+    assert out_sha == osm_track.sha256_file(track_dir / "centerline.csv")
 
 
 def test_no_width_source_is_a_typed_error(tmp_path: Path) -> None:
@@ -355,9 +351,7 @@ def test_widths_stage_traces_and_records_provenance(tmp_path: Path) -> None:
         "meta"
     ]
     assert meta["width_source"] == "orthophoto"
-    assert meta["width_control_points_sha"] == osm_track._sha256_file(  # pyright: ignore[reportPrivateUsage]
-        cp_path
-    )
+    assert meta["width_control_points_sha"] == osm_track.sha256_file(cp_path)
     manifest = yaml.safe_load((track_dir / MANIFEST_FILE).read_text(encoding="utf-8"))
     widths_in = manifest["inputs"]["widths"]
     assert widths_in["image"]["file"] == "orthophoto.npz"

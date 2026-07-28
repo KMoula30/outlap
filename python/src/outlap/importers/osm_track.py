@@ -74,15 +74,17 @@ import yaml
 from numpy.typing import NDArray
 
 from outlap.importers.lidar_dem import (
-    PRESETS as LIDAR_PRESETS,
-)
-from outlap.importers.lidar_dem import (
+    EARTH_RADIUS_M,
     EnuFrame,
+    ResolvedTiles,
     estimate_banking,
     fuse_elevation,
     make_enu_sampler,
     open_dtm,
     resolve_tiles,
+)
+from outlap.importers.lidar_dem import (
+    PRESETS as LIDAR_PRESETS,
 )
 from outlap.importers.width_trace import (
     AffineTransform,
@@ -132,7 +134,6 @@ _HEADERS = {
 # opentopodata: free, no key; EU-DEM (25 m) covers the European circuits, SRTM is the global fallback.
 _DEM_URL = "https://api.opentopodata.org/v1/{dataset}"
 _DEM_DATASETS = ("eudem25m", "srtm30m")
-_EARTH_R = 6_371_000.0
 
 # DEM sampling/fusion numerics (recorded in the manifest so a re-run is checkable).
 _DEM_STEP_M = 20.0  # a 25-30 m DEM does not resolve 3 m spacing
@@ -343,16 +344,16 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dp = math.radians(lat2 - lat1)
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * _EARTH_R * math.asin(math.sqrt(a))
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
-def _to_enu(
-    lats: Sequence[float], lons: Sequence[float]
-) -> tuple[list[float], list[float], EnuFrame]:
+def _to_enu(lats: Sequence[float], lons: Sequence[float]) -> tuple[F, F, EnuFrame]:
     """Equirectangular projection to a local ENU metric frame centred on the centroid.
 
-    Returns the frame too (:class:`outlap.importers.lidar_dem.EnuFrame` implements the exact
-    inverse), so DEM/LiDAR/orthophoto stages speak the same local frame as the centerline.
+    Only the origin is this function's own work; the projection itself is
+    :meth:`outlap.importers.lidar_dem.EnuFrame.to_enu`, so the centerline cannot drift from the
+    frame DEM/LiDAR/orthophoto stages sample in — and that frame (which implements the exact
+    inverse) is returned alongside the metres.
     """
     # A closed loop repeats its first node so the closing edge enters the arc length. That
     # duplicate must not vote twice here: it drags the origin toward the first node by
@@ -361,12 +362,13 @@ def _to_enu(
     count = len(lats)
     if count > 1 and lats[0] == lats[-1] and lons[0] == lons[-1]:
         count -= 1
-    lat0 = sum(lats[:count]) / count
-    lon0 = sum(lons[:count]) / count
-    coslat = math.cos(math.radians(lat0))
-    x = [math.radians(lon - lon0) * _EARTH_R * coslat for lon in lons]
-    y = [math.radians(lat - lat0) * _EARTH_R for lat in lats]
-    return x, y, EnuFrame(lat0_deg=lat0, lon0_deg=lon0)
+    frame = EnuFrame(
+        lat0_deg=sum(lats[:count]) / count, lon0_deg=sum(lons[:count]) / count
+    )
+    x, y = frame.to_enu(
+        np.asarray(lats, dtype=np.float64), np.asarray(lons, dtype=np.float64)
+    )
+    return x, y, frame
 
 
 # --- snapshot pinning (KTD7) ---------------------------------------------------------------------
@@ -377,11 +379,17 @@ def _canonical_json(doc: Any) -> str:
     return json.dumps(doc, sort_keys=True, indent=1) + "\n"
 
 
-def _sha256_text(text: str) -> str:
+def sha256_text(text: str) -> str:
+    """SHA-256 (hex) of ``text`` as UTF-8 — the content pin for a generated file.
+
+    Shared with the FastF1 driven-line importer: one hashing implementation between them, so a
+    manifest hash means the same thing whichever importer wrote it.
+    """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
+def sha256_file(path: Path) -> str:
+    """SHA-256 (hex) of ``path``'s bytes — the content pin for a committed input (KTD7)."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -432,8 +440,12 @@ class FittedCenterline:
         return int(self.s.size)
 
 
-def _headings(x: F, y: F, closed: bool) -> F:
-    """Travel direction ψ from +x per station (central differences; wraps when closed)."""
+def headings(x: F, y: F, *, closed: bool) -> F:
+    """Travel direction ψ from +x per station (central differences; wraps when closed).
+
+    Shared by every consumer of an emitted centerline (both importers and the width-trace QA
+    tool), so the heading a station is traced/sampled along cannot drift between them.
+    """
     if closed:
         dx = np.roll(x, -1) - np.roll(x, 1)
         dy = np.roll(y, -1) - np.roll(y, 1)
@@ -479,7 +491,7 @@ def fit_snapshot_centerline(
         x=samples.x_m,
         y=samples.y_m,
         kappa=samples.kappa_per_m,
-        heading=_headings(samples.x_m, samples.y_m, closed),
+        heading=headings(samples.x_m, samples.y_m, closed=closed),
         lat=lat_s,
         lon=lon_s,
         frame=frame,
@@ -632,7 +644,7 @@ def run_widths_stage(
                 f"widths stage: control-point file not found: {control_points_path}"
             )
         cps = load_control_points(control_points_path)
-        cp_sha = _sha256_file(control_points_path)
+        cp_sha = sha256_file(control_points_path)
     source = ArrayImageSource(image, AffineTransform(*coeffs))
     stations = Stations(
         s_m=fc.s,
@@ -646,7 +658,7 @@ def run_widths_stage(
     if cp_sha is not None:
         meta["width_control_points_sha"] = cp_sha
     manifest: dict[str, Any] = {
-        "image": {"file": image_path.name, "sha256": _sha256_file(image_path)},
+        "image": {"file": image_path.name, "sha256": sha256_file(image_path)},
         "provenance": result.provenance.as_meta(),
     }
     if control_points_path is not None:
@@ -697,16 +709,10 @@ def run_lidar_stage(
         tiles = resolve_tiles(source, tile_ids, cache_dir)
         mosaic = open_dtm(tiles.paths, source=source)
         sampler = make_enu_sampler(mosaic, crs=source.crs, frame=fc.frame)
-        manifest: dict[str, Any] = dict(tiles.manifest())
     else:
-        manifest = {
-            "source": source.source_id,
-            "dataset": source.dataset,
-            "version": source.version,
-            "license": source.license,
-            "crs": source.crs,
-            "tiles": list(tile_ids),
-        }
+        # An injected sampler resolves no files, but the provenance it pins is the same record.
+        tiles = ResolvedTiles(source=source, tile_ids=tuple(tile_ids), paths=())
+    manifest: dict[str, Any] = dict(tiles.manifest())
     profile = fuse_elevation(
         fc.s,
         np.asarray(sampler(fc.x, fc.y), dtype=np.float64),
@@ -774,7 +780,12 @@ def render_centerline_csv(
     return "\n".join(lines) + "\n"
 
 
-def _render_yaml(doc: dict[str, Any], header: str) -> str:
+def render_yaml(doc: dict[str, Any], header: str) -> str:
+    """Render a ``track.yaml``/``manifest.yaml`` document under its provenance header.
+
+    Shared with the FastF1 driven-line importer for the same reason as
+    :func:`render_centerline_csv`: one layout, so the emitted YAML cannot drift between them.
+    """
     return header + yaml.safe_dump(
         doc, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
@@ -880,10 +891,10 @@ def run_import(
         )
         snapshot = fetch_raceway_ways(lat, lon, radius_m)
         files[SNAPSHOT_FILE] = _canonical_json(snapshot)
-        snapshot_sha = _sha256_text(files[SNAPSHOT_FILE])
+        snapshot_sha = sha256_text(files[SNAPSHOT_FILE])
     else:
         snapshot = load_snapshot(track_dir)
-        snapshot_sha = _sha256_file(track_dir / SNAPSHOT_FILE)
+        snapshot_sha = sha256_file(track_dir / SNAPSHOT_FILE)
 
     # 2) Base centerline: assembly + the curvature-first fit (KTD2/KTD3).
     fc = fit_snapshot_centerline(snapshot, name, ds_m=ds_m, noise_std_m=noise_std_m)
@@ -964,10 +975,10 @@ def run_import(
         if refresh_snapshot:
             samples = refresh_dem_samples(fc)
             files[DEM_SAMPLES_FILE] = _canonical_json(samples)
-            dem_sha = _sha256_text(files[DEM_SAMPLES_FILE])
+            dem_sha = sha256_text(files[DEM_SAMPLES_FILE])
         else:
             samples = load_dem_samples(track_dir)
-            dem_sha = _sha256_file(track_dir / DEM_SAMPLES_FILE)
+            dem_sha = sha256_file(track_dir / DEM_SAMPLES_FILE)
         z = _fuse_dem(fc, samples)
         dem_dataset = str(samples["dataset"])
         manifest_inputs["dem_samples"] = {
@@ -979,6 +990,9 @@ def run_import(
     else:
         z = np.zeros(len(fc))
         notes.append("flat import (--no-dem): z = 0 everywhere")
+
+    if georef_transform:
+        manifest_inputs["georef_transform"] = georef_transform
 
     # 5) Meta + manifest (KTD7/KTD9/KTD10).
     stages_ran = ["base", *stage_list]
@@ -1036,16 +1050,14 @@ def run_import(
             "dem_knot_spacing_m": _DEM_KNOT_SPACING_M,
         },
         "inputs": manifest_inputs,
-        "outputs": {"centerline_csv_sha256": _sha256_text(csv_text)},
+        "outputs": {"centerline_csv_sha256": sha256_text(csv_text)},
     }
-    if georef_transform:
-        manifest["inputs"]["georef_transform"] = georef_transform
 
     files["centerline.csv"] = csv_text
-    files["track.yaml"] = _render_yaml(
+    files["track.yaml"] = render_yaml(
         track_doc, "# Imported by outlap.importers.osm_track — public data only.\n"
     )
-    files[MANIFEST_FILE] = _render_yaml(
+    files[MANIFEST_FILE] = render_yaml(
         manifest,
         "# Input manifest (KTD7): this import is a pure function of these committed inputs.\n",
     )
