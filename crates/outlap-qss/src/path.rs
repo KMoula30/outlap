@@ -8,6 +8,7 @@
 //! * `κ_l = κ_h·cosθ_g·cosθ_b + κ_v·sinθ_b`  — road-plane lateral curvature
 //! * `κ_n = κ_v·cosθ_b − κ_h·cosθ_g·sinθ_b`  — road-normal curvature (crest unloads, dip loads)
 
+use outlap_schema::sim::Sim;
 use outlap_track::Track;
 
 /// The minimum number of stations, so the passes and lap-time sum are well defined.
@@ -32,6 +33,27 @@ pub struct T0PathOptions {
     /// stations at the sampled step (`Some(0.0)` disables smoothing). `None` keeps the legacy
     /// noise-rejection default — a 6-station half-width, ~25 m at the default 2 m step.
     pub curvature_smooth_m: Option<f64>,
+}
+
+/// Resolve the recorded track/path sim numerics (MT) for one run — one resolver per entry point,
+/// the [`Sim::resolved_fz_coupling`] pattern.
+///
+/// Returns the **evaluation track** — the loaded geometry carrying this run's
+/// `sim.vertical_baseline_m`, which governs its grade/κ_v finite differences and rides on the parent
+/// track (so racing lines offset from it inherit the override) — alongside the [`T0PathOptions`]
+/// that shape the sampled path: `sim.flat_track` and the `sim.path_curvature_smooth_m` boxcar. The
+/// defaults reproduce the historical behavior bit-for-bit (30 m baseline, legacy 6-station
+/// smoothing).
+pub fn resolve_track_path_numerics(track: &Track, sim: &Sim) -> (Track, T0PathOptions) {
+    (
+        track
+            .clone()
+            .with_vertical_baseline_m(sim.vertical_baseline_m),
+        T0PathOptions {
+            flat: sim.flat_track,
+            curvature_smooth_m: sim.path_curvature_smooth_m,
+        },
+    )
 }
 
 /// Per-station geometry for the T0 velocity passes (SoA; queried by index).

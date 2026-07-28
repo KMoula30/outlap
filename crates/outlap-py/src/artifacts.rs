@@ -312,25 +312,13 @@ pub(crate) fn time_weighted(
     let t0v = T0Vehicle::assemble(&resolved, &conditions, &vl, &t0_opts).map_err(err)?;
     let flat = sim_cfg.flat_track;
     let fzc = sim_cfg.resolved_fz_coupling();
-    // The recorded track/path sim numerics (MT) govern the speed pre-pass exactly as they govern a
-    // solve: the baseline override rides on the parent track (offset lines inherit it) and the
-    // smoothing window shapes each candidate's sampled path. Defaults reproduce today's behavior
-    // bit-for-bit; the QP itself keeps reading the raw spline curvature.
-    let track_eval = track
-        .inner
-        .clone()
-        .with_vertical_baseline_m(sim_cfg.vertical_baseline_m);
+    // The same recorded numerics govern the speed pre-pass as govern a solve; the QP itself keeps
+    // reading the raw spline curvature.
+    let (track_eval, path_opts) = resolve_track_path_numerics(&track.inner, &sim_cfg);
 
     // A T0/GGV speed pre-pass on `line`, returning its per-station (s, v) and modelled lap time.
     let prepass = |line: &outlap_track::Track| -> PyResult<(Vec<f64>, Vec<f64>, f64)> {
-        let path = T0Path::from_track_with(
-            line,
-            ds_m,
-            outlap_qss::T0PathOptions {
-                flat,
-                curvature_smooth_m: sim_cfg.path_curvature_smooth_m,
-            },
-        );
+        let path = T0Path::from_track_with(line, ds_m, path_opts);
         let lap = solve_t0(
             &t0v,
             env.clone(),

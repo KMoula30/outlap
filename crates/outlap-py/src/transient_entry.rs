@@ -937,21 +937,8 @@ pub(crate) fn prepare_transient(
         allow_degraded: sim_cfg.allow_degraded,
         ..T0Options::default()
     };
-    // The recorded track/path sim numerics (MT): `vertical_baseline_m` governs this run's grade/κ_v
-    // finite differences and `path_curvature_smooth_m` the sampled-path boxcar. The defaults
-    // reproduce the historical behavior bit-for-bit (30 m baseline, legacy 6-station smoothing).
-    let track_eval = track
-        .inner
-        .clone()
-        .with_vertical_baseline_m(sim_cfg.vertical_baseline_m);
-    let path = T0Path::from_track_with(
-        &track_eval,
-        ds_m,
-        outlap_qss::T0PathOptions {
-            flat,
-            curvature_smooth_m: sim_cfg.path_curvature_smooth_m,
-        },
-    );
+    let (track_eval, path_opts) = resolve_track_path_numerics(&track.inner, &sim_cfg);
+    let path = T0Path::from_track_with(&track_eval, ds_m, path_opts);
     let line_descriptor = line_descriptor(raceline_ds_m, raceline_generator, raceline_iterations);
     let mut t1v =
         T1Vehicle::assemble(&resolved, &conditions, &vl, sim_cfg.allow_degraded).map_err(err)?;

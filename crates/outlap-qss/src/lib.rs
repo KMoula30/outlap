@@ -49,7 +49,7 @@ pub mod vehicle;
 pub use error::{T0Error, T1Error};
 pub use ers::ErsCoupling;
 pub use margin::corner_scaled_targets;
-pub use path::{T0Path, T0PathOptions};
+pub use path::{resolve_track_path_numerics, T0Path, T0PathOptions};
 pub use qss::{
     solve_stint, solve_t0, solve_t1, tier_not_implemented, Couplings, ErsSlowLog, LapRequest,
     MarchConvergence, QssError, QssLap, QssStintResult, SetupLog, SlowCoupling, SlowLog,
