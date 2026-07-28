@@ -25,7 +25,11 @@ pipeline composes (HANDOFF §12 MT, unit U3):
 * **Elevation** (:func:`fuse_elevation`): DTM samples along the centerline are fused with the
   *same* penalised P-spline machinery as ``outlap.trackcal.geometry`` (one shared smoother —
   cyclic basis for closed tracks, so z, z' and z'' are continuous across the ``s = 0`` seam),
-  replacing the service-interpolation + ``UnivariateSpline`` chain for preset tracks.
+  replacing the service-interpolation + ``UnivariateSpline`` chain for preset tracks. That
+  includes the shared guarded twicing step: the Morozov discrepancy principle constrains the
+  *residual*, which shrinks undulation amplitude — and here the product is grade and vertical
+  curvature, so the shrink is worse than on the plan-view fit (measured −47% on a 3 m / 460 m
+  undulation at the OSM importer's 1.0 m declaration, −22% corrected).
 * **Banking** (:func:`estimate_banking`): per-row cross-track sections perpendicular to the
   centerline, multiple symmetric lateral samples per section, averaged over a small
   longitudinal window for SNR. Detrending is an **odd/even decomposition**: with symmetric
@@ -55,13 +59,17 @@ import numpy as np
 from numpy.typing import NDArray
 
 # ONE shared smoother (CLAUDE.md interpolation rule, plan KTD2): elevation fusion reuses the
-# trackcal penalised P-spline machinery on a 1-D z(s) target instead of adding a second one.
+# trackcal penalised P-spline machinery — basis, penalty, discrepancy search and the guarded
+# twicing bias correction — on a 1-D z(s) target instead of adding a second one.
 from outlap.trackcal.geometry import (
-    _LAMBDA_FLOOR,  # pyright: ignore[reportPrivateUsage]
-    _design_matrix,  # pyright: ignore[reportPrivateUsage]
-    _eval_spline,  # pyright: ignore[reportPrivateUsage]
-    _match_noise,  # pyright: ignore[reportPrivateUsage]
-    _second_difference,  # pyright: ignore[reportPrivateUsage]
+    LAMBDA_CEILING,
+    LAMBDA_FLOOR,
+    bias_correct,
+    design_matrix,
+    eval_spline,
+    match_noise,
+    second_difference,
+    system_matrix,
 )
 
 if TYPE_CHECKING:
@@ -468,8 +476,24 @@ class ElevationProfile:
 
     ``z_m`` is the fused elevation at the input stations; :meth:`evaluate` gives z and its
     first two arc-length derivatives anywhere (closed profiles wrap modulo ``length_m`` and
-    are C² across the seam — the basis is cyclic). ``residual_rms_m`` and
-    ``smoothing_lambda`` record what the discrepancy search settled on, for honest reports.
+    are C² across the seam — the basis is cyclic).
+
+    The reporting fields mirror ``outlap.trackcal.geometry.CenterlineFit`` so a fused profile
+    can be reported as honestly as a centerline fit (never a bare "residual rms" — after the
+    bias correction it sits well below the declaration, which read alone looks like the
+    interpolation anti-pattern):
+
+    * ``residual_rms_m`` — RMS distance from the DTM samples to the profile that is actually
+      reported (post bias correction).
+    * ``discrepancy_rms_m`` — the residual the ``λ`` search matched; equals ``noise_std_m``
+      whenever the search converged (i.e. unless ``lambda_capped``).
+    * ``smoothing_lambda`` — the ``λ`` the discrepancy search settled on.
+    * ``bias_corrected`` — whether the twicing step was applied (False for exact data, an
+      explicit ``smoothing``, ``bias_correction=False``, or a vetoed step).
+    * ``effective_dof`` — trace of the reported smoother, the honest "am I interpolating"
+      number: interpolation would equal the station count.
+    * ``lambda_capped`` — the search hit the ``λ`` ceiling without reaching the declared
+      noise, so ``discrepancy_rms_m`` is below ``noise_std_m``.
     """
 
     closed: bool
@@ -477,7 +501,11 @@ class ElevationProfile:
     s0_m: float
     z_m: F
     residual_rms_m: float
+    discrepancy_rms_m: float
     smoothing_lambda: float
+    bias_corrected: bool
+    effective_dof: float
+    lambda_capped: bool
     cells: int
     coeff: F
 
@@ -488,7 +516,7 @@ class ElevationProfile:
             u = np.mod((s - self.s0_m) / self.length_m, 1.0)
         else:
             u = np.clip((s - self.s0_m) / self.length_m, 0.0, 1.0)
-        val = _eval_spline(self.coeff, u, self.cells, self.closed, order)
+        val = eval_spline(self.coeff, u, self.cells, self.closed, order)
         return val / self.length_m**order  # chain rule: u = (s - s0) / L is linear
 
 
@@ -501,6 +529,7 @@ def fuse_elevation(
     noise_std_m: float = 0.1,
     knot_spacing_m: float = 20.0,
     smoothing: float | None = None,
+    bias_correction: bool = True,
 ) -> ElevationProfile:
     """Fuse noisy DTM elevation samples into a C² profile z(s).
 
@@ -510,6 +539,14 @@ def fuse_elevation(
     ``0.0`` near-interpolates exact data). ``length_m`` is the closed lap length (station
     ``s[-1]`` is not the seam); ``smoothing`` overrides the discrepancy search with an
     explicit λ. Raises :class:`LidarDemError` on degenerate input.
+
+    ``bias_correction`` applies the shared guarded twicing step
+    (:func:`outlap.trackcal.geometry.bias_correct`) that removes the discrepancy principle's
+    amplitude shrink — the 1-D half of the same defect, and the one that feeds grade and
+    vertical curvature. It is a no-op — bit for bit — for exact data or an explicit
+    ``smoothing``, and self-vetoes when the declared noise is under-stated or the stations are
+    too sparse against ``knot_spacing_m`` for the residual to carry recoverable signal;
+    ``False`` reproduces the uncorrected operator exactly.
     """
     s = np.asarray(s_m, dtype=np.float64)
     z = np.asarray(z_m, dtype=np.float64)
@@ -548,33 +585,47 @@ def fuse_elevation(
             raise LidarDemError("too few stations for an open elevation fit")
     u = (s - s0) / length
 
-    b_mat = _design_matrix(u, cells, closed, 0)
+    b_mat = design_matrix(u, cells, closed, 0)
     btb = b_mat.T @ b_mat
     btz = b_mat.T @ z
-    d_mat = _second_difference(cells, closed)
+    d_mat = second_difference(cells, closed)
 
     def solve(lam: float, weights: F) -> tuple[F, float]:
-        pen = d_mat.T @ (weights[:, None] * d_mat)
-        scale = float(np.trace(btb)) / max(float(np.trace(pen)), 1e-300)
-        coeff = np.linalg.solve(btb + (lam * scale) * pen, btz)
+        coeff = np.linalg.solve(system_matrix(btb, d_mat, lam, weights), btz)
         resid = z - b_mat @ coeff
         return coeff, float(np.sqrt(np.mean(resid**2)))
 
     uniform = np.ones(d_mat.shape[0], dtype=np.float64)
     if smoothing is not None:
-        lam = max(float(smoothing), _LAMBDA_FLOOR)
+        lam = max(float(smoothing), LAMBDA_FLOOR)
         coeff, rms = solve(lam, uniform)
     else:
-        lam, coeff, rms = _match_noise(solve, uniform, noise_std_m)
+        lam, coeff, rms = match_noise(solve, uniform, noise_std_m)
 
-    z_fused = _eval_spline(coeff, u, cells, closed, 0)
+    # One guarded twicing step at the λ the discrepancy search picked (shared with the
+    # centerline fit); an explicit λ means "give me exactly that operator", so it skips.
+    corrected = bias_correct(
+        b_mat,
+        btb,
+        z,
+        coeff,
+        system_matrix(btb, d_mat, lam, uniform),
+        noise_std_m=noise_std_m,
+        enabled=bias_correction and smoothing is None,
+    )
+    coeff = corrected.coeff
+    z_fused = eval_spline(coeff, u, cells, closed, 0)
     return ElevationProfile(
         closed=closed,
         length_m=length,
         s0_m=s0,
         z_m=z_fused,
-        residual_rms_m=rms,
+        residual_rms_m=corrected.residual_rms_m,
+        discrepancy_rms_m=rms,
         smoothing_lambda=lam,
+        bias_corrected=corrected.applied,
+        effective_dof=corrected.effective_dof,
+        lambda_capped=smoothing is None and lam >= LAMBDA_CEILING,
         cells=cells,
         coeff=np.ascontiguousarray(coeff),
     )

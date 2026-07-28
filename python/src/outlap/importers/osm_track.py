@@ -401,7 +401,15 @@ def load_snapshot(track_dir: Path) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class FittedCenterline:
-    """The fitted, uniformly resampled centerline in the local ENU frame (SI, ISO 8855)."""
+    """The fitted, uniformly resampled centerline in the local ENU frame (SI, ISO 8855).
+
+    The fit-reporting fields carry through from
+    :class:`outlap.trackcal.geometry.CenterlineFit`: ``discrepancy_rms_m`` is the residual the
+    ``λ`` search matched (the declared noise, unless the search saturated), ``residual_rms_m``
+    the reported curve's own residual — below the declaration once the bias correction runs,
+    so the two must always be printed together — ``bias_corrected`` whether that step applied,
+    and ``effective_dof`` the honest "am I interpolating" number.
+    """
 
     name: str
     closed: bool
@@ -415,7 +423,10 @@ class FittedCenterline:
     lon: F
     frame: EnuFrame
     residual_rms_m: float
+    discrepancy_rms_m: float
     smoothing_lambda: float
+    bias_corrected: bool
+    effective_dof: float
 
     def __len__(self) -> int:
         return int(self.s.size)
@@ -473,7 +484,10 @@ def fit_snapshot_centerline(
         lon=lon_s,
         frame=frame,
         residual_rms_m=fit.residual_rms_m,
+        discrepancy_rms_m=fit.discrepancy_rms_m,
         smoothing_lambda=fit.smoothing_lambda,
+        bias_corrected=fit.bias_corrected,
+        effective_dof=fit.effective_dof,
     )
 
 
@@ -867,9 +881,13 @@ def run_import(
 
     # 2) Base centerline: assembly + the curvature-first fit (KTD2/KTD3).
     fc = fit_snapshot_centerline(snapshot, name, ds_m=ds_m, noise_std_m=noise_std_m)
+    # Never a bare "residual rms": after the bias correction the reported curve sits well
+    # inside the declared noise, which read alone looks like an interpolating fit. Declared →
+    # matched → final says what the λ search targeted and what actually shipped.
     print(
-        f"  fitted {len(fc)} stations, {fc.length_m:.0f} m "
-        f"(residual rms {fc.residual_rms_m:.2f} m)",
+        f"  fitted {len(fc)} stations, {fc.length_m:.0f} m (noise declared "
+        f"{noise_std_m:.2f} m, λ matched {fc.discrepancy_rms_m:.2f} m, final residual "
+        f"{fc.residual_rms_m:.2f} m)",
         file=sys.stderr,
     )
 
