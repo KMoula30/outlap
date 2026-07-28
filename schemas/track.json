@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "banking_keypoints": {
-      "description": "Optional sparse banking keypoints, interpolated in `s` (§9.3). When present they OVERRIDE\nthe centerline's `banking_deg` column (the importer writes keypoints when per-row DEM\nbanking is not available).",
+      "description": "Optional sparse banking keypoints, interpolated in `s` (§9.3) — the hand-annotation path\nwhen per-row LiDAR banking is not available. The centerline's dense `banking_deg` column\nand this list are two competing declarations: a document carrying keypoints alongside any\nNON-zero column value is rejected at load (track/1.1 semantic check); keypoints over an\nall-zero placeholder column remain valid and drive the banking channel.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/BankingKeypoint"
@@ -121,6 +121,37 @@
             "null"
           ]
         },
+        "georef_transform": {
+          "description": "Fitted georeference transform (track ENU frame → real-world), recorded as a compact\nstring when telemetry georeferencing supplied one; the numeric transform of record\nlives in the reference-metrics CSV header (KTD7).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "importer_version": {
+          "description": "Version of the importer build that produced this track dir (track/1.1, KTD7).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lidar_dataset": {
+          "description": "LiDAR DTM dataset + version that fused `z`/banking, e.g.\n`icgc-lidar-territorial-dtm v3.1` (track/1.1, MT).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lidar_tiles": {
+          "description": "LiDAR tile IDs consumed by the fusion (mirrors the track dir's input manifest).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "notes": {
           "description": "Free-form notes.",
           "type": [
@@ -130,6 +161,30 @@
         },
         "source": {
           "description": "How the centerline was sourced, e.g. `osm+dem`, `tumftm`, `survey`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stages": {
+          "description": "Which import stages ran (`base`, `widths`, `lidar`, `telemetry-audit`) — the honest\nrecord `accuracy_class` derives from (track/1.1, KTD10).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "width_control_points_sha": {
+          "description": "SHA-256 (hex) of the width control-point CSV the edge trace ran with — pins the\ncommitted hand-QA input so a re-run is checkable against the manifest (KTD7).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "width_source": {
+          "description": "Where per-row widths came from (track/1.1, MT): `orthophoto` (edge-traced, U4),\n`declared` (an explicit `--half-width` degraded import — honest, recorded, never\nsilent), `tumftm` (measured upstream), `survey`, …",
           "type": [
             "string",
             "null"
