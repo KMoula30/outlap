@@ -24,6 +24,23 @@ the fitted ``|κ|`` is high — ``w = w_min + (1 − w_min) / (1 + (|κ| R_adapt
 re-matched. Under-smoothing leaves κ noise on straights; over-smoothing washes out exactly the
 30–35 m apexes; the adaptive weights resolve that tension.
 
+**Bias correction (twicing).** The discrepancy principle constrains the *residual*, not the
+penalty, and that constraint alone biases curvature: on a closed convex curve any isotropic
+roughness penalty that leaves the residual RMS at ``σ`` shrinks the fitted radius by
+``dR = √2 σ`` — measured at −4.2% for a 34 m apex at ``σ = 1`` m (the OSM digitisation
+regime), and no choice of penalty removes it. So the fit ships exactly one guarded *twicing*
+step: re-smooth the residual of the smooth and add it back (Tukey 1977; one step of
+L2-boosting, Bühlmann & Yu 2003). With ``S`` the smoother at the ``λ`` the discrepancy search
+already picked, the reported curve is ``[I − (I − S)²] z`` instead of ``S z``. ``λ``, its
+data-dependence and its meaning are untouched; the residual ``λ`` matched is reported
+separately as ``discrepancy_rms_m``, so ``residual_rms_m`` stops being a tautology and becomes
+what it says (≈0.65 σ after the correction). Exactly *one* step is taken — a second pushes
+curvature noise on straights past 2× the uncorrected fit for ~2 pp of apex bias — and the step
+is **vetoed** when it is no larger than what pure declared-σ noise would push through the same
+operator, which is exactly the under-declared-σ regime where boosting amplifies noise instead
+of recovering signal. ``bias_correction=False`` reproduces the uncorrected operator bit for
+bit; explicit ``smoothing`` and exact data (``noise_std_m = 0``) skip the step outright.
+
 Curvature uses the parameterization-invariant form ``κ = (x'y'' − y'x'') / (x'² + y'²)^{3/2}``
 with derivatives taken analytically in the spline parameter; arc length is integrated from the
 fit so all public APIs speak metres of fitted arc length (SI, ISO 8855: z up, positive κ =
@@ -46,6 +63,11 @@ Citations (paper symbols above follow these):
   splines for GPS tracks.
 * V. A. Morozov (1966), "On the solution of functional equations by the method of
   regularization" — the discrepancy principle used to pick ``λ``.
+* J. W. Tukey (1977), *Exploratory Data Analysis*, Addison-Wesley, ch. 16 — "twicing":
+  smoothing the residual of a smooth and adding it back, ``[I − (I − S)²]``.
+* P. Bühlmann & B. Yu (2003), "Boosting with the L2 loss: regression and classification",
+  JASA 98(462), 324–339 — twicing as one step of L2-boosting; the bias/variance path of
+  repeated re-smoothing (why the step count is one, and why it is guarded).
 
 Consulted repositories (approach only, no code taken; clean-room per CLAUDE.md hard rule 2):
 TUMFTM ``trajectory_planning_helpers`` and TUMFTM ``racetrack-database`` (both LGPL-3.0) —
@@ -63,8 +85,12 @@ from numpy.typing import NDArray
 F = NDArray[np.float64]
 
 
-class _Solver(Protocol):
-    """The per-λ penalised solve closure (coefficients, per-axis residual RMS)."""
+class PenalisedSolver(Protocol):
+    """The per-λ penalised solve closure (coefficients, per-axis residual RMS).
+
+    Part of the shared smoother kernel (see the section below): the elevation fuser passes its
+    own 1-D closure of this shape to :func:`match_noise`.
+    """
 
     def __call__(self, lam: float, weights: F) -> tuple[F, float]: ...
 
@@ -72,9 +98,16 @@ class _Solver(Protocol):
 #: Minimum number of distinct input points for a centerline fit.
 MIN_POINTS = 10
 
-# Numerical guards for the penalised solve.
-_LAMBDA_FLOOR = 1e-9
+#: Smallest ``λ`` the discrepancy search will use (a bare 0 leaves the normal equations
+#: singular for a redundant basis). Part of the shared smoother kernel.
+LAMBDA_FLOOR = 1e-9
+
 _LOG_LAMBDA_MAX = 6.0
+
+#: Largest ``λ`` the discrepancy search will use; reaching it means the declared noise could
+#: not be matched and the fit records ``lambda_capped``. Part of the shared smoother kernel.
+LAMBDA_CEILING = 10.0**_LOG_LAMBDA_MAX
+
 _BISECT_ITERS = 40
 _WEIGHT_FLOOR = 0.05
 
@@ -103,14 +136,32 @@ class CenterlineFit:
 
     ``length_m`` is the arc length of the *fitted* curve; for closed fits every ``s`` query
     wraps modulo ``length_m`` (the basis is cyclic, so the fit is C² across the seam).
-    ``residual_rms_m`` (per-axis) and ``smoothing_lambda`` record what the discrepancy search
-    settled on — surfaced so importers can report the fit honestly.
+
+    The reporting fields exist so importers can report the fit honestly (never a bare
+    "residual rms" — at a 1 m declaration a *corrected* fit sits near 0.65 m, which read alone
+    looks like the interpolation anti-pattern):
+
+    * ``residual_rms_m`` — per-axis RMS distance from the samples to the curve that is
+      actually reported (post bias correction).
+    * ``discrepancy_rms_m`` — the residual the ``λ`` search matched; equals ``noise_std_m``
+      whenever the search converged (i.e. unless ``lambda_capped``).
+    * ``smoothing_lambda`` — the ``λ`` the discrepancy search settled on.
+    * ``bias_corrected`` — whether the twicing step was applied (False for exact data, an
+      explicit ``smoothing``, ``bias_correction=False``, or a vetoed step).
+    * ``effective_dof`` — trace of the reported smoother, the honest "am I interpolating"
+      number: interpolation would equal the sample count.
+    * ``lambda_capped`` — the search hit :data:`LAMBDA_CEILING` without reaching the declared
+      noise, so ``discrepancy_rms_m`` is below ``noise_std_m``.
     """
 
     closed: bool
     length_m: float
     residual_rms_m: float
+    discrepancy_rms_m: float
     smoothing_lambda: float
+    bias_corrected: bool
+    effective_dof: float
+    lambda_capped: bool
     cells: int
     coeff_x: F
     coeff_y: F
@@ -128,8 +179,8 @@ class CenterlineFit:
     def evaluate(self, s_m: F) -> tuple[F, F]:
         """Position ``(x, y)`` in metres at arc length ``s_m`` (wraps when closed)."""
         u = self._s_to_u(s_m)
-        x = _eval_spline(self.coeff_x, u, self.cells, self.closed, 0)
-        y = _eval_spline(self.coeff_y, u, self.cells, self.closed, 0)
+        x = eval_spline(self.coeff_x, u, self.cells, self.closed, 0)
+        y = eval_spline(self.coeff_y, u, self.cells, self.closed, 0)
         return x, y
 
     def curvature(self, s_m: F) -> F:
@@ -139,10 +190,10 @@ class CenterlineFit:
         (parameterization-invariant, so spline-parameter derivatives suffice).
         """
         u = self._s_to_u(s_m)
-        dx = _eval_spline(self.coeff_x, u, self.cells, self.closed, 1)
-        dy = _eval_spline(self.coeff_y, u, self.cells, self.closed, 1)
-        ddx = _eval_spline(self.coeff_x, u, self.cells, self.closed, 2)
-        ddy = _eval_spline(self.coeff_y, u, self.cells, self.closed, 2)
+        dx = eval_spline(self.coeff_x, u, self.cells, self.closed, 1)
+        dy = eval_spline(self.coeff_y, u, self.cells, self.closed, 1)
+        ddx = eval_spline(self.coeff_x, u, self.cells, self.closed, 2)
+        ddy = eval_spline(self.coeff_y, u, self.cells, self.closed, 2)
         speed_sq = np.maximum(dx * dx + dy * dy, 1e-300)
         return (dx * ddy - dy * ddx) / speed_sq**1.5
 
@@ -169,6 +220,7 @@ def fit_centerline(
     adaptive: bool = True,
     adapt_radius_m: float = 150.0,
     smoothing: float | None = None,
+    bias_correction: bool = True,
 ) -> CenterlineFit:
     """Fit a penalised (periodic) smoothing spline to noisy centerline points.
 
@@ -176,6 +228,11 @@ def fit_centerline(
     (FastF1-reconstructed positions sit around 0.3 m); ``0.0`` means the samples are exact and
     the fit (near-)interpolates. ``knot_spacing_m`` sets the B-spline resolution.
     ``adaptive`` enables the per-corner penalty relaxation around ``adapt_radius_m``.
+
+    ``bias_correction`` applies the one guarded twicing step (module docstring) that removes
+    the discrepancy principle's ``√2 σ`` radius shrink. It is a no-op — bit for bit — when the
+    samples are exact or ``smoothing`` is explicit, and self-vetoes when the declared noise is
+    under-stated; ``False`` reproduces the uncorrected operator exactly.
 
     ``smoothing`` overrides the discrepancy search with an explicit ``λ`` (uniform weights).
     ``smoothing=0.0`` with ``knot_spacing_m`` at the sample spacing degenerates into the naive
@@ -206,38 +263,54 @@ def fit_centerline(
         cells = int(np.clip(round(total_chord / knot_spacing_m), 4, max(n - 3, 4)))
     ncoef = cells if closed else cells + 3
 
-    b_mat = _design_matrix(u, cells, closed, 0)
+    b_mat = design_matrix(u, cells, closed, 0)
     btb = b_mat.T @ b_mat
     btz = b_mat.T @ z
-    d_mat = _second_difference(cells, closed)
+    d_mat = second_difference(cells, closed)
 
     def solve(lam: float, weights: F) -> tuple[F, float]:
-        pen = d_mat.T @ (weights[:, None] * d_mat)
-        scale = float(np.trace(btb)) / max(float(np.trace(pen)), 1e-300)
-        coeff = np.linalg.solve(btb + (lam * scale) * pen, btz)
+        coeff = np.linalg.solve(system_matrix(btb, d_mat, lam, weights), btz)
         resid = z - b_mat @ coeff
         rms = float(np.sqrt(np.mean(resid**2)))  # per-axis RMS (isotropic noise)
         return coeff, rms
 
     uniform = np.ones(d_mat.shape[0], dtype=np.float64)
+    weights = uniform
     if smoothing is not None:
-        lam = max(float(smoothing), _LAMBDA_FLOOR)
+        lam = max(float(smoothing), LAMBDA_FLOOR)
         coeff, rms = solve(lam, uniform)
     else:
-        lam, coeff, rms = _match_noise(solve, uniform, noise_std_m)
+        lam, coeff, rms = match_noise(solve, uniform, noise_std_m)
         if adaptive and noise_std_m > 0.0:
             weights = _adaptive_weights(
                 coeff, cells, closed, ncoef, adapt_radius_m=adapt_radius_m
             )
-            lam, coeff, rms = _match_noise(solve, weights, noise_std_m)
+            lam, coeff, rms = match_noise(solve, weights, noise_std_m)
 
-    coeff = coeff + center[None, :]  # partition of unity: shift restores the frame
+    # One guarded twicing step at the λ the discrepancy search picked (module docstring);
+    # an explicit λ means "give me exactly that operator", so it skips the correction.
+    corrected = bias_correct(
+        b_mat,
+        btb,
+        z,
+        coeff,
+        system_matrix(btb, d_mat, lam, weights),
+        noise_std_m=noise_std_m,
+        enabled=bias_correction and smoothing is None,
+    )
+    coeff = (
+        corrected.coeff + center[None, :]
+    )  # partition of unity: shift restores the frame
     u_grid, s_grid = _arclength_tables(coeff[:, 0], coeff[:, 1], cells, closed)
     return CenterlineFit(
         closed=closed,
         length_m=float(s_grid[-1]),
-        residual_rms_m=rms,
+        residual_rms_m=corrected.residual_rms_m,
+        discrepancy_rms_m=rms,
         smoothing_lambda=lam,
+        bias_corrected=corrected.applied,
+        effective_dof=corrected.effective_dof,
+        lambda_capped=smoothing is None and lam >= LAMBDA_CEILING,
         cells=cells,
         coeff_x=np.ascontiguousarray(coeff[:, 0]),
         coeff_y=np.ascontiguousarray(coeff[:, 1]),
@@ -286,7 +359,16 @@ def _chord_parameter(pts: F, *, closed: bool) -> tuple[F, float]:
     return cum / total, total
 
 
-# --- uniform cubic B-spline machinery -------------------------------------------------------
+# --- shared smoother kernel -----------------------------------------------------------------
+#
+# ONE penalised P-spline smoother serves every gridded fit in the package (CLAUDE.md
+# interpolation rule). The names in this section are the stable seam the elevation fuser
+# (``outlap.importers.lidar_dem.fuse_elevation``) composes into its own 1-D fit: the basis
+# (:func:`design_matrix`, :func:`eval_spline`), the penalty (:func:`second_difference`), the
+# normal-equation matrix (:func:`system_matrix`), the discrepancy search (:func:`match_noise`)
+# and the bias correction (:func:`bias_correct`). They are public *for that caller* — not part
+# of the curated ``outlap.trackcal`` API re-exported from the package root — and change only
+# with both call sites. Anything still spelled with a leading ``_`` is private to this module.
 
 
 def _basis_weights(t: F, order: int) -> F:
@@ -329,7 +411,8 @@ def _coef_columns(j: NDArray[np.int64], cells: int, closed: bool) -> NDArray[np.
     return j[:, None] + offsets[None, :]
 
 
-def _design_matrix(u: F, cells: int, closed: bool, order: int) -> F:
+def design_matrix(u: F, cells: int, closed: bool, order: int) -> F:
+    """The B-spline design matrix ``B`` (or its ``order``-th ``d/du`` derivative) at ``u``."""
     j, t = _locate(u, cells, closed)
     w = _basis_weights(t, order) * float(cells) ** order
     cols = _coef_columns(j, cells, closed)
@@ -340,14 +423,15 @@ def _design_matrix(u: F, cells: int, closed: bool, order: int) -> F:
     return mat
 
 
-def _eval_spline(coeff: F, u: F, cells: int, closed: bool, order: int) -> F:
+def eval_spline(coeff: F, u: F, cells: int, closed: bool, order: int) -> F:
+    """Evaluate the spline (or its ``order``-th ``d/du`` derivative) at parameter ``u``."""
     j, t = _locate(u, cells, closed)
     w = _basis_weights(t, order) * float(cells) ** order
     cols = _coef_columns(j, cells, closed)
     return np.sum(w * coeff[cols], axis=1)
 
 
-def _second_difference(cells: int, closed: bool) -> F:
+def second_difference(cells: int, closed: bool) -> F:
     """The D₂ operator on coefficients (cyclic rows when closed) — the roughness penalty.
 
     Open fits swap the outermost second-difference rows (two per end) for fourth-difference
@@ -380,23 +464,36 @@ def _second_difference(cells: int, closed: bool) -> F:
     return d
 
 
-# --- regularization selection ---------------------------------------------------------------
+# --- regularization selection + bias correction (shared smoother kernel) --------------------
 
 
-def _match_noise(
-    solve: _Solver,
+def system_matrix(btb: F, d_mat: F, lam: float, weights: F) -> F:
+    """The penalised normal-equation matrix ``M = BᵀB + λ s D₂ᵀΛD₂`` (Eilers & Marx 1996).
+
+    ``s = tr(BᵀB) / tr(D₂ᵀΛD₂)`` makes ``λ`` dimensionless, so one search range serves any
+    problem scale; ``weights`` are the per-region penalty weights ``Λ = diag(w)``.
+    """
+    pen = d_mat.T @ (weights[:, None] * d_mat)
+    scale = float(np.trace(btb)) / max(float(np.trace(pen)), 1e-300)
+    return btb + (lam * scale) * pen
+
+
+def match_noise(
+    solve: PenalisedSolver,
     weights: F,
     noise_std_m: float,
 ) -> tuple[float, F, float]:
     """Morozov discrepancy: bisect ``log λ`` until residual RMS matches ``noise_std_m``."""
-    lo, hi = np.log10(_LAMBDA_FLOOR), _LOG_LAMBDA_MAX
-    coeff, rms = solve(_LAMBDA_FLOOR, weights)
+    lo, hi = np.log10(LAMBDA_FLOOR), _LOG_LAMBDA_MAX
+    coeff, rms = solve(LAMBDA_FLOOR, weights)
     if (
         rms >= noise_std_m
     ):  # even the floor over-smooths (or exact data): keep the floor
-        return _LAMBDA_FLOOR, coeff, rms
+        return LAMBDA_FLOOR, coeff, rms
     coeff_hi, rms_hi = solve(10.0**hi, weights)
-    if rms_hi <= noise_std_m:  # pragma: no cover - would need absurd declared noise
+    if (
+        rms_hi <= noise_std_m
+    ):  # the ceiling cannot reach it: the caller flags lambda_capped
         return 10.0**hi, coeff_hi, rms_hi
     for _ in range(_BISECT_ITERS):
         mid = 0.5 * (lo + hi)
@@ -408,6 +505,91 @@ def _match_noise(
     lam = 10.0 ** (0.5 * (lo + hi))
     coeff, rms = solve(lam, weights)
     return lam, coeff, rms
+
+
+@dataclass(frozen=True)
+class BiasCorrection:
+    """The outcome of the guarded twicing step for one penalised solve.
+
+    ``coeff`` is the curve to report (boosted when ``applied``, the input otherwise),
+    ``residual_rms_m`` its RMS distance to the samples, and ``effective_dof`` the trace of the
+    operator that produced it — ``tr(S)`` uncorrected, ``2 tr(S) − tr(S²)`` corrected.
+    """
+
+    coeff: F
+    residual_rms_m: float
+    applied: bool
+    effective_dof: float
+
+
+def bias_correct(
+    b_mat: F,
+    btb: F,
+    z: F,
+    coeff: F,
+    system: F,
+    *,
+    noise_std_m: float,
+    enabled: bool = True,
+) -> BiasCorrection:
+    """One guarded twicing (L2-boosting) step on a penalised smoothing-spline solve.
+
+    Shared by both smoother call sites — the 2-D centerline fit and the 1-D elevation fusion —
+    because the correction is operator-generic: ``z`` may be ``(n,)`` or ``(n, d)``, and only
+    the penalised solve's own matrices are needed. With ``S = B M⁻¹ Bᵀ`` the smoother at the
+    ``λ`` the discrepancy search picked (``system`` is that ``M``), re-smoothing the residual
+    and adding it back reports ``[I − (I − S)²] z`` instead of ``S z`` (Tukey 1977;
+    Bühlmann & Yu 2003), which removes the discrepancy principle's curvature shrink without
+    touching ``λ`` or its data-dependence.
+
+    **Veto.** The step is skipped when its own size, ``rms(δc)``, is below what pure declared-σ
+    noise would push through the same operator, ``σ √(tr(A₁A₁ᵀ) / K)`` with ``A₁ = M⁻¹Bᵀ`` and
+    ``K`` the coefficient count: there the residual being re-smoothed is noise, not the signal
+    the penalty ate. Measured to fire exactly in the under-declared-σ regime (true 1.0 m
+    declared as 0.3 m), where boosting is actively harmful, and never on well-declared data.
+
+    ``enabled=False`` or ``noise_std_m == 0`` returns the input coefficients untouched (bit for
+    bit) with the diagnostics still filled in.
+    """
+    ncoef = int(coeff.shape[0])
+    resid = z - b_mat @ coeff
+    rms = float(np.sqrt(np.mean(resid**2)))
+    # A = M⁻¹BᵀB is similar to the hat matrix S = BM⁻¹Bᵀ, so tr(S) = tr(A) and
+    # tr(S²) = tr(A²) = Σ A ⊙ Aᵀ — both from K-sized solves, never an inverse.
+    a_hat = np.linalg.solve(system, btb)
+    trace_s = float(np.trace(a_hat))
+    if not enabled or noise_std_m <= 0.0:
+        return BiasCorrection(
+            coeff=coeff, residual_rms_m=rms, applied=False, effective_dof=trace_s
+        )
+    delta = np.linalg.solve(system, b_mat.T @ resid)
+    # tr(A₁A₁ᵀ) = tr(M⁻¹BᵀB M⁻¹) = tr(M⁻¹Aᵀ) (M symmetric): the noise-amplitude yardstick.
+    noise_gain = float(np.trace(np.linalg.solve(system, a_hat.T)))
+    step_rms = float(np.sqrt(np.mean(delta**2)))
+    if step_rms < noise_std_m * float(np.sqrt(max(noise_gain, 0.0) / ncoef)):
+        return BiasCorrection(
+            coeff=coeff, residual_rms_m=rms, applied=False, effective_dof=trace_s
+        )
+    boosted = coeff + delta
+    boosted_resid = z - b_mat @ boosted
+    return BiasCorrection(
+        coeff=boosted,
+        residual_rms_m=float(np.sqrt(np.mean(boosted_resid**2))),
+        applied=True,
+        effective_dof=2.0 * trace_s - float(np.sum(a_hat * a_hat.T)),
+    )
+
+
+# Transitional aliases: ``outlap.importers.lidar_dem`` still imports the kernel under its old
+# private names and switches to the public spelling with the elevation-fusion follow-up.
+_LAMBDA_FLOOR = LAMBDA_FLOOR
+_design_matrix = design_matrix
+_eval_spline = eval_spline
+_second_difference = second_difference
+_match_noise = match_noise
+
+
+# --- internals ------------------------------------------------------------------------------
 
 
 def _adaptive_weights(
@@ -423,10 +605,10 @@ def _adaptive_weights(
         u_c = np.arange(cells, dtype=np.float64) / cells
     else:
         u_c = np.clip(np.arange(ncoef - 2, dtype=np.float64) / cells, 0.0, 1.0)
-    dx = _eval_spline(coeff[:, 0], u_c, cells, closed, 1)
-    dy = _eval_spline(coeff[:, 1], u_c, cells, closed, 1)
-    ddx = _eval_spline(coeff[:, 0], u_c, cells, closed, 2)
-    ddy = _eval_spline(coeff[:, 1], u_c, cells, closed, 2)
+    dx = eval_spline(coeff[:, 0], u_c, cells, closed, 1)
+    dy = eval_spline(coeff[:, 1], u_c, cells, closed, 1)
+    ddx = eval_spline(coeff[:, 0], u_c, cells, closed, 2)
+    ddy = eval_spline(coeff[:, 1], u_c, cells, closed, 2)
     speed_sq = np.maximum(dx * dx + dy * dy, 1e-300)
     kappa = np.abs((dx * ddy - dy * ddx) / speed_sq**1.5)
     return _WEIGHT_FLOOR + (1.0 - _WEIGHT_FLOOR) / (1.0 + (kappa * adapt_radius_m) ** 2)
@@ -436,8 +618,8 @@ def _arclength_tables(cx: F, cy: F, cells: int, closed: bool) -> tuple[F, F]:
     """Dense parameter → arc-length table for the fitted curve (trapezoidal ∫|S'| du)."""
     m = max(2048, 12 * cells) + 1
     u = np.linspace(0.0, 1.0, m)
-    dx = _eval_spline(cx, u, cells, closed, 1)
-    dy = _eval_spline(cy, u, cells, closed, 1)
+    dx = eval_spline(cx, u, cells, closed, 1)
+    dy = eval_spline(cy, u, cells, closed, 1)
     speed = np.hypot(dx, dy)
     du = u[1] - u[0]
     ds = 0.5 * (speed[1:] + speed[:-1]) * du

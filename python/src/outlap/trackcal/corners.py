@@ -7,6 +7,17 @@ Corners are detected as contiguous regions where the fitted ``|κ|`` exceeds a t
 apex: an algebraic fit initialises an iterative geometric (orthogonal-distance) refinement,
 because algebraic fits alone are biased on short arcs (Chernov 2010, ch. 4–7).
 
+**The apex statistic is smoothed; the circle fit is not.** The apex position and the window
+threshold are read from a short centred moving average of ``|κ|`` (≈2·``min_arc_m`` of arc,
+9 m at the defaults, wrap-aware on closed fits), while the circle is fitted to the true sample
+positions inside that window. ``argmax|κ|`` on a raw sampled curvature ripple is a
+single-sample statistic, and the window stops expanding at the *first* sample that dips below
+``window_kappa_frac`` of it, so κ ripple lands in the window *length* rather than averaging
+out: measured on a well-sampled R=40 m stadium at σ = 0.2 m, the raw rule gave window lengths
+of 101.6 ± 8.9 m and a worst-case apex-radius error of 4.68%, the smoothed rule 103.8 ± 1.8 m
+and 1.57% on the same fits (0.95% on bias-corrected fits). It is a no-op on geometry with a
+clean curvature plateau.
+
 **Algebraic stage — the "Hyper" fit.** A circle is the zero set of
 ``P(x, y) = A (x² + y²) + B x + C y + D``. With the data moment matrix ``M`` (built from rows
 ``[zᵢ, xᵢ, yᵢ, 1]``, ``zᵢ = xᵢ² + yᵢ²``, data centred), the Hyper fit solves the generalized
@@ -127,7 +138,9 @@ def detect_corners(
 
     A corner is a contiguous region with local radius below ``min_radius_m`` lasting at least
     ``min_arc_m`` of arc. The circle-fit window keeps the samples with
-    ``|κ| >= window_kappa_frac · |κ_apex|`` around the apex (at least :data:`MIN_ARC_POINTS`).
+    ``|κ| >= window_kappa_frac · |κ_apex|`` around the apex (at least :data:`MIN_ARC_POINTS`),
+    with the apex and that threshold read from a short moving average of ``|κ|`` (module
+    docstring) — the circle itself is fitted to the true sample positions.
     ``speed`` is an optional ``(s_m, v_mps)`` sample pair (e.g. pooled telemetry); the apex
     speed is the robust minimum (10th percentile) of the speed samples inside the window.
     Returns corners ordered by ``s_apex_m``, 1-indexed.
@@ -141,13 +154,17 @@ def detect_corners(
     absk = np.abs(kappa)
     mask = absk >= 1.0 / min_radius_m
     min_run = max(int(round(min_arc_m / step_m)), 1)
+    # Apex + window statistic: |κ| smoothed over ~2·min_arc_m of arc (module docstring).
+    absk_apex = _smooth_abs_kappa(
+        absk, _apex_smoothing_span(min_arc_m, step_m), fit.closed
+    )
 
     corners: list[Corner] = []
     for run in _true_runs(mask, closed=fit.closed):
         if run.size < min_run:
             continue
-        peak_pos = int(np.argmax(absk[run]))
-        lo, hi = _kappa_window(absk[run], peak_pos, window_kappa_frac)
+        peak_pos = int(np.argmax(absk_apex[run]))
+        lo, hi = _kappa_window(absk_apex[run], peak_pos, window_kappa_frac)
         window = run[lo : hi + 1]
         circle = fit_circle(samples.x_m[window], samples.y_m[window])
         s_start = float(samples.s_m[window[0]])
@@ -188,8 +205,30 @@ def _true_runs(mask: NDArray[np.bool_], *, closed: bool) -> list[NDArray[np.int6
     return runs
 
 
+def _apex_smoothing_span(min_arc_m: float, step_m: float) -> int:
+    """Odd sample count for the apex-statistic moving average (9 m at the defaults)."""
+    half = max(int(round(min_arc_m / step_m)) - 1, 0)
+    return 2 * half + 1
+
+
+def _smooth_abs_kappa(absk: F, span: int, closed: bool) -> F:
+    """Centred moving average of ``|κ|`` over ``span`` samples; wraps the seam when closed.
+
+    Open fits repeat the end values (edge clamp) rather than wrapping, so the ends keep the
+    curvature the data supports instead of borrowing the far end's.
+    """
+    half = span // 2
+    if half == 0 or absk.size < 2:
+        return absk
+    idx = np.arange(-half, absk.size + half, dtype=np.int64)
+    padded = np.take(absk, idx, mode="wrap" if closed else "clip")
+    return np.convolve(
+        padded, np.full(span, 1.0 / span, dtype=np.float64), mode="valid"
+    )
+
+
 def _kappa_window(absk_run: F, peak_pos: int, frac: float) -> tuple[int, int]:
-    """Expand from the apex while |κ| stays above ``frac`` of the peak; enforce a minimum."""
+    """Expand from the apex while smoothed |κ| stays above ``frac`` of the peak; min length."""
     threshold = frac * float(absk_run[peak_pos])
     lo = peak_pos
     while lo > 0 and float(absk_run[lo - 1]) >= threshold:
