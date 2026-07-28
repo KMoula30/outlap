@@ -3,6 +3,8 @@
 // Fixture values parse exactly, so exact float comparison is intentional.
 #![allow(clippy::float_cmp)]
 
+use std::fmt::Write as _;
+
 use outlap_schema::io::{FsLoader, MemLoader};
 use outlap_schema::sim::{FzCoupling, RacelineGenerator, Tier};
 use outlap_schema::{load_conditions, load_sim, load_track_doc};
@@ -38,10 +40,11 @@ fn mem_track(keypoints: bool, banking: [f64; 4]) -> MemLoader {
     let yaml = format!(
         "schema: track/1.1\nname: Mem Track\nclosed: false\ncenterline: centerline.csv\n{kp}"
     );
-    let mut csv = String::from("s_m,x_m,y_m,z_m,banking_deg,width_left_m,width_right_m,grip_scale\n");
+    let mut csv =
+        String::from("s_m,x_m,y_m,z_m,banking_deg,width_left_m,width_right_m,grip_scale\n");
     for (i, b) in banking.iter().enumerate() {
-        let s = i as f64 * 10.0;
-        csv.push_str(&format!("{s:.1},{s:.1},0.0,0.0,{b:.3},6.0,6.0,1.0\n"));
+        let s = f64::from(u32::try_from(i).expect("4-row fixture")) * 10.0;
+        writeln!(csv, "{s:.1},{s:.1},0.0,0.0,{b:.3},6.0,6.0,1.0").expect("write to String");
     }
     MemLoader::new()
         .with("track.yaml", yaml)
@@ -72,7 +75,8 @@ fn track_keypoints_over_zero_column_stay_valid() {
 #[test]
 fn track_unknown_meta_field_is_rejected() {
     // The unknown-field walk still hard-errors on a bogus non-`x-` field in track/1.1 meta.
-    let yaml = "schema: track/1.1\nname: Mem Track\ncenterline: centerline.csv\nmeta:\n  bogus_field: 1\n";
+    let yaml =
+        "schema: track/1.1\nname: Mem Track\ncenterline: centerline.csv\nmeta:\n  bogus_field: 1\n";
     let err = load_track_doc("track.yaml", &MemLoader::new().with("track.yaml", yaml)).unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("bogus_field"), "unexpected message: {msg}");
