@@ -754,9 +754,15 @@ def render_centerline_csv(
     width_right: F,
     *,
     elevation_note: str | None,
+    source_note: str = "OSM (ODbL) centerline",
 ) -> str:
-    """Fixed-precision ``centerline.csv`` text — the byte-determinism surface (KTD7)."""
-    lines = [f"# {fc.name} — OSM (ODbL) centerline"]
+    """Fixed-precision ``centerline.csv`` text — the byte-determinism surface (KTD7).
+
+    ONE renderer serves every importer that emits this format, so the byte layout cannot
+    drift between them; ``source_note`` names the provenance in the header comment (the
+    FastF1 driven-line importer passes its own).
+    """
+    lines = [f"# {fc.name} — {source_note}"]
     if elevation_note:
         lines[0] += f" + {elevation_note}"
     lines.append("s_m,x_m,y_m,z_m,banking_deg,width_left_m,width_right_m,grip_scale")

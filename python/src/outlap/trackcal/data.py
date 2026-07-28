@@ -139,11 +139,43 @@ def metrics_from_corners(
     )
 
 
+def format_georef(transform: GeorefTransform) -> str:
+    """The compact ``key=value`` georef string (``repr`` floats: the round-trip is exact).
+
+    One spelling serves every place the transform is recorded (KTD7): the metrics CSV header
+    here, and ``track.yaml`` meta + the input manifest the importers emit.
+    """
+    return " ".join(f"{key}={getattr(transform, key)!r}" for key in _GEOREF_KEYS)
+
+
+def parse_georef(body: str, *, source: str = "georef") -> GeorefTransform:
+    """Parse a :func:`format_georef` string; raises :class:`MetricsFormatError` if malformed."""
+    values: dict[str, float] = {}
+    for token in body.split():
+        key, sep, value = token.partition("=")
+        if sep != "=" or key not in _GEOREF_KEYS:
+            raise MetricsFormatError(f"{source}: malformed georef token {token!r}")
+        try:
+            values[key] = float(value)
+        except ValueError as err:
+            raise MetricsFormatError(
+                f"{source}: non-numeric georef value {token!r}"
+            ) from err
+    missing = [k for k in _GEOREF_KEYS if k not in values]
+    if missing:
+        raise MetricsFormatError(f"{source}: georef header missing {missing}")
+    return GeorefTransform(
+        scale=values["scale"],
+        rotation_rad=values["rotation_rad"],
+        tx_m=values["tx_m"],
+        ty_m=values["ty_m"],
+        residual_rms_m=values["residual_rms_m"],
+    )
+
+
 def write_metrics(path: Path, metrics: TrackMetrics) -> None:
     """Write a metrics CSV (``repr`` floats: the round-trip is bit-exact)."""
-    georef = " ".join(
-        f"{key}={getattr(metrics.transform, key)!r}" for key in _GEOREF_KEYS
-    )
+    georef = format_georef(metrics.transform)
     lines = [
         f"# {METRICS_FORMAT}",
         f"# label: {metrics.label}",
@@ -191,7 +223,7 @@ def load_metrics(path: Path) -> TrackMetrics:
     for key in ("label", "source_session", "georef"):
         if key not in header:
             raise MetricsFormatError(f"{path}: missing `# {key}:` header line")
-    transform = _parse_georef(header["georef"], path)
+    transform = parse_georef(header["georef"], source=str(path))
 
     reader = csv.reader(rows)
     columns = next(reader, None)
@@ -226,12 +258,18 @@ def load_metrics(path: Path) -> TrackMetrics:
 
 @dataclass(frozen=True)
 class PositionTrace:
-    """One lap's genuine position samples (metres, local FastF1 frame), derived data only."""
+    """One lap's genuine position samples (metres, local FastF1 frame), derived data only.
+
+    ``n_interpolated`` counts the ``Source == 'interpolated'`` rows this lap *dropped*, so a
+    consumer can report the sample count before and after the filter honestly (the raw row
+    count is ``x_m.size + n_interpolated``) instead of only what survived.
+    """
 
     x_m: F
     y_m: F
     t_s: F
     label: str
+    n_interpolated: int = 0
 
 
 def load_fastf1_positions(
@@ -272,6 +310,7 @@ def load_fastf1_positions(
         ):
             continue
         pos: Any = lap.get_pos_data()
+        raw = len(pos)
         pos = pos[pos["Source"] != "interpolated"]
         if len(pos) == 0:
             continue
@@ -284,6 +323,7 @@ def load_fastf1_positions(
                     [t.total_seconds() for t in pos["Time"]], dtype=np.float64
                 ),
                 label=f"{driver} {year} {event} L{int(lap['LapNumber'])}",
+                n_interpolated=raw - len(pos),
             )
         )
     if not traces:
@@ -303,30 +343,3 @@ def _import_fastf1() -> Any:
             "`uv sync --extra wear-cal` (or `pip install fastf1`)"
         ) from err
     return cast("Any", fastf1)
-
-
-# --- header parsing internals ---------------------------------------------------------------
-
-
-def _parse_georef(body: str, path: Path) -> GeorefTransform:
-    values: dict[str, float] = {}
-    for token in body.split():
-        key, sep, value = token.partition("=")
-        if sep != "=" or key not in _GEOREF_KEYS:
-            raise MetricsFormatError(f"{path}: malformed georef token {token!r}")
-        try:
-            values[key] = float(value)
-        except ValueError as err:
-            raise MetricsFormatError(
-                f"{path}: non-numeric georef value {token!r}"
-            ) from err
-    missing = [k for k in _GEOREF_KEYS if k not in values]
-    if missing:
-        raise MetricsFormatError(f"{path}: georef header missing {missing}")
-    return GeorefTransform(
-        scale=values["scale"],
-        rotation_rad=values["rotation_rad"],
-        tx_m=values["tx_m"],
-        ty_m=values["ty_m"],
-        residual_rms_m=values["residual_rms_m"],
-    )
