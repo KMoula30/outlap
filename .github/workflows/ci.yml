@@ -47,7 +47,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1   # uv sync builds the outlap-core extension (maturin)
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v4
-      - run: uv sync --directory python --group notebooks --group derivations --extra tire-fit
+      # `track-import` carries the OFFLINE geo libraries (pyproj, rasterio) the LiDAR fusion and
+      # width tracing type against and test with; without them pyright cannot resolve the imports
+      # and six synthetic-fixture tests skip silently. The committed fixtures exist precisely so
+      # those run here. The network data source (`fastf1`, in `wear-cal`) stays out.
+      - run: uv sync --directory python --group notebooks --group derivations --extra tire-fit --extra track-import
       - run: uv run --directory python ruff check src tests
       - run: uv run --directory python ruff format --check src tests
       - run: uv run --directory python pyright                            # strict (pyproject config)
