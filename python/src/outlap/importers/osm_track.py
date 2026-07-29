@@ -245,8 +245,32 @@ def _polyline_len(node_ids: list[int], nodes: dict[int, Any]) -> float:
     )
 
 
+def _components(adj: dict[int, set[int]]) -> list[dict[int, set[int]]]:
+    """Split an adjacency map into its connected components (deterministic order)."""
+    seen: set[int] = set()
+    out: list[dict[int, set[int]]] = []
+    for root in adj:
+        if root in seen:
+            continue
+        stack, group = [root], set()
+        while stack:
+            n = stack.pop()
+            if n in group:
+                continue
+            group.add(n)
+            stack.extend(x for x in adj[n] if x not in group)
+        seen |= group
+        out.append({n: adj[n] for n in sorted(group)})
+    return out
+
+
 def _walk_cycle(adj: dict[int, set[int]]) -> list[int]:
-    """Order a simple cycle (all nodes degree 2) into a node sequence."""
+    """Order a simple cycle (all nodes degree 2) into a node sequence.
+
+    Assumes ``adj`` is ONE cycle: it walks from an arbitrary start, so a map holding several
+    disjoint cycles would yield whichever the iteration order happened to reach. Callers split
+    into components first (see :func:`_components`).
+    """
     start = next(iter(adj))
     loop = [start]
     prev, cur = None, start
@@ -337,7 +361,21 @@ def _assemble_circuit(osm: dict[str, Any]) -> tuple[list[int], str]:
 
     juncs = [n for n, nb in adj.items() if len(nb) > 2]
     if not juncs:
-        loop = _walk_cycle(adj)
+        # The 2-core can hold SEVERAL disjoint cycles — a service ring, an untagged old
+        # layout, a kart loop the name filter missed. Walking from an arbitrary start would
+        # return whichever the dict order reached and still label it `cycle`, so the accuracy
+        # class would trust a lap that is not the circuit. Pick the longest, deterministically.
+        groups = _components(adj)
+        if len(groups) > 1:
+            print(
+                f"  {len(groups)} disjoint raceway cycles survived pruning; taking the "
+                "longest as the lap — check the extract if that is not the circuit",
+                file=sys.stderr,
+            )
+        loop = max(
+            (_walk_cycle(g) for g in groups),
+            key=lambda lp: _polyline_len(lp, nodes),
+        )
         # close the ring so the closing edge enters the arc length
         return loop + [loop[0]], ASSEMBLY_CYCLE
 

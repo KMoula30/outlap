@@ -489,3 +489,20 @@ def test_null_dem_elevation_is_an_error_not_a_fabricated_zero(
         osm_track._dem_batch(  # pyright: ignore[reportPrivateUsage]
             "eudem25m", [(0.0, 0.0), (0.1, 0.1)]
         )
+
+
+def test_two_disjoint_cycles_take_the_longest_not_an_arbitrary_one() -> None:
+    """A second surviving ring must not be able to become the lap by dict order.
+
+    The accuracy class trusts the `cycle` provenance label, so walking whichever ring the
+    iteration happened to reach would let a service loop wear the circuit's grade.
+    """
+    circuit = _circle_snapshot(radius_m=80.0, first_id=1, way_id=1000, name="Circuit")
+    # A smaller closed ring the name filter does not catch (no pit/kart/service in the name).
+    stray = _circle_snapshot(
+        radius_m=15.0, first_id=9000, way_id=2000, name="Perimeter Road"
+    )
+    osm = {"elements": circuit["elements"] + stray["elements"]}
+    loop, method = osm_track._assemble_circuit(osm)  # pyright: ignore[reportPrivateUsage]
+    assert method == osm_track.ASSEMBLY_CYCLE
+    assert all(nid < 9000 for nid in loop), "the shorter stray ring became the lap"

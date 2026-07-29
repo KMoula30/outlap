@@ -274,3 +274,25 @@ def test_qa_overlay_renders_png(tmp_path: Path) -> None:
     tool = _load_qa_tool()
     assert tool.main(["--synthetic", "--out", str(out)]) == 0
     assert out.exists() and out.stat().st_size > 10_000
+
+
+def test_out_of_range_control_point_stays_in_its_window() -> None:
+    """An s_m past the lap length must not saturate the blend across a whole sector.
+
+    Folding the wrap distance without reducing modulo the lap first yields a negative
+    distance, which drives the smoothstep to full strength everywhere.
+    """
+    length = 400.0
+    s = np.arange(0.0, length, 4.0)
+    detected = np.full_like(s, 5.0)
+    cp = wt.ControlPoint(s_m=length + 120.0, side="left", offset_m=9.0)
+    blended, weight = wt._apply_control_points(  # pyright: ignore[reportPrivateUsage]
+        s, detected, [cp], 25.0, length
+    )
+    # s_m wraps to 120 m, so only stations within the blend window may move. Measure that
+    # with a proper circular distance — reduce modulo the lap, THEN fold.
+    d = np.mod(np.abs(s - 120.0), length)
+    d = np.minimum(d, length - d)
+    far = d > 25.0
+    assert np.allclose(blended[far], 5.0), "a stray control point leaked across the lap"
+    assert float(weight.max()) <= 1.0 + 1e-12

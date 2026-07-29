@@ -105,6 +105,7 @@ from outlap.importers.osm_track import (
     render_yaml,
     sha256_file,
     sha256_text,
+    verify_track_dir,
     write_track_dir,
 )
 from outlap.trackcal.corners import detect_corners
@@ -876,6 +877,7 @@ def run_import(
         ),
     }
     write_track_dir(track_dir, files, force=force)
+    verify_track_dir(track_dir)  # per-file atomicity: prove the dir is coherent
     return ImportResult(
         track_dir=track_dir,
         session=session,
