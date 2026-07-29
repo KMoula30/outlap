@@ -151,6 +151,19 @@ MIN_ANCHORS = 3
 #: is a real but reachable bar.
 MAX_ANCHOR_RESIDUAL_M = 5.0
 
+#: Smallest admissible ratio between the minor and major axes of the anchor cloud.
+#:
+#: The residual gate cannot see this failure. Anchors strung along one straight leave the
+#: perpendicular direction undetermined: mirroring the track about that line moves the anchors
+#: themselves barely at all, so the fit clears its residual ceiling while every corner comes out
+#: reflected. Umeyama's reflection guard does not help — it returns the nearest *proper*
+#: rotation, which for a collinear set is exactly the mirrored one. So the anchor geometry has to
+#: be checked directly: the cloud must span at least this fraction of its own length across.
+#: 0.05 admits any anchor set picked from more than one part of a circuit (a lap is roughly as
+#: wide as it is long) and rejects the module's own worst suggestion — start/finish plus two
+#: braking markers down the same straight.
+MIN_ANCHOR_ASPECT = 0.05
+
 #: Declared per-axis measurement noise of FastF1 positions (the discrepancy principle matches
 #: it). Pooling several *drivers* widens the cloud with genuine racing-line spread rather than
 #: noise — raise the declaration when doing that.
@@ -182,6 +195,14 @@ class TooFewAnchorsError(FastF1TrackError):
 
 class GeoreferenceResidualError(FastF1TrackError):
     """The fitted similarity transform misses its anchors by more than the ceiling."""
+
+
+class CollinearAnchorsError(FastF1TrackError):
+    """The anchor cloud is too close to a straight line to determine the transform.
+
+    Distinct from :class:`GeoreferenceResidualError`: the fit *succeeds* here, with a small
+    residual, and is still wrong — a mirrored solution fits collinear anchors equally well.
+    """
 
 
 class NoPositionSamplesError(FastF1TrackError):
@@ -393,6 +414,19 @@ def georeference(
         frame = EnuFrame(lat0_deg=float(lat.mean()), lon0_deg=float(lon.mean()))
     ref = np.stack(frame.to_enu(lat, lon), axis=1)
     local = np.array([[a.local_x_m, a.local_y_m] for a in anchors], dtype=np.float64)
+    # Conditioning first: the residual gate below is blind to a near-collinear anchor set, and a
+    # mirrored fit through such a set passes it (see MIN_ANCHOR_ASPECT).
+    spread = np.linalg.svd(local - local.mean(axis=0), compute_uv=False)
+    aspect = float(spread[1] / spread[0]) if spread[0] > 0.0 else 0.0
+    if aspect < MIN_ANCHOR_ASPECT:
+        raise CollinearAnchorsError(
+            f"georeference rejected: the anchors are nearly collinear (minor/major axis "
+            f"{aspect:.4f} < {MIN_ANCHOR_ASPECT}). Their perpendicular direction is "
+            "undetermined, so a mirrored fit would clear the residual ceiling and every corner "
+            "would come out reflected. Spread the anchors around the lap — a start/finish plus "
+            "two corner apexes on opposite sides beats three points down one straight. "
+            "Nothing was written."
+        )
     transform, residuals = fit_similarity(local, ref)
     worst = int(np.argmax(residuals))
     if transform.residual_rms_m > max_residual_m:
@@ -423,6 +457,12 @@ class PooledPositions:
     ``effective_noise_std_m`` is what the fit must be declared against, not the per-sample
     noise: averaging ``mᵢ`` samples leaves ``σ/√mᵢ`` per bin, and the discrepancy principle
     matches an RMS over bins, hence ``σ·√(mean(1/mᵢ))``.
+
+    That formula assumes the only thing separating samples in a bin is measurement noise, which
+    stops being true the moment more than one driver is pooled — different racing lines are real
+    spread, not error. So the declaration is the larger of that figure and the **measured**
+    within-bin scatter, and pooling drivers honestly widens it instead of quietly over-fitting
+    the mean line.
     """
 
     x_m: F
@@ -539,6 +579,38 @@ def pool_positions(
         (np.nonzero(occupied)[0] + 0.5) * (length / n_bins), dtype=np.float64
     )
 
+    # How well each bin mean is actually determined. Declaring only sigma/sqrt(m) assumes every
+    # sample in a bin is the same point plus noise, which holds for one driver and fails across
+    # drivers: their racing lines genuinely differ, and that spread is signal about where the
+    # cars drove, not measurement error. Under-declaring it makes the fit chase the scatter and
+    # biases the apex radii — the very numbers the reference metrics commit to. So measure the
+    # within-bin spread and take whichever is larger.
+    # Cross-track only: samples also spread *along* the bin, and that extent is the binning
+    # geometry, not disagreement about where the line runs. Measuring the full 2-D deviation
+    # would read a 4 m bin as ~1 m of scatter and over-smooth every corner.
+    tan_x = np.gradient(dense.x_m)
+    tan_y = np.gradient(dense.y_m)
+    tan_len = np.hypot(tan_x, tan_y)
+    tan_len[tan_len == 0.0] = 1.0
+    nx = np.interp(s_all, dense.s_m, -tan_y / tan_len)
+    ny = np.interp(s_all, dense.s_m, tan_x / tan_len)
+    n_len = np.hypot(nx, ny)
+    n_len[n_len == 0.0] = 1.0
+    mean_x = np.zeros(n_bins, dtype=np.float64)
+    mean_y = np.zeros(n_bins, dtype=np.float64)
+    mean_x[occupied] = x
+    mean_y[occupied] = y
+    lateral = ((x_all - mean_x[idx]) * nx + (y_all - mean_y[idx]) * ny) / n_len
+    sum_sq = np.bincount(idx, weights=lateral**2, minlength=n_bins)[occupied]
+    within_var = np.where(
+        per_bin >= 2,
+        sum_sq / np.maximum(per_bin - 1, 1),
+        noise_std_m
+        ** 2,  # a lone sample says nothing about spread; fall back to the declaration
+    )
+    measured = float(np.sqrt(np.mean(within_var / per_bin)))
+    declared = noise_std_m * float(np.sqrt(np.mean(1.0 / per_bin)))
+
     drivers: list[str] = []
     for trace in usable:
         driver = trace.label.split(" ", 1)[0]
@@ -549,7 +621,7 @@ def pool_positions(
         y_m=y,
         s_m=s,
         samples_per_bin=per_bin.astype(np.int64),
-        effective_noise_std_m=noise_std_m * float(np.sqrt(np.mean(1.0 / per_bin))),
+        effective_noise_std_m=max(declared, measured),
         lap_labels=tuple(t.label for t in usable),
         drivers=tuple(drivers),
         n_used=int(x_all.size),

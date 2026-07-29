@@ -667,17 +667,21 @@ pub fn load_battery(path: &str, loader: &dyn SourceLoader) -> Result<crate::batt
 /// Load and validate a standalone `track.yaml` document (the referenced `centerline.csv` is parsed
 /// by the `outlap-track` crate, which owns the geometry).
 ///
-/// One cross-file check runs here (KTD9, track/1.1): when the document carries
-/// `banking_keypoints`, the referenced centerline's dense `banking_deg` column must be all
-/// zero — two competing banking declarations are a config error. A centerline that fails to
-/// load or parse is NOT an error at this stage (the geometry layer owns those diagnostics);
-/// the conflict check simply runs only when the sidecar is readable.
+/// One cross-file check runs here (KTD9): when the document carries `banking_keypoints`, the
+/// referenced centerline's dense `banking_deg` column must be all zero — two competing banking
+/// declarations are a config error. The check applies only from
+/// [`track::TRACK_MINOR_BANKING_CONFLICT`] onward: `track/1.0` documented the two forms as
+/// coexisting (keypoints override the column), so older files keep loading unchanged. A
+/// centerline that fails to load or parse is NOT an error at this stage (the geometry layer owns
+/// those diagnostics); the conflict check simply runs only when the sidecar is readable.
 pub fn load_track_doc(path: &str, loader: &dyn SourceLoader) -> Result<crate::track::TrackDoc> {
     let mut sources = Sources::new();
     let (doc, id, index, _) =
         load_typed::<crate::track::TrackDoc>(path, schema_name::TRACK, loader, &mut sources)?;
     semantic::check_track(&doc, &index, &sources, id)?;
-    if !doc.banking_keypoints.is_empty() {
+    if !doc.banking_keypoints.is_empty()
+        && doc.schema.minor >= crate::track::TRACK_MINOR_BANKING_CONFLICT
+    {
         if let Ok(csv) = loader.load(doc.centerline.as_str()) {
             if let Ok(centerline) = crate::centerline::parse_centerline(&csv, 1) {
                 semantic::check_track_banking_conflict(&doc, &centerline, &index, &sources, id)?;
@@ -710,4 +714,19 @@ pub fn load_sim(path: &str, loader: &dyn SourceLoader) -> Result<crate::sim::Sim
         load_typed::<crate::sim::Sim>(path, schema_name::SIM, loader, &mut sources)?;
     semantic::check_sim(&sim, &index, &sources, id)?;
     Ok(sim)
+}
+
+/// Run the `sim.yaml` semantic checks against a [`Sim`] assembled in memory rather than parsed
+/// from a file (there is no source text, so the diagnostic carries no span).
+///
+/// [`load_sim`] validates the file path; a `Sim` built programmatically — the Python `sim={...}`
+/// override merges onto the defaults and deserializes directly — must run the same invariants or
+/// an out-of-range setting reaches the solver silently. `vertical_baseline_m: 0` is the sharp
+/// case: it collapses the vertical finite-difference step, so `h * h` underflows to zero and
+/// every grade and vertical curvature for the lap comes back NaN. The builder guards itself with
+/// a `debug_assert!`, which is compiled out of the shipped release wheel.
+pub fn validate_sim(sim: &crate::sim::Sim) -> Result<()> {
+    let mut sources = Sources::new();
+    let id = sources.add("sim (in-memory override)", String::new());
+    semantic::check_sim(sim, &crate::tree::SpanIndex::default(), &sources, id)
 }

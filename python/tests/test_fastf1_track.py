@@ -44,13 +44,16 @@ from outlap.importers.fastf1_track import (
     MANIFEST_FILE,
     MAX_ANCHOR_RESIDUAL_M,
     METRICS_FILE,
+    MIN_ANCHOR_ASPECT,
     MIN_ANCHORS,
     Anchor,
     AnchorFormatError,
+    CollinearAnchorsError,
     GeoreferenceResidualError,
     SessionKey,
     TooFewAnchorsError,
     fit_similarity,
+    georeference,
     load_anchors,
     run_import,
 )
@@ -405,6 +408,99 @@ def test_misregistered_anchors_raise_and_write_nothing(
     with pytest.raises(GeoreferenceResidualError, match="residual"):
         _import(track_dir, anchors_path=anchors)
     assert sorted(p.name for p in track_dir.iterdir()) == ["georef_anchors.csv"]
+
+
+def test_pooling_separate_racing_lines_widens_the_declared_noise() -> None:
+    """Two drivers on genuinely different lines must not be declared as one noisy driver.
+
+    The reference metrics this importer commits become the CI oracle, so a declaration that
+    treats between-driver line spread as measurement noise makes the fit chase the scatter and
+    biases the apex radii it is supposed to certify.
+    """
+    from outlap.importers.fastf1_track import pool_positions
+    from outlap.trackcal.data import PositionTrace
+
+    rng = np.random.default_rng(7)
+    s = np.arange(0.0, truth_length_m(), SAMPLE_SPACING_M)
+    base = np.array([truth_point(float(v)) for v in s], dtype=np.float64)
+
+    def trace(offset_m: float, label: str) -> PositionTrace:
+        # Offset radially outward from the circuit centroid: a different racing line, not noise.
+        radial = base - base.mean(axis=0)
+        radial /= np.linalg.norm(radial, axis=1, keepdims=True)
+        pts = base + offset_m * radial + rng.normal(0.0, NOISE_M, base.shape)
+        return PositionTrace(x_m=pts[:, 0], y_m=pts[:, 1], t_s=s.copy(), label=label)
+
+    one_line = pool_positions(
+        [trace(0.0, "VER L1"), trace(0.0, "VER L2")], noise_std_m=NOISE_M
+    )
+    two_lines = pool_positions(
+        [trace(0.0, "VER L1"), trace(3.0, "NOR L1")], noise_std_m=NOISE_M
+    )
+
+    # Same sample count either way, so the old sigma/sqrt(m) figure is identical for both.
+    assert one_line.samples_per_bin.sum() == two_lines.samples_per_bin.sum()
+    assert two_lines.effective_noise_std_m > 2.0 * one_line.effective_noise_std_m
+    # And a single line must not be inflated: it stays near the per-sample declaration.
+    assert one_line.effective_noise_std_m < NOISE_M
+
+
+def test_collinear_anchors_are_rejected_before_the_residual_gate() -> None:
+    """A mirrored fit through near-collinear anchors clears the residual ceiling.
+
+    Three anchors down one straight (the module's own worst suggestion) leave the perpendicular
+    direction undetermined, so reflecting the track about that line barely moves them. This
+    asserts both halves: the mirrored correspondence really does pass the residual gate, and the
+    conditioning check catches it anyway.
+    """
+    frame = EnuFrame(lat0_deg=41.57, lon0_deg=2.2611)
+    # Anchors 600 m apart along x with 4 m of spread across. The mirror displaces each anchor by
+    # twice its perpendicular offset, so the residual stays under the ceiling — which is exactly
+    # why the ceiling cannot be the only gate. Far too wide to be dismissed as coincident points.
+    local = np.array([[0.0, 0.0], [600.0, 0.0], [300.0, 4.0]], dtype=np.float64)
+    mirrored = local * np.array(
+        [1.0, -1.0]
+    )  # the reflection the anchors cannot distinguish
+    lat, lon = frame.to_latlon(mirrored[:, 0], mirrored[:, 1])
+    anchors = [
+        Anchor(
+            label=f"a{i}",
+            local_x_m=float(local[i, 0]),
+            local_y_m=float(local[i, 1]),
+            ref_lat_deg=float(lat[i]),
+            ref_lon_deg=float(lon[i]),
+        )
+        for i in range(3)
+    ]
+
+    # The residual gate alone would let this through: the fit misses by well under the ceiling.
+    ref = np.stack(frame.to_enu(lat, lon), axis=1)
+    _, residuals = fit_similarity(local, ref)
+    assert float(np.sqrt(np.mean(residuals**2))) < MAX_ANCHOR_RESIDUAL_M
+
+    with pytest.raises(CollinearAnchorsError, match="collinear"):
+        georeference(anchors, frame=frame)
+
+
+def test_well_spread_anchors_pass_the_conditioning_check() -> None:
+    """The conditioning bar must not reject a sane anchor set picked around a lap."""
+    frame = EnuFrame(lat0_deg=41.57, lon0_deg=2.2611)
+    local = np.array([[0.0, 0.0], [600.0, 40.0], [300.0, 420.0]], dtype=np.float64)
+    lat, lon = frame.to_latlon(local[:, 0], local[:, 1])
+    anchors = [
+        Anchor(
+            label=f"a{i}",
+            local_x_m=float(local[i, 0]),
+            local_y_m=float(local[i, 1]),
+            ref_lat_deg=float(lat[i]),
+            ref_lon_deg=float(lon[i]),
+        )
+        for i in range(3)
+    ]
+    fit = georeference(anchors, frame=frame)
+    assert fit.transform.residual_rms_m < 1e-6
+    spread = np.linalg.svd(local - local.mean(axis=0), compute_uv=False)
+    assert float(spread[1] / spread[0]) > MIN_ANCHOR_ASPECT
 
 
 def test_two_anchors_cannot_certify_a_similarity_fit(tmp_path: Path) -> None:

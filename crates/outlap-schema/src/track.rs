@@ -13,6 +13,15 @@ use serde::{Deserialize, Serialize};
 use crate::refs::CenterlineRef;
 use crate::version::SchemaVersion;
 
+/// MINOR that introduced the banking-conflict rule (`banking_keypoints` may not accompany a
+/// non-zero dense `banking_deg` column).
+///
+/// Under `track/1.0` the two forms were documented as coexisting, with keypoints overriding the
+/// column, so rejecting that combination outright would reject input a past consumer gave meaning
+/// to — a MAJOR-shaped change. Gating the check on the declared MINOR keeps `track/1.0`
+/// documents loading exactly as before while `track/1.1` opts into the stricter rule.
+pub const TRACK_MINOR_BANKING_CONFLICT: u16 = 1;
+
 /// A track descriptor: topology, the centerline reference, optional banking keypoints, and meta.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

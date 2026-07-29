@@ -365,6 +365,16 @@ def test_unknown_sim_field_fails_loudly(catalunya: Track) -> None:
         solve_lap_dataset(F1_DIR, catalunya, sim={"flat_trak": True})
 
 
+def test_out_of_range_sim_override_raises_rather_than_nan(catalunya: Track) -> None:
+    # A zero vertical baseline collapses the finite-difference step, so grade and vertical
+    # curvature come back NaN for the whole lap. The builder's debug_assert is compiled out of
+    # the release wheel, so the merged dict has to face the same semantic checks a sim.yaml does.
+    with pytest.raises(ValueError, match="vertical_baseline_m"):
+        solve_lap_dataset(
+            F1_DIR, catalunya, sim={**COARSE_SIM, "vertical_baseline_m": 0.0}
+        )
+
+
 def test_envelope_is_returnable(catalunya: Track) -> None:
     from outlap.core import solve_lap as raw_solve
 
