@@ -1,110 +1,132 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# Tire wear and thermal damage — the degradation model on the ring
+# Tire wear and thermal damage: the degradation model on the ring
 
-Grip does not only move with temperature; it decays over a stint as the tread wears and the rubber
-takes irreversible heat damage. That decay — a gentle pace loss lap after lap, then a *cliff* where
-the tire falls off sharply — is what turns a lap-time model into a strategy model: it is why an
-undercut works, why a soft tire is fast then gone, why a stint has an optimal length. `outlap-tire`
-adds two slow states on top of the [thermal ring](tire-thermal.md) to carry it (HANDOFF §7.3,
-FLAGSHIP): **tread wear `w`** and **irreversible thermal damage `D`**. Like the ring, they are
-implemented **clean-room from the published literature** (Archard; Grosch) cited below — *no
-open-source tire wear/degradation model exists in any language*.
+Grip does not only move with temperature. It also decays over a stint, as the tread wears and as the
+rubber takes heat damage that does not reverse.
 
-Both states are advanced in the **same** `TireThermalRing::step` as the temperatures
-(`crates/outlap-tire/src/thermal.rs`), because wear feeds back into the ring: a worn tire has less
-tread mass, so a smaller surface thermal capacity `C_s(w)`, so it runs hotter — the positive-feedback
-mechanism behind the cliff.
+That decay has a shape: a gentle loss of pace lap after lap, then a *cliff*, where the tire falls
+off sharply. The shape is what turns a lap-time model into a strategy model. It is why an undercut
+works, why a soft tire is fast and then gone, and why a stint has an optimal length.
+
+`outlap-tire` adds two slow states on top of the [thermal ring](tire-thermal.md) to carry it
+(HANDOFF §7.3, FLAGSHIP): **tread wear `w`**, and **irreversible thermal damage `D`**. Like the
+ring, both are implemented **clean-room from the published literature** cited below, from Archard
+and Grosch. *No open-source model of tire wear or degradation exists, in any language.*
+
+Both states advance inside the **same** `TireThermalRing::step` as the temperatures, in
+`crates/outlap-tire/src/thermal.rs`. They must, because wear feeds back into the ring. A worn tire
+has less tread mass. Its surface therefore has a smaller thermal capacity, `C_s(w)`, so it runs
+hotter. That is the positive feedback behind the cliff.
 
 ## Tread wear `w`
 
-Wear is an **Archard** sliding-energy law: material removed is proportional to the frictional sliding
-work done in the contact patch, divided by the rubber's hardness. Hardness falls as the rubber heats
-(**Grosch**), so a hot tire wears faster:
+Wear follows an **Archard** law on sliding energy. The material removed is proportional to the
+frictional sliding work done in the contact patch, divided by the hardness of the rubber. Hardness
+falls as rubber heats, which is the **Grosch** effect. A hot tire therefore wears faster:
 
 ```
 dw/dt = (k_w / H(T_s)) · Q_fric / A_cp        [mm/s]
 ```
 
-- `Q_fric = p_t·P_slide` is the frictional power deposited in the tread (the same driver the ring
-  uses), and `A_cp = a_cp·A_ext` is the contact-patch area, so `Q_fric/A_cp` is the frictional power
-  *density* — the quantity that abrades rubber.
-- `w` accumulates from `0` (new) toward `w_max` (bald) and **only ever grows** (`dw/dt ≥ 0`); the
-  integrator clamps it monotone in `[0, w_max]`.
-- `H(T_s)` is the temperature-dependent hardness. The shipped model uses the Grosch form
-  `1/H(T_s) = min(exp(c_H·(T_s − T_opt)), cap)`: wear roughly e-folds per ~50 °C of surface
-  temperature above the grip optimum, with the optimum `T_opt` as the hardness reference (a compound
-  is characterised at its working window). The **magnitude** of wear is the calibratable `k_w`
-  (`.tyr` `TyrWear`); the temperature *shape* `c_H` is a fixed modelling constant here (the FastF1
-  inverse-calibration in a later M5 step fits `k_w`, not `c_H`).
+- `Q_fric = p_t·P_slide` is the frictional power deposited in the tread. It is the same driver that
+  the ring uses. `A_cp = a_cp·A_ext` is the area of the contact patch. `Q_fric/A_cp` is therefore
+  the frictional power *density*, which is the quantity that abrades rubber.
+- `w` accumulates from `0`, which is new, toward `w_max`, which is bald. It **only ever grows**, so
+  `dw/dt ≥ 0`. The integrator clamps it monotone within `[0, w_max]`.
+- `H(T_s)` is the hardness, which depends on temperature. The shipped model uses the Grosch form,
+  `1/H(T_s) = min(exp(c_H·(T_s − T_opt)), cap)`. Wear roughly e-folds for every 50 °C of surface
+  temperature above the grip optimum. The optimum `T_opt` is the reference for hardness, because a
+  compound is characterized at its working window.
+
+  The **magnitude** of wear is `k_w`, which is calibratable and lives in `TyrWear` in the `.tyr`
+  file. The *shape* against temperature, `c_H`, is a fixed modeling constant here. The inverse
+  calibration against FastF1, in a later M5 step, fits `k_w`. It does not fit `c_H`.
 
 ## Thermal damage `D`
 
-Beyond simple abrasion, overheated rubber reverts and hardens — a **irreversible** loss that a cool-
-down lap cannot recover. It accumulates whenever the carcass exceeds a degradation threshold `T_deg`:
+Abrasion is not the only loss. Overheated rubber reverts and hardens. That loss is
+**irreversible**, and a cool-down lap cannot recover it. It accumulates whenever the carcass exceeds
+a degradation threshold, `T_deg`:
 
 ```
 dD/dt = (1/τ_D) · ⟨(T_c − T_deg)/ΔT_ref⟩₊^β        with ⟨x⟩₊ = max(x, 0)
 ```
 
-`D ∈ [0,1]` is monotone non-decreasing by construction (the ramp `⟨·⟩₊` is never negative), and the
-integrator clamps it so cooling never repairs it. `τ_D` sets the timescale, `ΔT_ref` normalises the
-over-temperature, and `β` sharpens the onset (a threshold-and-power law, not a linear one).
+`D ∈ [0,1]`, and it never decreases, by construction, because the ramp `⟨·⟩₊` is never negative. The
+integrator clamps it, so cooling never repairs it. `τ_D` sets the timescale. `ΔT_ref` normalizes the
+over-temperature. `β` sharpens the onset, which makes this a threshold-and-power law rather than a
+linear one.
 
 ## Total grip
 
-The ring hands the force model a single grip multiplier — the thermal window times the two
-degradation factors (HANDOFF §7.3):
+The ring hands the force model one grip multiplier. It is the thermal window, times the two factors
+for degradation (HANDOFF §7.3):
 
 ```
 λ_μ,total = λ_μ(T_s) · (1 − Δ_c·σ((w−w_c)/s_w)) · (1 − Δ_D·D)
 ```
 
-- `λ_μ(T_s)` is the [thermal grip window](tire-thermal.md) (peaks at `T_opt`).
-- `(1 − Δ_c·σ((w−w_c)/s_w))` is the **wear cliff**: a logistic `σ(z)=1/(1+e^{−z})` centred on the
-  critical wear `w_c` with sharpness `s_w`. It is `≈1` when new, collapses toward `1−Δ_c` past `w_c`,
-  and — being a smooth sigmoid — is **C¹ in `w`** (no kink at the cliff, so the QSS envelope and the
-  T2 force call stay differentiable). Because `σ` is monotone increasing, the factor is
-  monotone-*decreasing* for **all** `w`, so grip erodes gradually below `w_c` and steepens across it.
-- `(1 − Δ_D·D)` is the irreversible thermal-damage loss.
+- `λ_μ(T_s)` is the [thermal grip window](tire-thermal.md). It peaks at `T_opt`.
+- `(1 − Δ_c·σ((w−w_c)/s_w))` is the **wear cliff**. It is a logistic, `σ(z)=1/(1+e^{−z})`, centered
+  on the critical wear `w_c`, with sharpness `s_w`. It is about `1` when the tire is new, and it
+  collapses toward `1−Δ_c` past `w_c`.
 
-### Reduction note — the shipped `TyrWear` contract
+  Because it is a smooth sigmoid, it is **C¹ in `w`**. There is no kink at the cliff, so the QSS
+  envelope and the T2 force call both stay differentiable. And because `σ` increases monotonically,
+  the factor decreases monotonically for **all** `w`. Grip therefore erodes gradually below `w_c`,
+  and the erosion steepens across it.
+- `(1 − Δ_D·D)` is the loss from irreversible thermal damage.
 
-§7.3 also writes a separate linear pre-cliff term `f_w = 1 − c_w1·(w/w_max)`. The shipped `.tyr` wire
-contract (`TyrWear`) carries **no** `c_w1`: the gradual pre-cliff pace loss and the cliff are unified
-into the single C¹ sigmoid above (which already erodes grip monotonically below `w_c`), and the
-irreversible component is carried by the thermal-damage factor. This keeps the wear parameter set to
-exactly the §7.3 headline coefficients (`k_w, w_max, w_c, s_w, Δ_c, τ_D, T_deg, ΔT_ref, β, Δ_D`) with
-no redundant knob. Should stint calibration later show the sigmoid toe is too flat to reproduce the
-observed ~0.05–0.10 s/lap gradual decay, restoring the explicit `f_w` term is an additive schema
-change.
+### A note on reduction: the shipped `TyrWear` contract
 
-## The positive-feedback cliff: `C_s(w)`
+§7.3 also writes a separate linear term before the cliff, `f_w = 1 − c_w1·(w/w_max)`. The shipped
+wire contract, `TyrWear`, carries **no** `c_w1`.
 
-The cliff is not just a grip curve — it is a *mechanism*. As the tread wears, there is less tread
-mass, so the surface node's thermal capacity shrinks:
+Two changes make it redundant. The gradual loss of pace before the cliff and the cliff itself are
+unified into the single C¹ sigmoid above, which already erodes grip monotonically below `w_c`. And
+the irreversible component is carried by the thermal-damage factor.
+
+The wear parameter set is therefore exactly the headline coefficients of §7.3 — `k_w, w_max, w_c,
+s_w, Δ_c, τ_D, T_deg, ΔT_ref, β, Δ_D` — with no redundant knob.
+
+Calibration against a stint may later show that the toe of the sigmoid is too flat to reproduce the
+observed gradual decay of 0.05 s to 0.10 s per lap. Restoring the explicit `f_w` term would then be
+an additive schema change.
+
+## The positive feedback that makes the cliff: `C_s(w)`
+
+The cliff is not only a grip curve. It is a *mechanism*.
+
+As the tread wears, there is less tread mass. The thermal capacity of the surface node therefore
+shrinks:
 
 ```
 C_s(w) = c_s · max(1 − w/w_max, floor)
 ```
 
-(the `floor` keeps the belt/base contribution so the node is never mass-less). A smaller `C_s` means
-less thermal inertia, so under the pulsing load of a lap — hard in the corners, light on the
-straights — the worn tire's surface **tracks the load peaks more closely**: it swings wider, reaching
-*higher peak temperatures* in the corners (panel (c) below). Higher peaks push the surface further off
-the top of the grip window (lower `λ_μ`), and hotter rubber wears faster still (`1/H(T_s)`) — worn →
-hotter → less grip / faster wear → more worn. That is the physical loop the grip cliff sits on top of.
+The `floor` keeps the contribution of the belt and base, so the node is never massless.
 
-Note the subtlety: under a *constant* load the steady surface temperature is set by the energy balance
-and is **independent** of `C_s` (capacity sets the time constant, not the fixed point). The feedback
-bites on the **transient peaks**, which is exactly where a tire falls out of its window and off the
-cliff — so the demonstration below uses an oscillating corner/straight load, not a constant one.
+A smaller `C_s` means less thermal inertia. Under the pulsing load of a lap — hard in the corners,
+light on the straights — the surface of a worn tire therefore **tracks the load peaks more
+closely**. It swings wider, and it reaches *higher peak temperatures* in the corners. Panel (c)
+below shows this.
+
+Higher peaks push the surface further off the top of the grip window, which lowers `λ_μ`. And hotter
+rubber wears faster still, through `1/H(T_s)`. Worn gives hotter, hotter gives less grip and faster
+wear, and faster wear gives more worn. That is the physical loop that the grip cliff sits on top of.
+
+There is a subtlety worth stating. Under a *constant* load, the steady surface temperature is set by
+the energy balance, and it is **independent** of `C_s`. Capacity sets the time constant, not the
+fixed point. The feedback bites on the **transient peaks** instead, and those peaks are exactly
+where a tire falls out of its window and off the cliff. The demonstration below therefore uses an
+oscillating load between corner and straight, not a constant one.
 
 ## Clean-room provenance
 
-The Archard sliding-energy wear law, the Grosch hardness–temperature dependence, and the
-threshold-power thermal-damage form are implemented from the published literature, not derived from
-any other codebase (game-engine or lap-time-simulator tire code was **not** consulted as a source of
-derivation, per CLAUDE.md §2).
+Three things are implemented from published literature, and not derived from any other codebase: the
+Archard law for wear from sliding energy, the Grosch dependence of hardness on temperature, and the
+threshold-power form for thermal damage. Tire code from game engines and from lap-time simulators
+was **not** consulted as a source for the derivation. This follows CLAUDE.md §2.
 
 - **J. F. Archard**, *"Contact and rubbing of flat surfaces"*, **J. Appl. Phys.** 24(8), 981–988,
   1953 — wear volume proportional to sliding work over hardness (the `k_w·Q_fric/H` form).
@@ -117,31 +139,39 @@ derivation, per CLAUDE.md §2).
 - **H. B. Pacejka**, *Tire and Vehicle Dynamics*, 3rd ed., 2012 — the grip-scaling terms
   (`LMUX`/`LMUY`) the total multiplier drives.
 
-The `.tyr` reference blocks that exercise this model are **synthetic placeholders** until the FastF1
-inverse-calibration lands (a later M5 step); the figure below uses a physically-plausible synthetic
-racing-slick set, so the point is the model's *shape*, not a fitted number.
+The `.tyr` reference blocks that exercise this model are **synthetic placeholders**, until the
+inverse calibration against FastF1 lands in a later M5 step. The figure below uses a synthetic set
+for a racing slick that is physically plausible. Its point is therefore the *shape* of the model,
+not a fitted number.
 
 ## Validation
 
 ![Tire wear and thermal damage](img/tire_wear.png)
 
-The figure is drawn from the real `TireThermalRing` integrator
-(`crates/outlap-tire/examples/wear_cliff.rs`, plotted by `python/tools/plot_tire_wear.py`).
-**(a)** A hard cornering stint from new tires: the tread wears (Archard) past the cliff onset `w_c`
-and, once the carcass runs above `T_deg`, irreversible thermal damage accumulates to saturation.
-**(b)** The grip factors against wear: the cliff factor is a smooth (C¹) sigmoid collapsing through
-`w_c`, and the total grip is its product with the thermal-damage factor. **(c)** The `C_s(w)`
-feedback: fresh and worn tires under an identical corner/straight load oscillation settle to the same
-mean surface temperature, but the worn tire — with less surface capacity — swings wider and peaks
-hotter, the mechanism that tips a worn tire into the cliff.
+The figure comes from the real `TireThermalRing` integrator. The example is
+`crates/outlap-tire/examples/wear_cliff.rs`, and `python/tools/plot_tire_wear.py` plots it.
 
-Property tests (`crates/outlap-tire/tests/wear.rs`, HANDOFF §13/§14) cover: wear monotone in sliding
-energy (and zero without sliding); wear rate rising with surface temperature; damage monotone,
-irreversible, and thresholded at `T_deg`; `λ_μ,total ∈ [0,1]` and C¹ across the cliff (finite-
-difference derivative continuity); the `C_s(w)` feedback raising the worn tire's peak temperature; the
-thermal-only path staying inert to wear; zero allocations per step; and bit-identical determinism plus
-f32/f64 parity.
+**(a)** A hard cornering stint from new tires. The tread wears, by Archard, past the onset of the
+cliff at `w_c`. Once the carcass runs above `T_deg`, irreversible thermal damage accumulates to
+saturation.
 
-The parameters are calibrated inversely from stint pace by [`outlap.wearcal`](../../python/src/outlap/wearcal/README.md);
-the lap-level cross-check — monotone pace loss + the cliff reproduced after calibration, and the
-QSS↔T2 stint-decay agreement — is [`docs/validation/wear-cliff.md`](../validation/wear-cliff.md).
+**(b)** The grip factors against wear. The cliff factor is a smooth C¹ sigmoid, collapsing through
+`w_c`. The total grip is that factor times the thermal-damage factor.
+
+**(c)** The `C_s(w)` feedback. A fresh tire and a worn tire run under an identical oscillation of
+load between corner and straight. Both settle to the same mean surface temperature. The worn tire
+has less surface capacity, so it swings wider and peaks hotter. That is the mechanism that tips a
+worn tire into the cliff.
+
+The property tests are in `crates/outlap-tire/tests/wear.rs` (HANDOFF §13 and §14). They cover: that
+wear is monotone in sliding energy, and zero without sliding; that the wear rate rises with surface
+temperature; that damage is monotone, irreversible, and thresholded at `T_deg`; that
+`λ_μ,total ∈ [0,1]` and is C¹ across the cliff, checked by continuity of a finite-difference
+derivative; that the `C_s(w)` feedback raises the peak temperature of the worn tire; that the
+thermal-only path stays inert to wear; that a step allocates nothing; and that the model is
+bit-identical run to run, with parity between f32 and f64.
+
+[`outlap.wearcal`](../../python/src/outlap/wearcal/README.md) calibrates the parameters inversely,
+from stint pace. The cross-check at lap level is
+[`docs/validation/wear-cliff.md`](../validation/wear-cliff.md). It covers monotone loss of pace, the
+cliff reproduced after calibration, and the agreement in stint decay between QSS and T2.

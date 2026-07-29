@@ -1,21 +1,25 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# MF6.1 — steady-state tire force/moment model
+# MF6.1: the steady-state tire force and moment model
 
-`outlap-tire` implements the steady-state Magic Formula 6.1: pure- and combined-slip `Fx`, `Fy`,
-aligning moment `Mz`, overturning moment `Mx`, and rolling-resistance moment `My`, including the
-Besselink inflation-pressure terms. Implemented clean-room from Pacejka's book (3rd ed., 2012)
-only; the MATLAB tools named in the validation plan are numerical oracles whose *outputs* are
-used as data — never sources of code.
+`outlap-tire` implements the steady-state Magic Formula 6.1. It covers `Fx` and `Fy` under pure slip
+and combined slip, the aligning moment `Mz`, the overturning moment `Mx`, and the rolling-resistance
+moment `My`. It includes the Besselink terms for inflation pressure.
 
-Equation numbers below refer to the "Full set of equations" block of Chapter 4 (§4.3.2,
-eqs. 4.E1–4.E78). Anchored numbers were transcribed from the book; numbers marked `(~)` must be
-re-verified against the physical text. Where a golden comparison disagrees with a book-literal
-transcription, check the published 3rd-edition errata first — the `SHy` shift (eq. 4.E27) is the
-documented hotspot.
+It is implemented clean-room, from the Pacejka book (3rd ed., 2012), and from nothing else. The
+MATLAB tools named in the validation plan are numerical oracles. outlap uses *their outputs* as
+data. It never uses them as sources of code.
 
-The `SlipState` inflation-pressure (`p`) and friction-scaling (`mu_scale_x/y`) hooks these equations
-read are held at 1.0 / cold-set values here; the [tire thermal ring](tire-thermal.md) computes the
-temperature-dependent pressure and grip-window multipliers that drive them over a stint.
+The equation numbers below refer to the "Full set of equations" block of Chapter 4, §4.3.2, which
+holds eqs. 4.E1–4.E78. A number without a mark was transcribed from the book. A number marked `(~)`
+must be re-verified against the physical text.
+
+Where a golden comparison disagrees with a literal transcription from the book, check the published
+errata for the 3rd edition first. The `SHy` shift, eq. 4.E27, is the documented hotspot.
+
+These equations read two hooks on `SlipState`: inflation pressure `p`, and the friction scalings
+`mu_scale_x` and `mu_scale_y`. Here they hold at 1.0 and at cold-set values. Over a stint, the
+[tire thermal ring](tire-thermal.md) computes the multipliers for pressure and for the grip window
+that drive them.
 
 ## Symbols and sign conventions (ISO-W)
 
@@ -30,13 +34,17 @@ temperature-dependent pressure and grip-window multipliers that drive them over 
 | `V_cx` | contact-center forward velocity (m/s); `V₀ = LONGVL` |
 | `λ_*` | the `L*` scaling factors of the `.tir` `[SCALING_COEFFICIENTS]` section |
 
-Axes are ISO 8855 (x forward, y left, z up). The load-bearing sign consequences, pinned by
-property tests: `K_xκ = ∂Fx/∂κ|₀ > 0`; `K_yα = ∂Fy/∂α|₀` carries the sign of `PKY1` (negative),
-so `Fy(α > 0) < 0`; and `Mz = −t·F_y + M_zr` is restoring *because* `F_y` is negative — no
-absolute values appear anywhere in the sign chain. `sgn(0)` maps to +1 (branch selector, not a
-true signum: a zero would annihilate force terms at standstill).
+The axes are ISO 8855: x forward, y left, z up.
 
-## Model structure
+Property tests pin the sign consequences that carry the physics. `K_xκ = ∂Fx/∂κ|₀ > 0`. `K_yα =
+∂Fy/∂α|₀` carries the sign of `PKY1`, which is negative, so `Fy(α > 0) < 0`. And
+`Mz = −t·F_y + M_zr` restores *because* `F_y` is negative. No absolute value appears anywhere in
+that sign chain.
+
+`sgn(0)` maps to +1. It is a branch selector, not a true signum. A zero would annihilate the force
+terms at standstill.
+
+## The structure of the model
 
 ```
 Fx  = G_xα(α*) · Fx0(κ)                        4.E50   (G: 4.E51–4.E57 ~)
@@ -46,107 +54,145 @@ Mx  = R0·Fz·λ_Mx·{QSX1..QSX11, PPMX1 terms}    4.E69 ~
 My  = −sgn(V_cx)·R0·Fz·λ_My·{QSY1..QSY8}·(Fz/Fz0)^QSY7·(p/p₀)^QSY8    4.E70 ~
 ```
 
-- **Pure slip** `Fx0` (4.E9–4.E18) and `Fy0` (4.E19–4.E30) are the sine magic formula
-  `D·sin(C·atan(B·x − E·(B·x − atan(B·x)))) + SV` with load- (`dfz`), pressure- (`dpi`,
-  Besselink `PPX*`/`PPY*`) and camber-dependent factors. `E` is clamped ≤ 1 (book requirement —
-  beyond it the curve folds back).
-- **Combined slip** uses the cosine-weighting (not friction-ellipse) formulation: normalized
-  cosine magic formulas in the other slip quantity, plus the κ-induced ply-steer shift `SV_yκ`.
-- **Aligning moment** composes the pneumatic trail acting on the **slip-only (zero-camber)**
-  lateral force `G_yκ·Fy0|_{γ=0}` (eq. 4.E74), the residual torque `M_zr`, and the `s·Fx` lever
-  arm; equivalent slip angles (4.E77/4.E78) fold κ in via the stiffness ratio `K_xκ/K'_yα`. Two
-  subtleties the golden cross-check pinned down: the **entire aligning-moment lateral machinery**
-  (`By`, `Cy`, `Kyα`, `SHy`, `SVy`, `Fy0`, *and* the `s`-lever camber term of eq. 4.E76) is
-  evaluated at **zero camber** — camber enters `Mz` only through its own coefficients (SHt, Bt, Dt,
-  Dr, Et). The book writes `γ*` in `s` (eq. 4.E76), but the operational MF6.1 (MFeval/teasit, which
-  `.tir` data is fit against and the ≤0.5% oracle) drops it, so `SSZ3`/`SSZ4` are accepted-but-
-  unused — matching keeps the model interoperable. `Et`'s curvature factor is fixed from the *base*
-  trail angle `α_t` (shared by pure and combined). The `s·Fx` term is combined-slip only: at
-  `κ = 0` the pure aligning moment (4.E31) has no longitudinal term — a deliberate C⁰ step at
-  `κ = 0` that matches the standard/oracle (a measure-zero point in transient use; do not "smooth"
-  it, or the golden cross-check breaks). Trail and residual carry a `cos α` weighting (the book's
-  guarded `cos'α`) that bounds `Mz` at large slip.
-- **`My` sign**: rolling resistance opposes rotation; in ISO 8855 forward roll spins +y, so
-  `My < 0` at `V_cx > 0`. Confirmed against the oracle goldens.
+**Pure slip.** `Fx0` (4.E9–4.E18) and `Fy0` (4.E19–4.E30) are the sine magic formula,
+`D·sin(C·atan(B·x − E·(B·x − atan(B·x)))) + SV`. Its factors depend on load through `dfz`, on
+pressure through `dpi` and the Besselink `PPX*` and `PPY*` terms, and on camber. `E` is clamped at
+or below 1, which the book requires. Beyond 1 the curve folds back.
 
-## Turn-slip and other omissions (v1 scope)
+**Combined slip.** This uses the cosine-weighting formulation, not a friction ellipse. It applies
+normalized cosine magic formulas in the other slip quantity, and it adds `SV_yκ`, the ply-steer
+shift that κ induces.
 
-- **Turn-slip/parking is omitted**: every ζ factor of the book equations is unity, written as
-  named constants at their use sites so the later upgrade is a diff, not a rewrite.
-- The velocity-digressive friction factor (4.E7's `LMUV` branch) is omitted — no `LMUV` in the
-  v1 coefficient set; `λ*_μ = λ_μ`. The digressive shift scaling `λ'_μ` (4.E8, `A_μ = 10`)
-  **is** implemented and applies to the vertical shifts `SV_x`, `SV_y`, `SV_yγ` only —
-  applying it to `D` instead is a classic 0.5%-gate failure.
-- `QBZ6` is accepted but unused: the implemented trail camber form (4.E40 ~) is
+**Aligning moment.** `Mz` composes three parts: the pneumatic trail acting on the lateral force from
+**slip only, at zero camber**, which is `G_yκ·Fy0|_{γ=0}` (eq. 4.E74); the residual torque `M_zr`;
+and the lever arm `s·Fx`. The equivalent slip angles, 4.E77 and 4.E78, fold κ in through the
+stiffness ratio `K_xκ/K'_yα`.
+
+The golden cross-check pinned down two subtleties here.
+
+First, the **entire lateral machinery of the aligning moment** is evaluated at **zero camber**. That
+covers `By`, `Cy`, `Kyα`, `SHy`, `SVy`, `Fy0`, *and* the camber term of the `s` lever in eq. 4.E76.
+Camber enters `Mz` only through its own coefficients: SHt, Bt, Dt, Dr, and Et. The book writes `γ*`
+in `s` (eq. 4.E76). The operational MF6.1 drops it, and that is what MFeval and teasit do. `.tir`
+data is fitted against those tools, and they are the ≤0.5% oracle. `SSZ3` and `SSZ4` are therefore
+accepted but unused. Matching them keeps the model interoperable.
+
+Second, the curvature factor `Et` is fixed from the *base* trail angle `α_t`, which pure slip and
+combined slip share.
+
+The `s·Fx` term appears under combined slip only. At `κ = 0`, the pure aligning moment (4.E31) has
+no longitudinal term. That is a deliberate C⁰ step at `κ = 0`, and it matches the standard and the
+oracle. In transient use it is a point of measure zero. Do not "smooth" it, or the golden
+cross-check breaks.
+
+The trail and the residual both carry a `cos α` weighting, which the book writes as a guarded
+`cos'α`. It bounds `Mz` at large slip.
+
+**The sign of `My`.** Rolling resistance opposes rotation. Under ISO 8855, rolling forward spins the
+wheel about +y. Therefore `My < 0` when `V_cx > 0`. The oracle goldens confirm this.
+
+## Turn-slip and other omissions, in the v1 scope
+
+- **Turn-slip and parking are omitted.** Every ζ factor in the book equations is unity. Each one is
+  written as a named constant at its use site, so that the later upgrade is a diff and not a
+  rewrite.
+- **The velocity-digressive friction factor is omitted.** That is the `LMUV` branch of 4.E7. The v1
+  coefficient set has no `LMUV`, so `λ*_μ = λ_μ`.
+
+  The digressive scaling of the shifts, `λ'_μ` from 4.E8 with `A_μ = 10`, **is** implemented. It
+  applies to the vertical shifts `SV_x`, `SV_y`, and `SV_yγ`, and to nothing else. Applying it to
+  `D` instead is a classic way to fail the 0.5% gate.
+- **`QBZ6` is accepted but unused.** The implemented camber form for the trail (4.E40 ~) is
   `(1 + QBZ4·γ* + QBZ5·|γ*|)`.
-- Relaxation transients (σ_κ, σ_α + the exact exponential update) land in a follow-up PR of
-  this milestone; the thermal ring (§7.2) and wear (§7.3) are the M5 flagship.
+- **Relaxation transients**, which are σ_κ, σ_α, and the exact exponential update, land in a
+  follow-up PR of this milestone. The thermal ring (§7.2) and wear (§7.3) are the M5 flagship.
 
-## Parameter defaults (sparse files degrade, never collapse)
+## Defaults for parameters: a sparse file degrades, and never collapses
 
-Coefficients absent from a `.tyr` default to 0, **except**: all `L*` scalings, `RCX1`, `RCY1`,
-`QCZ1` → 1; `PKY2` → 1 and `PKY4` → 2 (a zero `PKY4` would collapse the cornering stiffness
-`K_yα ≡ 0` — the 10-key minimum fixture must evaluate sanely); `LONGVL` → 16.7 m/s,
-`VXLOW` → 1 m/s. Absent `NOMPRES` disables all pressure terms (`dpi ≡ 0`, `p/p₀ ≡ 1`). An
-entirely absent family degrades to zero output (no `QDZ*` ⇒ `Mz ≡ 0`; no `R*` ⇒ combined =
-pure), and every degradation is emitted as a note into the loaded-model report — nothing silent.
+A coefficient that a `.tyr` file omits defaults to 0, with these exceptions. Every `L*` scaling, and
+`RCX1`, `RCY1`, and `QCZ1`, default to 1. `PKY2` defaults to 1, and `PKY4` defaults to 2, because a
+zero `PKY4` would collapse the cornering stiffness to `K_yα ≡ 0`, and the minimum fixture of 10 keys
+must still evaluate sanely. `LONGVL` defaults to 16.7 m/s, and `VXLOW` to 1 m/s.
+
+An absent `NOMPRES` disables every pressure term, so `dpi ≡ 0` and `p/p₀ ≡ 1`.
+
+A family that is absent entirely degrades to zero output. With no `QDZ*`, `Mz ≡ 0`. With no `R*`,
+combined slip equals pure slip.
+
+Every degradation is emitted as a note in the loaded-model report. Nothing is silent.
 
 ## Numerical safety
 
-Kernels are panic-free and finite for all finite inputs: `F_z ≤ 0` short-circuits to zero;
-`B = K/(C·D + ε)` uses the book's ε device implemented sign-preservingly (`d + ε·sgn(d)`, never
-cancelling); the combined-weighting normalizing cosines get a magnitude floor; `α` is clamped to
-±(π/2 − 10⁻³) before `tan`; `E ≤ 1` is clamped on the force magic formulas (`Ex`, `Ey`, and the
-combined `Exα`/`Eyκ`) — the trail `Et` is deliberately not clamped, matching the standard; the
-`Kxκ` `exp` argument and the `My` pressure ratio are bounded before their exp/power. Evaluation is
-pure, allocation-free (dhat-gated in CI) and generic over `f32`/`f64`.
+The kernels are panic-free, and they return finite values for every finite input.
+
+`F_z ≤ 0` short-circuits to zero. `B = K/(C·D + ε)` uses the ε device from the book, implemented so
+that it preserves sign, as `d + ε·sgn(d)`. It never cancels. The normalizing cosines of the combined
+weighting get a floor on their magnitude. `α` is clamped to ±(π/2 − 10⁻³) before `tan`.
+
+`E ≤ 1` is clamped on the force magic formulas: `Ex`, `Ey`, and the combined `Exα` and `Eyκ`. The
+trail `Et` is deliberately not clamped, which matches the standard. The `exp` argument of `Kxκ` and
+the pressure ratio of `My` are both bounded before their exponential or power.
+
+Evaluation is pure. It allocates nothing, which dhat gates in CI. It is generic over `f32` and
+`f64`.
 
 ## Validation
 
-- Property tests: sign pins, odd symmetry on shift-free subsets, combined-slip containment
-  (`G ∈ (0,1]` — only guaranteed at zero shifts and `C ≤ 1`; false in general with `RHX1 ≠ 0`),
-  value continuity across `κ = 0`, `α = 0`, `V_cx = 0⁺`, peak scaling linearity, closed-form
-  peak agreement (`μ = PD·LMU` when `C > 1`), finiteness over a hostile input box.
-- Golden cross-check (HANDOFF §12/§13): all five channels of the Pacejka book reference tyre match
-  an independent Magic-Formula implementation (the GPL `teasit` library, run under Octave — its
-  numeric outputs used as data only, never its source) to **≤ 0.5%** over pure-longitudinal,
-  pure-lateral (incl. ±4° camber), and combined sweeps. The generation is documented and
-  reproducible in `tools/goldens/`. This cross-check is what caught the `Mz` camber/`s·Fx`
-  subtleties noted above.
+- **Property tests** cover: the sign pins; odd symmetry on subsets that have no shifts; containment
+  under combined slip, `G ∈ (0,1]`, which holds only at zero shifts and `C ≤ 1`, and is false in
+  general when `RHX1 ≠ 0`; continuity of value across `κ = 0`, `α = 0`, and `V_cx = 0⁺`; linearity
+  of peak scaling; agreement with the closed-form peak, `μ = PD·LMU` when `C > 1`; and finiteness
+  over a hostile box of inputs.
+- **The golden cross-check** (HANDOFF §12 and §13) takes all five channels of the reference tire
+  from the Pacejka book and matches them against an independent Magic-Formula implementation, to
+  **≤ 0.5%**. That implementation is the GPL `teasit` library, run under Octave. outlap uses its
+  numeric outputs as data only, never its source. The sweeps cover pure longitudinal, pure lateral
+  including ±4° camber, and combined. `tools/goldens/` documents the generation and makes it
+  reproducible.
 
-## First-order relaxation (transient lag)
+  This cross-check is what caught the subtleties in `Mz`, around camber and the `s·Fx` term, noted
+  above.
 
-A tyre does not reach its steady-state slip force instantly: the contact patch must roll a
-*relaxation length* `σ` before the deflection catches up, so each slip channel `x ∈ {κ, α}` obeys
+## First-order relaxation, which is the transient lag
+
+A tire does not reach its steady-state slip force instantly. The contact patch must roll a
+*relaxation length* `σ` before the deflection catches up. Each slip channel `x ∈ {κ, α}` therefore
+obeys
 
 ```
 σ·ẋ + |V_x|·x = |V_x|·x_ss
 ```
 
-(Pacejka 2012 §7.2 / §8.5). `outlap-tire`'s `relax` module advances this with the
-**exact-exponential** update (HANDOFF §11.2), which is unconditionally stable at every speed and
-needs no implicit solve — the single most important integrator decision:
+(Pacejka 2012, §7.2 and §8.5). The `relax` module of `outlap-tire` advances this with the
+**exact-exponential** update (HANDOFF §11.2). That update is stable at every speed, without
+condition, and it needs no implicit solve. It is the single most important decision about the
+integrator:
 
 ```
 x ← x_ss + (x − x_ss)·exp(−|V_x|·dt/σ)
 ```
 
-The relaxation lengths come from the MF5.2 `PT*` transient coefficients when present (forms marked
-`(~)`, to be re-checked against the book):
+The relaxation lengths come from the MF5.2 `PT*` transient coefficients, when a file has them. The
+forms are marked `(~)`, and must be re-checked against the book:
 
 ```
 σ_κ = F_z·(PTX1 + PTX2·dfz)·exp(−PTX3·dfz)·(R0/FNOMIN)·λσκ
 σ_α = PTY1·sin(2·atan(F_z/(PTY2·F'_z0)))·(1 − PKY3·|γ*|)·R0·λFz0·λσα
 ```
 
-If the `PT*` set is absent, they fall back to the carcass-stiffness identity `σ = K_slip / C_carcass`
-(`LONGITUDINAL_STIFFNESS`/`LATERAL_STIFFNESS`), and, failing even that, to a loud last-resort
-`0.5·R0` recorded in the loaded-model report. Every length is floored at `σ_min = 10⁻³ m` and the
-caller passes `|V_x|.max(VXLOW)` so a standstill still relaxes. Property tests pin the update as a
-contraction (`|x − x_ss|` never grows for `dt ≥ 0`), exact against the analytic ratio, and
-composable (two half-steps equal one full step); the `relax_step` and length queries are
-dhat-gated allocation-free. Consumed by the transient tiers (T2/T3); the QSS tiers use the
-steady-state forces directly.
+If the `PT*` set is absent, the lengths fall back to the identity from carcass stiffness,
+`σ = K_slip / C_carcass`, using `LONGITUDINAL_STIFFNESS` and `LATERAL_STIFFNESS`. If that also
+fails, they fall back to `0.5·R0`. That last resort is loud: the loaded-model report records it.
+
+Every length is floored at `σ_min = 10⁻³ m`. The caller passes `|V_x|.max(VXLOW)`, so a car at
+standstill still relaxes.
+
+Property tests pin three properties of the update. It is a contraction, so `|x − x_ss|` never grows
+for `dt ≥ 0`. It is exact against the analytic ratio. And it composes, so two half-steps equal one
+full step. `relax_step` and the length queries allocate nothing, which dhat gates.
+
+The transient tiers, T2 and T3, consume relaxation. The QSS tiers use the steady-state forces
+directly.
 
 ## References
 

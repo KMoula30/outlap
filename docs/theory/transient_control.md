@@ -1,24 +1,29 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# The transient rule-based control layer — shift FSM, regen blend, torque vectoring
+# The transient rule-based control layer: shift FSM, regen blend, and torque vectoring
 
-This page documents the transient tier's **rule-based control layer** (HANDOFF §8.0/§8.2/§8.4): the
-gear-shift finite state machine ([`outlap_transient::control::Shifter`]), the regen/friction brake
-blend and slow-state battery stack, and the torque-vectoring yaw-moment allocator
-([`outlap_vehicle::control::allocate_yaw_moment`], [`TorqueVectoring`]). It sits between the ideal
-driver (which produces steer/throttle/brake demands — see [driver.md](driver.md)) and the tyre/chassis
-blocks that turn wheel torques into forces.
+This page documents the **rule-based control layer** of the transient tier (HANDOFF §8.0, §8.2, and
+§8.4). It has three parts: the finite state machine for gear shifts,
+[`outlap_transient::control::Shifter`]; the blend between regeneration and the friction brakes, with
+the slow-state battery stack; and the allocator that turns a yaw-moment demand into torque vectoring,
+[`outlap_vehicle::control::allocate_yaw_moment`] and [`TorqueVectoring`].
 
-Every model here is a clean-room implementation from the cited literature (§7); no other project's
-source was consulted or copied.
+The layer sits between two things. Above it is the ideal driver, which produces demands for steer,
+throttle, and brake; see [driver.md](driver.md). Below it are the tire and chassis blocks, which turn
+wheel torques into forces.
 
-The layer is deliberately **rule-based in v1** (Locked Decision #2): the allocator's interface — a
-per-wheel feasibility set plus a fill rule — is shaped so that a quadratic-program allocator can
-replace the body post-v1 without touching a single caller.
+Every model here is a clean-room implementation from the literature cited in §7. No source from
+another project was read or copied.
 
-## 1. Where the discrete and slow state live
+The layer is deliberately **rule-based in v1** (Locked Decision #2). The interface of the allocator
+is a feasibility set for each wheel, plus a fill rule. That shape lets a quadratic-program allocator
+replace the body after v1, without touching a single caller.
 
-The continuous SoA fast buffer holds only the differentiable chassis/relaxation/controller states, and
-its layout is frozen. The control layer's state is neither continuous nor fast, so it lives elsewhere:
+## 1. Where the discrete state and the slow state live
+
+The continuous SoA fast buffer holds only the differentiable states of the chassis, the relaxation,
+and the controller. Its layout is frozen.
+
+The state of the control layer is neither continuous nor fast. It therefore lives elsewhere:
 
 | state | clock | home |
 |-------|-------|------|
@@ -26,19 +31,25 @@ its layout is frozen. The control layer's state is neither continuous nor fast, 
 | pack state of charge, temperature | decimated **slow** clock | the [`SlowStack`] trait object (Decision #6) |
 | drive-torque scale, regen ceiling, realised `ΔM_z` | every step | interned bus channels |
 
-The orchestrator owns one of each, and publishes their outputs onto the bus once per step, **frozen
-across the Runge–Kutta sweep** — exactly the treatment the tyre relaxation and load-transfer coupling
-already receive. Freezing matters: a discrete quantity that jumped between RK stages (a gear swapping
-mid-sweep) would make the stages inconsistent and silently destroy the integrator's order.
+The orchestrator owns one of each. It publishes their outputs onto the bus once for each step, and
+those outputs are **frozen across the Runge–Kutta sweep**. That is exactly the treatment that tire
+relaxation and the load-transfer coupling already get.
 
-The slow stack is touched once every `slow_decimation` fast steps, so its single dynamic dispatch is
-off the hot path (the hot-loop discipline forbids dispatch inside a timestep, not outside it).
+Freezing matters. A discrete quantity that jumped between RK stages — a gear swapping in the middle
+of a sweep — would make the stages inconsistent, and it would silently destroy the order of the
+integrator.
 
-## 2. The gear-shift FSM: torque cut → ratio swap → clutch ramp
+The slow stack is touched once every `slow_decimation` fast steps. Its single dynamic dispatch is
+therefore off the hot path. The hot-loop discipline forbids dispatch inside a timestep, not outside
+one.
 
-An up/down-shift is not instantaneous — it costs a **torque interruption**. Naunheimer et al. describe
-the phase sequence of an automated/sequential transmission shift; the model reproduces its three
-observable phases and charges the vehicle's own `Gearbox.shift_time_s` for the whole thing:
+## 2. The gear-shift FSM: cut the torque, swap the ratio, ramp the clutch
+
+A shift is not instantaneous. It costs an **interruption of torque**.
+
+Naunheimer et al. describe the phase sequence of a shift in an automated or sequential transmission.
+The model reproduces its three observable phases, and charges the car's own
+`Gearbox.shift_time_s` for the whole thing:
 
 ```
 elapsed < f_cut·T_shift          →  torque_scale = 0                  (torque cut)
@@ -47,176 +58,224 @@ f_cut·T_shift ≤ elapsed < T_shift →  torque_scale = (elapsed − f_cut·T_s
 elapsed ≥ T_shift                →  Complete     [EventQueue]         (clutch fully re-engaged)
 ```
 
-`torque_scale ∈ [0,1]` multiplies the powertrain's available wheel drive force each step, so the car
-genuinely coasts through the cut and recovers drive over the clutch ramp. `f_cut = 0.35`
-(`SHIFT_CUT_FRACTION`) is a **modelling constant**, not a measured value: it places the majority of the
-shift in the re-engagement ramp, matching the qualitative shape of a seamless-shift race gearbox. It is
-surfaced as estimated, and `shift_time_s = 0` recovers the pre-PR6 instantaneous ideal shift exactly.
+`torque_scale ∈ [0,1]` multiplies the wheel drive force that the powertrain has available, at each
+step. The car therefore genuinely coasts through the cut, and recovers drive over the clutch ramp.
 
-**The cut reaches a crank-mounted machine too.** On a car whose energy manager governs an electrical
-machine bolted to the crank (an F1 MGU-K), the machine sits *upstream* of the gearbox, so an open
-driveline transmits neither the engine's torque nor its own. The same `torque_scale` therefore
-interrupts the electrical deploy — applied once, in the ERS governor, where it scales the deploy
-wheel force, the pack draw and the machine winding loss **together**. See
-[ers-energy-manager](ers-energy-manager.md#the-shared-crank--one-shaft-two-sources).
+`f_cut = 0.35`, the constant `SHIFT_CUT_FRACTION`, is a **modeling constant**. Nobody measured it. It
+puts most of the shift into the ramp of re-engagement, which matches the qualitative shape of a
+seamless-shift race gearbox. It is surfaced as estimated. Setting `shift_time_s = 0` recovers the
+instantaneous ideal shift from before PR6, exactly.
 
-**The engaged gear indexes no force.** The powertrain's wheel-force ceiling remains the *best-gear*
-traction envelope (the QSS tier already picks the gear at each speed), so the FSM's entire physical
-effect on the car is the torque interruption above. Gear-indexed traction curves — which would let a
-mis-timed shift leave the car in the wrong ratio out of a corner — are a post-v1 change.
+**The cut reaches a machine on the crank too.** Consider a car whose energy manager governs an
+electrical machine bolted to the crank, such as an F1 MGU-K. That machine sits *upstream* of the
+gearbox. An open driveline therefore transmits neither the torque of the engine nor the torque of
+the machine.
 
-**Threshold crossing.** Up-shift thresholds are the traction crossover speeds supplied by the assembly
-pipeline. When the speed crosses one during a step, the crossing *time* is recovered by a single linear
-back-interpolation across that step (`back_interpolate`) — no root-finding (§11.2) — and the two
-discrete transitions are scheduled on the event queue at `t_cross + f_cut·T_shift` and
-`t_cross + T_shift`. Because the schedule is a pure function of the step boundary, the shift timeline
-is bit-reproducible (asserted by `shift_timeline_is_deterministic`).
+The same `torque_scale` therefore interrupts the electrical deploy. It is applied once, in the ERS
+governor, where it scales three things together: the deploy wheel force, the draw from the pack, and
+the winding loss in the machine. See
+[ers-energy-manager](ers-energy-manager.md#the-shared-crank-one-shaft-two-sources).
 
-**Hysteresis.** A down-shift fires only once the speed falls below `0.93 ×` (`DOWNSHIFT_HYSTERESIS`)
-the up-shift threshold of the gear below. Without it, a car cruising exactly at a shift point would
-chatter between gears every step — a classic relay-with-noise limit cycle that the hysteresis band
-removes.
+**The engaged gear indexes no force.** The ceiling on wheel force stays the traction envelope of the
+*best gear*, because the QSS tier already picks the gear at each speed. The entire physical effect
+of the FSM on the car is therefore the interruption of torque described above.
 
-**Where the thresholds come from.** The up-shift speeds are the QSS powertrain's own best-gear
-crossover speeds (`T1Vehicle::upshift_speeds`) — the speeds at which the next gear's wheel-force curve
-overtakes the current one, already baked into the best-gear traction envelope the lap uses. So the
-torque interruption lands exactly where the ceiling switches gears and the delivered force is
-unchanged. A geared car steps through its ratios as it accelerates, each shift a torque cut; a
-single-speed (direct-drive) car has no crossover speeds and the FSM is inert.
+Traction curves indexed by gear would let a mis-timed shift leave the car in the wrong ratio out of
+a corner. That is a change for after v1.
+
+**Crossing a threshold.** The thresholds for an up-shift are the crossover speeds that the assembly
+pipeline supplies.
+
+When the speed crosses one during a step, a single linear back-interpolation across that step
+recovers the *time* of the crossing, through `back_interpolate`. There is no root-finding (§11.2).
+The two discrete transitions are then scheduled on the event queue, at `t_cross + f_cut·T_shift` and
+at `t_cross + T_shift`.
+
+The schedule is a pure function of the step boundary. The timeline of a shift is therefore
+bit-reproducible, which `shift_timeline_is_deterministic` asserts.
+
+**Hysteresis.** A down-shift fires only once the speed falls below `0.93 ×` the up-shift threshold of
+the gear below. That factor is `DOWNSHIFT_HYSTERESIS`.
+
+Without it, a car cruising exactly at a shift point would chatter between gears on every step. That
+is the classic limit cycle of a relay with noise, and the hysteresis band removes it.
+
+**Where the thresholds come from.** The up-shift speeds are the QSS powertrain's own crossover
+speeds for the best gear, `T1Vehicle::upshift_speeds`. They are the speeds at which the wheel-force
+curve of the next gear overtakes the current one, and they are already baked into the best-gear
+traction envelope that the lap uses.
+
+The interruption of torque therefore lands exactly where the ceiling switches gears, and the
+delivered force is unchanged.
+
+A geared car steps through its ratios as it accelerates, and each shift is a cut. A single-speed car
+with direct drive has no crossover speeds, so the FSM is inert.
 
 ![Gear-shift FSM on the 8-speed f1_2026](img/t2_gear_shift.png)
 
-## 3. Regen blending: series (blended) braking
+## 3. Blending regeneration: series, or blended, braking
 
-Production EVs and full hybrids use **series regenerative braking**. The pedal demands a *total* brake
-torque; the balance bar splits it front/rear; on each driven axle that axle's machine absorbs as much of
-its share as it can; and the friction brakes supply only the **deficit**:
+Production EVs and full hybrids use **series regenerative braking**.
+
+The pedal demands a *total* brake torque. The balance bar splits it between front and rear. On each
+driven axle, that axle's machine absorbs as much of its share as it can. The friction brakes then
+supply only the **deficit**:
 
 ```
 τ_brake,axle  =  τ_regen,axle  +  τ_friction,axle        (the commanded axle torque, unchanged)
 ```
 
-Because the machine substitutes for the calipers *inside* the commanded torque rather than adding to
-it, the axle total — which is what the tyre responds to — never moves. The car decelerates identically
-whether the energy went into the pack or into the discs, and only the recovered energy differs. That is
-the Decision #11 invariant, and it is asserted exactly (`assert_eq!` on the whole speed trace, not to a
-tolerance) by `regen_is_energy_only_the_trajectory_is_identical_on_off`. It is not an approximation we
-pay for: it is what a correct series blend does, and it is why regen cannot perturb the tier-parity
-gates.
+The machine substitutes for the calipers *inside* the commanded torque. It does not add to it. The
+axle total, which is what the tire responds to, therefore never moves.
+
+The car decelerates identically, whether the energy went into the pack or into the discs. Only the
+recovered energy differs.
+
+That is the invariant of Decision #11, and it is asserted exactly. The test
+`regen_is_energy_only_the_trajectory_is_identical_on_off` uses `assert_eq!` on the whole speed
+trace, not a tolerance.
+
+This is not an approximation that we pay for. It is what a correct series blend does. And it is why
+regeneration cannot perturb the parity gates between tiers.
 
 ### 3.1 Each machine brakes its own axle
 
-A machine can only ever apply torque to the wheels it drives. A rear-drive EV therefore regenerates on
-the rear axle and not at all on the front; a dual-motor car runs two independent regen actuators that
-happen to share one battery. The transient block models the two axles separately, and the QSS assembly
-attributes each drive unit's braking capability to the axle(s) in its driven set
-(`T1Vehicle::max_regen_force_by_axle`), splitting by driven-wheel count when a single motor spans both
-axles through a centre differential.
+A machine can only apply torque to the wheels it drives. A rear-drive EV therefore regenerates on
+the rear axle, and not at all on the front. A dual-motor car runs two independent regen actuators
+that happen to share one battery.
 
-An **internal-combustion engine recovers nothing**. It has no negative quadrant to command: its overrun
-braking is parasitic pumping/friction drag, not recoverable energy. Its regen envelope is identically
-zero and the loaded-model report says so.
+The transient block models the two axles separately. The QSS assembly attributes the braking
+capability of each drive unit to the axles in its driven set, through
+`T1Vehicle::max_regen_force_by_axle`. When a single motor spans both axles through a center
+differential, it splits by the count of driven wheels.
+
+An **internal-combustion engine recovers nothing**. It has no negative quadrant to command. Its
+braking on overrun is parasitic drag from pumping and friction, and that energy is not recoverable.
+Its regen envelope is identically zero, and the loaded-model report says so.
 
 ### 3.2 The three ceilings on the machine
 
-For each axle `a` with a machine, the regen braking force it takes is
+For each axle `a` that has a machine, the regen braking force it takes is
 
 ```
 F_regen,a = min( authority_a · F_brake,a ,  F_env,a(v_x) · fade(v_x) )
 ```
 
-1. **Available regen torque** — `F_env,a(v_x)` is the machine's braking envelope
-   (`ptm/1.2` `max_regen_torque_nm_vs_speed`, through the best gear, at the wheel), sampled into the
-   shared monotone cubic at assembly so the hot loop never touches a `.ptm` map. When a map declares no
-   regen envelope, the machine is assumed **symmetric** with its drive envelope — the usual first-order
-   truth when inverter current sets the limit — and that assumption is surfaced as *estimated*, never
-   applied silently (#41).
-2. **Blend authority** — `authority_a = max_regen_frac`, a policy cap on the machine's share of *its own
-   axle's* commanded brake torque. `1` means "take everything the envelope and the pack allow".
-3. **Low-speed fade** — `fade(v_x) = clamp(v_x / 2 m/s, 0, 1)`. Real controllers hand braking back to
-   the calipers at a walking pace: torque control degrades, the recoverable energy is negligible, and
-   the machine must release the wheel before the car stops.
+1. **The regen torque available.** `F_env,a(v_x)` is the braking envelope of the machine. It comes
+   from `max_regen_torque_nm_vs_speed` in `ptm/1.2`, taken through the best gear and expressed at the
+   wheel. It is sampled into the shared monotone cubic at assembly, so the hot loop never touches a
+   `.ptm` map.
 
-Driveline efficiency is deliberately *not* applied to `F_env`. Under drive a loss shrinks the force
-reaching the wheel; under regen the power flows the other way, so a loss would *add* braking at the
-wheel while shrinking what the machine recovers. Charging `η` once, against the recovered power, keeps
-the ledger honest and understates rather than overstates the machine's braking authority.
+   When a map declares no regen envelope, outlap assumes the machine is **symmetric** with its drive
+   envelope. That is the usual first-order truth when inverter current sets the limit. The
+   assumption is surfaced as *estimated*. It is never applied silently (#41).
+2. **Blend authority.** `authority_a = max_regen_frac` is a policy cap on the machine's share of the
+   brake torque commanded on *its own axle*. A value of `1` means "take everything the envelope and
+   the pack allow".
+3. **Fade at low speed.** `fade(v_x) = clamp(v_x / 2 m/s, 0, 1)`. A real controller hands braking
+   back to the calipers at walking pace. Torque control degrades there, the recoverable energy is
+   negligible, and the machine must release the wheel before the car stops.
 
-### 3.3 One pack, shared: charge acceptance vs SoC *and* temperature
+Driveline efficiency is deliberately *not* applied to `F_env`. Under drive, a loss shrinks the force
+that reaches the wheel. Under regeneration the power flows the other way, so a loss would *add*
+braking at the wheel while shrinking what the machine recovers. Charging `η` once, against the
+recovered power, keeps the ledger honest. It understates the braking authority of the machine rather
+than overstating it.
 
-The two machines draw on one battery. Their combined electrical demand `Σ_a η_a · F_regen,a · v_x` is
-capped by the pack's **charge-acceptance ceiling**; when the cap binds, both machines are scaled back by
-the same factor — preserving the front/rear split — and the calipers absorb the remainder on each axle.
-The axle totals are untouched, so the trajectory is unmoved either way.
+### 3.3 One pack, shared: charge acceptance against SoC *and* temperature
 
-The ceiling itself (`Pack::regen_power_limit_w`) is the minimum of three limits a real BMS enforces:
+The two machines draw on one battery. Their combined electrical demand,
+`Σ_a η_a · F_regen,a · v_x`, is capped by the **charge-acceptance ceiling** of the pack.
+
+When the cap binds, both machines are scaled back by the same factor, which preserves the split
+between front and rear. The calipers then absorb the remainder on each axle. The axle totals are
+untouched, so the trajectory does not move either way.
+
+The ceiling itself, `Pack::regen_power_limit_w`, is the minimum of three limits that a real BMS
+enforces:
 
 ```
 P_accept = min( peak_regen(SoC) · derate(T) ,  V_max·(V_max − emf)/R0(SoC,T) )     (0 above the SoC window)
 ```
 
-- **Design/SoC ceiling** — the declared `peak_regen_power_w_vs_soc(SoC)` curve.
-- **Kinetic (cold) derate** — `derate(T)` from `battery/1.1` `regen_derate_vs_temp`. **A cold lithium-ion
-  cell cannot accept a fast charge.** Below roughly 10 °C the anode's intercalation kinetics slow until
-  plating metallic lithium becomes the competing reaction, so a BMS cuts charge current hard — typically
-  to zero below 0 °C — to avoid irreversible capacity loss and dendrite growth. This is a *kinetic*
-  limit. It does **not** fall out of the ohmic grid and must be declared; absent, the pack is assumed to
-  accept its full ceiling at any temperature and that is marked estimated.
-- **Voltage (CV) ceiling** — charging drives the terminal voltage *above* the open-circuit EMF by
-  `I·R0`, and it may not exceed `ns · cell_v_max`. With `emf = OCV(SoC,T) − V_RC`, the largest charge
-  current is `(V_max − emf)/R0`, giving the bound above. This is the constant-voltage taper: it vanishes
-  as the pack fills (`emf → V_max`) and tightens when cold (`R0` rises), for free.
+- **The design ceiling against SoC**, which is the declared `peak_regen_power_w_vs_soc(SoC)` curve.
+- **The kinetic, or cold, derate**, which is `derate(T)`, from `regen_derate_vs_temp` in
+  `battery/1.1`.
 
-The two terms are **not** redundant, and it is worth being precise about why. Take the committed
-`synth_pack` fixture (220S1P, `cell_v_max` 4.2 V, so `V_max` = 924 V), at 25 °C and at two SoC grid
-nodes:
+  **A cold lithium-ion cell cannot accept a fast charge.** Below roughly 10 °C, the intercalation
+  kinetics at the anode slow down, until plating metallic lithium becomes the competing reaction. A
+  BMS therefore cuts charge current hard, and typically to zero below 0 °C, to avoid irreversible
+  loss of capacity and the growth of dendrites.
+
+  This is a *kinetic* limit. It does **not** fall out of the ohmic grid, and it must be declared. If
+  it is absent, outlap assumes the pack accepts its full ceiling at any temperature, and marks that
+  assumption estimated.
+- **The voltage, or CV, ceiling.** Charging drives the terminal voltage *above* the open-circuit EMF
+  by `I·R0`, and it may not exceed `ns · cell_v_max`.
+
+  With `emf = OCV(SoC,T) − V_RC`, the largest charge current is `(V_max − emf)/R0`, which gives the
+  bound above. This is the constant-voltage taper. It vanishes as the pack fills, because
+  `emf → V_max`, and it tightens when the pack is cold, because `R0` rises. Both come for free.
+
+The last two terms are **not** redundant. It is worth being precise about why.
+
+Take the committed `synth_pack` fixture, which is 220S1P with `cell_v_max` of 4.2 V, so `V_max` is
+924 V. At 25 °C, at two nodes of the SoC grid:
 
 | SoC | design curve | voltage ceiling | binds |
 |-----|--------------|-----------------|-------|
 | 0.40 | 180 kW | 750 kW | design |
 | 0.80 | 90 kW  | 629 kW | design |
 
-The voltage ceiling never binds on this pack, because its open-circuit voltage tops out near 3.64 V per
-cell — a long way under the 4.2 V ceiling. Nor does it carry much temperature signal: this fixture's
-`R0` is flat in temperature, so the ceiling moves only through `OCV(T)`, spanning 742 → 755 kW across
-0 → 45 °C at SoC 0.4. That is a 1.8 % swing. **The ohmic term alone cannot reproduce cold-charge
-refusal** — not here, and not on a real pack, where at mid-SoC it sits several times above the design
-curve even below freezing. The kinetic derate is what makes a cold pack refuse charge.
+The voltage ceiling never binds on this pack. Its open-circuit voltage tops out near 3.64 V per
+cell, a long way under the 4.2 V ceiling.
 
-The voltage ceiling earns its place at the *other* end: it bites as the open-circuit voltage climbs
-toward `ns · cell_v_max`, where the headroom `V_max − emf` collapses and with it the admissible current.
-That is the constant-voltage taper every charger exhibits, and it tightens further when `R0` rises with
-cold. Together the two terms cover both regimes; neither covers both alone.
+Nor does the voltage ceiling carry much signal about temperature. The `R0` of this fixture is flat in
+temperature, so the ceiling moves only through `OCV(T)`. At SoC 0.4 it spans 742 kW to 755 kW across
+0 °C to 45 °C, which is a swing of 1.8 %.
 
-### 3.4 What is still not modelled
+**The ohmic term alone therefore cannot reproduce a cold pack refusing charge.** Not here, and not
+on a real pack, where at middle SoC it sits several times above the design curve, even below
+freezing. The kinetic derate is what makes a cold pack refuse charge.
 
-- **No ABS/grip cap on the regen share.** The commanded axle torque already respects the driver's
-  demand, and regen only substitutes within it, so the tyre never sees more than it would have — but a
-  wheel about to lock is not handed back to the friction brakes the way a real ABS event would.
-- **`WheelBrakeTorque` combines friction and regen.** A future brake-thermal model must subtract the
-  per-axle regen share (published on `ctrl.regen_torque_{front,rear}_nm`) before heating the discs, or
-  it will cook them on a regen-heavy lap.
-- **Constant recovery efficiency.** `η` is a documented constant proxy; the mapped `.ptm` efficiency
-  drives QSS energy accounting, and the wasm-clean block may never touch a `.ptm` table.
-- Rotor inertia reflected through the driveline is ignored (second order at these torques).
+The voltage ceiling earns its place at the *other* end. It bites as the open-circuit voltage climbs
+toward `ns · cell_v_max`. The headroom `V_max − emf` collapses there, and the admissible current
+collapses with it. That is the constant-voltage taper that every charger shows, and it tightens
+further when `R0` rises in the cold.
 
-## 4. Torque vectoring: a yaw moment produced by the tyres, not injected
+Together the two terms cover both regimes. Neither covers both alone.
 
-The controller tracks the corner's reference yaw rate `r_target = v_x · κ_ref` with proportional
-feedback, capped by an optional machine-envelope proxy:
+### 3.4 What is still not modeled
+
+- **No cap on the regen share from ABS or grip.** The commanded axle torque already respects the
+  driver's demand, and regeneration only substitutes within it. The tire therefore never sees more
+  than it would have. But a wheel about to lock is not handed back to the friction brakes, the way a
+  real ABS event would hand it back.
+- **`WheelBrakeTorque` combines friction and regeneration.** A future brake-thermal model must
+  subtract the regen share of each axle, which is published on `ctrl.regen_torque_{front,rear}_nm`,
+  before it heats the discs. Otherwise it will cook them on a lap with heavy regeneration.
+- **Recovery efficiency is constant.** `η` is a documented constant, used as a proxy. The mapped
+  efficiency in the `.ptm` file drives energy accounting in QSS, and the wasm-clean block may never
+  touch a `.ptm` table.
+- Rotor inertia reflected through the driveline is ignored. It is second order at these torques.
+
+## 4. Torque vectoring: a yaw moment that the tires produce, and that nothing injects
+
+The controller tracks the reference yaw rate of the corner, `r_target = v_x · κ_ref`, with
+proportional feedback. An optional proxy for the machine envelope caps it:
 
 ```
 ΔM_z,demand = clamp( k_yaw · (r_target − r),  ±M_max )
 ```
 
-This is the standard **direct yaw-moment control** law (Rajamani §8; van Zanten's ESP uses the same
-yaw-rate error signal, realised through individual-wheel braking; Sawase & Sano realise it through
-driving/braking force distribution, which is the case here).
+This is the standard law of **direct yaw-moment control** (Rajamani §8). The ESP of van Zanten uses
+the same error signal on yaw rate, and realizes it by braking individual wheels. Sawase & Sano
+realize it by distributing driving and braking force, which is the case here.
 
-What matters is the second half: the demanded moment is **not** added to the chassis as a lumped
-couple. It is allocated across the four wheels as longitudinal force deltas `Δf_x,i`, each clamped
-inside that wheel's **friction ellipse** — the combined-slip limit of Pacejka's tyre model, the
-`F_x`–`F_y` ellipse of Milliken & Milliken's friction circle:
+What matters is the second half. The demanded moment is **not** added to the chassis as a lumped
+couple. It is allocated across the four wheels, as deltas in longitudinal force, `Δf_x,i`. Each
+delta is clamped inside that wheel's **friction ellipse**. That is the combined-slip limit of the
+Pacejka tire model, and the `F_x`–`F_y` ellipse of the friction circle in Milliken & Milliken:
 
 ```
 f_x,max,i = √( (μ·F_z,i)² − F_y,i² )                     (longitudinal headroom at the current F_y)
@@ -227,43 +286,56 @@ M_feasible = Σ_i |y_i| · h_i
 Δf_x,i     = s_i · min(|demand|/M_feasible, 1) · h_i     (proportional fill of the feasible set)
 ```
 
-Under ISO 8855 a longitudinal force at lateral arm `y_i` (+left) contributes `−y_i·Δf_x,i` to the yaw
-moment, so the deltas realise **exactly** `ΔM_z` — an identity, not an approximation
-(`reported_moment_equals_the_moment_the_deltas_produce`). The realised moment saturates at
-`M_feasible`, which is what the tyres can actually deliver: with all four wheels at their lateral
-limit, `f_x,max = 0`, no moment is feasible, and the block reports `0` rather than the demand.
+Under ISO 8855, a longitudinal force at lateral arm `y_i`, positive to the left, contributes
+`−y_i·Δf_x,i` to the yaw moment. The deltas therefore realize **exactly** `ΔM_z`. That is an
+identity, not an approximation, and
+`reported_moment_equals_the_moment_the_deltas_produce` asserts it.
 
-The deltas are applied as extra wheel drive/brake **torque** (`Δf_x,i · R_i`). The wheel spin responds,
-the slip evolves, and the tyre produces the extra longitudinal force — so the yaw moment emerges through
-the contact patch over the tyre's relaxation lag, with all the phase lag that implies. Disabled, the
-block is a no-op that only zeroes its telemetry channel, so a car that does not enable TV is
-byte-identical to the pre-PR6 lap.
+The realized moment saturates at `M_feasible`, which is what the tires can actually deliver. With
+all four wheels at their lateral limit, `f_x,max = 0`, no moment is feasible, and the block reports
+`0` rather than the demand.
 
-`μ` is the vehicle's representative peak grip (the ellipse radius coefficient), not a per-wheel
-instantaneous friction estimate; a QP allocator with the real per-wheel combined-slip surface is the
-post-v1 replacement (Decision #2).
+The deltas are applied as extra drive or brake **torque** at the wheel, `Δf_x,i · R_i`. The wheel
+spin responds, the slip evolves, and the tire produces the extra longitudinal force. The yaw moment
+therefore emerges through the contact patch, over the relaxation lag of the tire, with all the phase
+lag that implies.
 
-## 5. The slow-state stack: the state of charge moves both ways
+Disabled, the block is a no-op that only zeroes its telemetry channel. A car that does not enable
+torque vectoring is therefore byte-identical to the lap before PR6.
 
-`SlowStack` is the interface the orchestrator advances on the decimated slow clock. It Coulomb-counts
-the **net** electrical power into the pack over the slow interval — the recovered regen (§3) *minus*
-the electrical traction draw — and publishes back the charge-power ceiling `P_limit(SoC, T)` that caps
-§3, plus the pack SoC and temperature for telemetry. The traction draw is the mechanical drive power
-each machine-equipped axle puts down, `F_drive,axle · v_x`, over its motoring efficiency; only an
-electric axle draws from the pack (an engine burns fuel). So the state of charge **falls under power
-and rises under braking**, as a real stint does — and a pack seeded full discharges to open headroom,
-rather than sitting on a dead cell with regen refused:
+`μ` is the representative peak grip of the car, which is the radius coefficient of the ellipse. It is
+not an instantaneous estimate of friction at each wheel. A QP allocator with the real combined-slip
+surface at each wheel is the replacement after v1 (Decision #2).
+
+## 5. The slow-state stack: state of charge moves in both directions
+
+`SlowStack` is the interface that the orchestrator advances on the decimated slow clock.
+
+It Coulomb-counts the **net** electrical power into the pack over the slow interval. That is the
+recovered regeneration of §3, *minus* the electrical draw for traction. It publishes back the
+ceiling on charge power, `P_limit(SoC, T)`, which caps §3. It also publishes the pack SoC and
+temperature, for telemetry.
+
+The traction draw is the mechanical drive power that each axle with a machine puts down,
+`F_drive,axle · v_x`, over its motoring efficiency. Only an electric axle draws from the pack,
+because an engine burns fuel.
+
+State of charge therefore **falls under power and rises under braking**, as it does in a real stint.
+A pack seeded full discharges until it has headroom, rather than sitting on a dead cell with
+regeneration refused:
 
 ![Traction discharge on a full pack](img/t2_traction_discharge.png)
 
-`SlowStack` is *received* as a boxed artifact — the concrete implementation wraps the QSS `Pack`
-primitive at the Python boundary — so the wasm-clean transient crate never depends on the QSS
-trim/envelope machinery, mirroring how the line table and traction envelope are handed in (§11.1).
+`SlowStack` is *received* as a boxed artifact. The concrete implementation wraps the QSS `Pack`
+primitive at the Python boundary. The wasm-clean transient crate therefore never depends on the trim
+and envelope machinery of QSS. This mirrors how the line table and the traction envelope are handed
+in (§11.1).
 
-Two simplifications this tier carries, both surfaced in the lap notes: the whole drive power on a
-machine-equipped axle is drawn from the pack (a pure-EV assumption; a hybrid's engine share is not
-split out until the QP powertrain), and the draw is not capped by the pack's *discharge* ceiling (the
-traction envelope, not the pack, limits drive power at T2 — a depleted pack does not yet fade the car).
+This tier carries two simplifications, and the lap notes surface both. The whole drive power on an
+axle with a machine is drawn from the pack, which is a pure-EV assumption; the engine's share on a
+hybrid is not split out until the QP powertrain arrives. And the draw is not capped by the pack's
+*discharge* ceiling; at T2 the traction envelope limits drive power, not the pack, so a depleted
+pack does not yet fade the car.
 
 ## 6. Parameters and defaults
 
@@ -282,35 +354,43 @@ traction envelope, not the pack, limits drive power at T2 — a depleted pack do
 | `M_max` | `drivetrain.control.torque_vectoring.max_yaw_moment_nm` | `+∞` (unset) | hard cap on `|ΔM_z|` (machine-envelope proxy) |
 | `μ` | derived | vehicle peak grip | friction-ellipse radius coefficient |
 
-Schema growth, all additive: `max_yaw_moment_nm` (`vehicle/1.6`), `max_regen_torque_nm_vs_speed` (`ptm/1.2`), and `regen_derate_vs_temp` (`battery/1.1`).
+Three fields were added to the schemas, and all three are additive: `max_yaw_moment_nm`
+(`vehicle/1.6`), `max_regen_torque_nm_vs_speed` (`ptm/1.2`), and `regen_derate_vs_temp`
+(`battery/1.1`).
 
 ## 7. Verification
 
-The allocator's four contract invariants are property-tested over randomised physically-consistent
-wheel states (`outlap-vehicle/tests/control_props.rs`): friction-ellipse containment, the sign
-convention (the realised moment never opposes or overshoots the demand), moment exactness, and
-drive-capability (a wheel with no machine may only brake). The suite is mutation-checked — letting the
-fill overshoot the feasible set, or reporting the demand instead of the realised moment, each fails it.
+The allocator has four contract invariants. Property tests check all four over randomized wheel
+states that are physically consistent, in `outlap-vehicle/tests/control_props.rs`: containment in
+the friction ellipse; the sign convention, where the realized moment never opposes the demand and
+never overshoots it; exactness of the moment; and drive capability, where a wheel with no machine
+may only brake.
 
-The shift FSM's determinism, torque cut, and gear swap are unit-tested in place; the regen energy
-bound, the Decision #11 bit-identical trajectory invariant, and the slow-stack SoC closure are
-block-level integration tests (`outlap-transient/tests/control.rs`).
+The suite is mutation-checked. Letting the fill overshoot the feasible set fails it. So does
+reporting the demand instead of the realized moment.
 
-The regen blend is pinned at three levels, each mutation-checked:
+The determinism of the shift FSM, its torque cut, and its gear swap are unit-tested in place. The
+bound on regen energy, the bit-identical trajectory invariant of Decision #11, and the SoC closure
+of the slow stack are integration tests at block level, in `outlap-transient/tests/control.rs`.
 
-- **Pack** (`outlap-qss/tests/battery.rs`) — a cold pack accepts less than a warm one and nothing below
-  0 °C; the derate scales the design curve; an absent derate leaves acceptance temperature-independent
-  (`battery/1.0` compatibility); a nearly-full pack tapers on the voltage ceiling; that ceiling itself
-  tightens as `R0` rises when cold; acceptance is never negative anywhere on the `(SoC, T)` grid.
-- **Machine** (`outlap-qss/tests/t1_powertrain.rs`) — a rear-drive EV regens only at the rear; each
-  machine of a dual-motor car regens its own axle; an ICE recovers nothing and says so; an absent
-  envelope is symmetric *and surfaced*; a declared envelope is used verbatim.
-- **Blend** (`outlap-vehicle/src/control.rs`) — the machine takes its share and the calipers take the
-  rest; a machine never brakes the other axle; a pack that cannot accept charge hands braking back to
-  the calipers entirely; the machine envelope, the blend authority, and the low-speed fade each cap the
-  share; a shared pack ceiling scales both axles proportionally; regen never exceeds the commanded
-  braking. Letting a machine reach across axles, or forgetting to scale its braking torque when the pack
-  ceiling binds, each fails this suite.
+The regen blend is pinned at three levels, and each level is mutation-checked.
+
+- **The pack** (`outlap-qss/tests/battery.rs`). A cold pack accepts less than a warm one, and
+  nothing below 0 °C. The derate scales the design curve. An absent derate leaves acceptance
+  independent of temperature, which keeps `battery/1.0` compatible. A nearly full pack tapers on the
+  voltage ceiling. That ceiling itself tightens as `R0` rises in the cold. And acceptance is never
+  negative, anywhere on the `(SoC, T)` grid.
+- **The machine** (`outlap-qss/tests/t1_powertrain.rs`). A rear-drive EV regenerates only at the
+  rear. Each machine of a dual-motor car regenerates its own axle. An ICE recovers nothing, and says
+  so. An absent envelope is symmetric, *and it is surfaced*. A declared envelope is used verbatim.
+- **The blend** (`outlap-vehicle/src/control.rs`). The machine takes its share, and the calipers take
+  the rest. A machine never brakes the other axle. A pack that cannot accept charge hands braking
+  back to the calipers entirely. The machine envelope, the blend authority, and the fade at low
+  speed each cap the share. A shared pack ceiling scales both axles in proportion. And regeneration
+  never exceeds the commanded braking.
+
+  Letting a machine reach across axles fails this suite. So does forgetting to scale its braking
+  torque when the pack ceiling binds.
 
 ## References
 
@@ -342,4 +422,5 @@ The regen blend is pinned at three levels, each mutation-checked:
 - T. D. Gillespie, *Fundamentals of Vehicle Dynamics*, SAE, 1992 — brake balance and the axle brake
   force split.
 
-No external open-source project was consulted for this layer; it is authored from the literature above.
+No external open-source project was consulted for this layer. It is authored from the literature
+above.

@@ -1,36 +1,37 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # Notebooks
 
-Illustrated, executable walkthroughs of outlap. Every number and plot is computed live by the
-Rust core through the `outlap.core` Python bindings — nothing is hard-coded, so the notebooks
-double as end-to-end tests of the whole stack.
+These notebooks are illustrated walkthroughs of outlap, and you can run every one of them. The Rust
+core computes each number and each plot live, through the `outlap.core` Python bindings. Nothing is
+hard-coded. The notebooks therefore also serve as end-to-end tests of the whole stack.
 
-These notebooks are the runnable companion to [`docs/GUIDE.md`](../docs/GUIDE.md), the written
-zero-to-hero guide; the guide's chapters map onto the notebook sequence below.
+[`docs/GUIDE.md`](../docs/GUIDE.md) is the written guide, which takes a reader from zero to
+competence. These notebooks are its runnable companion. Its chapters map onto the sequence below.
 
 | Notebook | What it covers |
 |---|---|
-| [`00_tour_of_outlap.ipynb`](00_tour_of_outlap.ipynb) | The guided tour of everything. **Start here.** |
-| [`01_car_as_data.ipynb`](01_car_as_data.ipynb) | The input quartet, validation diagnostics, the loaded-model report, and the **what-if override API** (+ a lap-time sensitivity tornado and live sliders). |
-| [`02_track.ipynb`](02_track.ipynb) | The 3D ribbon: corridor, curvature, vertical curvature, widths, provenance — a corner explorer, and the Spa-Francorchamps elevation showcase (~100 m of climb). |
-| [`03_raceline.ipynb`](03_raceline.ipynb) | The min-curvature QP: offsets vs corridor bounds, curvature reduction, a car-width sweep — and the time-weighted line that starts closing the min-curvature-vs-min-time gap. |
-| [`04_t0_lap.ipynb`](04_t0_lap.ipynb) | Solver anatomy: acceleration populations, `ds` convergence, determinism, and session-conditions sweeps. |
-| [`05_tyre_mf61.ipynb`](05_tyre_mf61.ipynb) | MF6.1 in depth: load/camber families, the slip-plane force map, and per-channel oracle validation. |
-| [`06_powertrain_pdt.ipynb`](06_powertrain_pdt.ipynb) | The `.ptm` firewall, the PDT importer on synthetic HDF5, the distilled 2-node thermal model, and the battery pack. |
-| [`07_qss_t1.ipynb`](07_qss_t1.ipynb) | **The T1 capstone**: double-track trim, per-wheel loads, setup metrics, the g-g-g-v envelope — then the Model 3 RWD (HV variant) with the live Vdc–SoC coupling + machine-thermal derate, swept across three drive-unit sizings. |
-| [`08_transient_t2.ipynb`](08_transient_t2.ipynb) | **The T2 capstone**: the transient tier driven around the lap — the QSS↔T2 overlay and hull containment, the time-domain traces a station solver can't show (steer, yaw rate, sideslip, per-wheel load/slip, the shift FSM), the time-weighted line's lap-time recovery, and a lap on the full 3-D road frame. |
-| [`09_race_engineering.ipynb`](09_race_engineering.ipynb) | **Race engineering**: reading the T2 traces like a data logger — the anatomy of one corner (braking point, trail braking, apex, throttle pickup, the friction circle in action) and car balance (understeer/oversteer via what-if aero overrides; why the neutral car is the fast car). |
-| [`10_stint_strategy.ipynb`](10_stint_strategy.ipynb) | **Stint strategy**: multi-lap running with the tyre thermal/wear state carried across lap boundaries — warm-up, the degradation curve, and where the pace cliff falls. |
-| [`11_race_energy.ipynb`](11_race_energy.ipynb) | **The energy capstone**: a full 66-lap race distance of coupled energy accounting — state of charge moving in both directions, the per-lap deploy/harvest ledger and which limit binds, fuel burn against pace, the within-lap deploy/harvest/recharge phases, the override mode measured, a transient-tier cross-check, and pitch-under-braking aero balance on the 14-DOF tier. |
+| [`00_tour_of_outlap.ipynb`](00_tour_of_outlap.ipynb) | A guided tour of everything. **Start here.** |
+| [`01_car_as_data.ipynb`](01_car_as_data.ipynb) | The input quartet, the validation diagnostics, the loaded-model report, and the **what-if override API**. It adds a tornado chart of lap-time sensitivity and live sliders. |
+| [`02_track.ipynb`](02_track.ipynb) | The 3D ribbon: corridor, curvature, vertical curvature, widths, and provenance. It includes a corner explorer and the elevation showcase at Spa-Francorchamps, which climbs about 100 m. |
+| [`03_raceline.ipynb`](03_raceline.ipynb) | The minimum-curvature QP: offsets against the corridor bounds, the reduction in curvature, and a sweep over car width. It then shows the time-weighted line, which begins to close the gap between the minimum-curvature line and the minimum-time line. |
+| [`04_t0_lap.ipynb`](04_t0_lap.ipynb) | The anatomy of the solver: acceleration populations, convergence in `ds`, determinism, and sweeps over session conditions. |
+| [`05_tyre_mf61.ipynb`](05_tyre_mf61.ipynb) | MF6.1 in depth: families of curves over load and camber, the force map on the slip plane, and validation of each channel against the oracle. |
+| [`06_powertrain_pdt.ipynb`](06_powertrain_pdt.ipynb) | The `.ptm` firewall, the PDT importer running on synthetic HDF5, the distilled 2-node thermal model, and the battery pack. |
+| [`07_qss_t1.ipynb`](07_qss_t1.ipynb) | **The T1 capstone**: the double-track trim, per-wheel loads, setup metrics, and the g-g-g-v envelope. It then runs the Model 3 RWD in its HV variant, with the live Vdc–SoC coupling and the machine-thermal derate, swept across three drive-unit sizings. |
+| [`08_transient_t2.ipynb`](08_transient_t2.ipynb) | **The T2 capstone**: the transient tier driven around a lap. It overlays QSS and T2 and checks hull containment. It shows the time-domain traces that a station solver cannot produce: steer, yaw rate, sideslip, per-wheel load and slip, and the shift FSM. It measures the lap time that the time-weighted line recovers, and runs a lap on the full 3-D road frame. |
+| [`09_race_engineering.ipynb`](09_race_engineering.ipynb) | **Race engineering**: how to read the T2 traces like a data logger. It covers the anatomy of one corner, which is the braking point, trail braking, the apex, and throttle pickup, with the friction circle in action. It then covers car balance: understeer and oversteer through what-if aero overrides, and why the neutral car is the fast car. |
+| [`10_stint_strategy.ipynb`](10_stint_strategy.ipynb) | **Stint strategy**: running many laps while the tire thermal state and wear state carry across each lap boundary. It shows warm-up, the degradation curve, and where the pace cliff falls. |
+| [`11_race_energy.ipynb`](11_race_energy.ipynb) | **The energy capstone**: coupled energy accounting over a full race distance of 66 laps. State of charge moves in both directions. It shows the deploy and harvest ledger for each lap and which limit binds, fuel burn against pace, the deploy, harvest, and recharge phases within a lap, and a measurement of the override mode. It closes with a cross-check on the transient tier and with pitch under braking, and its effect on aero balance, on the 14-DOF tier. |
 
-Interactive panels (ipywidgets sliders driving the override API) are live in a running Jupyter;
-each has a static twin so the GitHub-rendered page tells the same story.
+Some panels are interactive: ipywidgets sliders drive the override API. They are live in a running
+Jupyter. Each one has a static twin, so the page that GitHub renders tells the same story.
 
-`07_qss_t1_local.ipynb` is the capstone's **untracked real-data twin** (git-ignored by name): the
-same Model 3 story on real PDT drive-unit imports and the real 704 V pack. It requires the local
-imports described in `data/vehicles/tesla_model3_rwd/README.md` and is never committed (firewall).
+`07_qss_t1_local.ipynb` is the **untracked real-data twin** of the capstone. Git ignores it by
+name. It tells the same Model 3 story on real PDT drive-unit imports and the real 704 V pack. It
+needs the local imports that `data/vehicles/tesla_model3_rwd/README.md` describes. It is never
+committed, because of the firewall.
 
-## Running them
+## How to run them
 
 ```bash
 cd python
@@ -40,9 +41,10 @@ uv run --with jupyterlab jupyter lab ../notebooks/00_tour_of_outlap.ipynb
 
 ## Conventions
 
-- Committed **with outputs** so they read well on GitHub without running anything.
-- CI re-executes every notebook headless on each PR (`jupyter execute`): if the API breaks or
-  any cell errors — including the in-notebook assertions (the 0.5 % tyre gate, the racing line
-  beating the centerline) — the build fails until the notebook is updated.
-- Charts follow the repo's data-viz style (validated colorblind-safe palette, one axis per
-  chart, SI units on axes).
+- Each notebook is committed **with its outputs**, so that it reads well on GitHub without running.
+- CI re-executes every notebook headless on each PR, with `jupyter execute`. The build then fails
+  until someone updates the notebook, if the API breaks or any cell raises an error. The
+  in-notebook assertions can raise those errors too. Two of them are the 0.5 % tire gate and the
+  check that the racing line beats the center line.
+- Charts follow the data-viz style of this repository: a validated palette that is safe for
+  colorblind readers, one axis for each chart, and SI units on the axes.

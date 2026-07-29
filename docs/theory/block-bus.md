@@ -1,20 +1,23 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# Block / Bus / SoA — the transient scaffolding
+# Block, Bus, and SoA: the transient scaffolding
 
-`outlap-core` holds the data-flow scaffolding every transient tier (T2/T3) is assembled on: the
-**Block** abstraction, the flat struct-of-arrays signal **Bus**, the frozen **state registry**, and
-the topological-sort **assembler**. It is `wasm`-clean (no filesystem, threads, or clock) and carries
-no `sim.yaml`/schema types — the mapping from configuration to this layer happens in the assembly
-pipeline (HANDOFF §6.2b), never in the loop.
+`outlap-core` holds the data-flow scaffolding that every transient tier is assembled on. That is
+T2 and T3. It has four parts: the **Block** abstraction, the flat struct-of-arrays signal **Bus**,
+the frozen **state registry**, and the **assembler**, which sorts topologically.
 
-Implemented to the design in HANDOFF §6.2 and Locked Decisions #26 (runtime composition, enum
-dispatch — no `dyn` in the loop), #38 (controllers are built-in blocks; no Python in a timestep),
-and #39 (hybrid signal bus: fixed core indices + interned dynamic channels).
+The crate is `wasm`-clean: it uses no filesystem, no threads, and no clock. It carries no
+`sim.yaml` types and no schema types. The assembly pipeline maps configuration onto this layer
+(HANDOFF §6.2b). That mapping never happens in the loop.
+
+The design comes from HANDOFF §6.2, and from three Locked Decisions: #26, which composes at run
+time and dispatches through an enum, with no `dyn` in the loop; #38, which makes controllers
+built-in blocks and forbids Python inside a timestep; and #39, which defines a hybrid signal bus of
+fixed core indices plus interned dynamic channels.
 
 ## Block
 
-A **block** is `(immutable parameters, states, typed ports)`. The trait exposes three pure,
-`f32`/`f64`-generic evaluations, matching the tier being run:
+A **block** is three things: immutable parameters, states, and typed ports. Its trait exposes three
+pure evaluations, each generic over `f32` and `f64`, and each matching a tier:
 
 ```rust
 trait Block<T: Float> {
@@ -26,44 +29,51 @@ trait Block<T: Float> {
 }
 ```
 
-Blocks run **per lane**: the caller binds the SoA views to a lane and passes the same `lane` for the
-bus accessors. In the hot loop the concrete block is reached through the `CoreBlock` **enum**, never
-a trait object — physics and controller blocks are added as variants in later PRs (Chassis, Tire×4,
-Aero, Driver, TV, …). The external plugin trait is deferred (Decision #38); the M4 controllers are
-built-in enum variants. M4 ships one variant — a **stubbed suspension block** that reserves the T3
-slot and port surface without contributing dynamics.
+Blocks run **on one lane at a time**. The caller binds the SoA views to a lane, then passes that
+same `lane` to the bus accessors.
 
-## Bus — the signal board
+In the hot loop, the code reaches a concrete block through the `CoreBlock` **enum**. It never uses
+a trait object. Later PRs add physics blocks and controller blocks as variants: Chassis, Tire×4,
+Aero, Driver, TV, and others.
 
-Blocks never talk to each other directly; they publish to and consume from a shared **Bus** of
-typed scalar channels. Two regions:
+The external plugin trait is deferred (Decision #38). The M4 controllers are built-in enum
+variants. M4 ships one variant: a **stubbed suspension block**, which reserves the T3 slot and its
+port surface but contributes no dynamics.
 
-* a **fixed core set** with compile-time indices — the signals every built-in T2 block exchanges;
-* an **interned dynamic region** for plugin/custom named channels. A `ChannelInterner` resolves
-  names to integer `ChannelId`s **once at assembly**; the hot loop only ever sees indices — never a
-  string or a hash (Decision #39).
+## Bus: the signal board
 
-Every channel carries an explicit **batch dimension** (SoA, state-major): channel `c`, lane `b`
-lives at `c·batch + b`, so one channel is contiguous across the batch — GPU-transposable (HANDOFF
-§11.3) and cache-friendly for the rayon batch loop. Construction allocates; access is
-allocation-free (CI-gated by a dhat test).
+Blocks never talk to each other directly. They publish to a shared **Bus** of typed scalar
+channels, and they consume from it. The bus has two regions.
 
-## Frozen layout note
+* A **fixed core set**, with indices known at compile time. These are the signals that every
+  built-in T2 block exchanges.
+* An **interned dynamic region**, for named channels from plugins and custom blocks. A
+  `ChannelInterner` resolves each name to an integer `ChannelId` **once, at assembly**. The hot loop
+  sees only indices. It never sees a string, and it never sees a hash (Decision #39).
 
-This layer freezes two index layouts. They are an internal contract: downstream code addresses them
-through the enums below, never by bare integers, and additions append (they never reorder).
+Every channel carries an explicit **batch dimension**. The layout is SoA and state-major: channel
+`c` and lane `b` live at `c·batch + b`. One channel is therefore contiguous across the batch. That
+makes it transposable to a GPU (HANDOFF §11.3), and friendly to the cache in the rayon batch loop.
 
-**Fixed bus channels** (`CoreSignal` scalars + `WheelSignal` per-wheel groups, `WHEELS = 4`, ISO
-8855 order FL, FR, RL, RR):
+Construction allocates. Access does not, and a dhat test gates that in CI.
+
+## A note on the frozen layout
+
+This layer freezes two index layouts. They are an internal contract. Downstream code addresses them
+through the enums below, never through bare integers. Additions append. They never reorder.
+
+**The fixed bus channels** are the `CoreSignal` scalars, plus the per-wheel groups of
+`WheelSignal`. `WHEELS = 4`, in ISO 8855 order: FL, FR, RL, RR.
 
 | Region | Channels |
 |--------|----------|
 | Scalar (`CoreSignal`) | `Steer`, `Throttle`, `Brake`, `DriveTorque`, `YawMomentDemand`, `AeroDrag`, `AeroFzFront`, `AeroFzRear` |
 | Per-wheel (`WheelSignal`, ×4 each) | `TireFx`, `TireFy`, `TireFz`, `TireMz`, `SlipKappa`, `SlipAlpha`, `SlipKappaSs`, `SlipAlphaSs`, `WheelDriveTorque`, `WheelBrakeTorque` |
 
-**Fast-state registry** (`[chassis | relaxation]`). The chassis region reserves the full **14-DOF**
-footprint so the T3 groundwork is laid without a layout break; T2 integrates only the first ten
-slots. The relaxation region holds a lagged `κ` and `α` per wheel.
+**The fast-state registry** holds `[chassis | relaxation]`. The chassis region reserves the full
+**14-DOF** footprint, which lays the groundwork for T3 without breaking the layout later. T2
+integrates only the first ten slots. The relaxation region holds one lagged `κ` and one lagged `α`
+for each wheel.
 
 | Region | Slots | Tier |
 |--------|-------|------|
@@ -71,25 +81,33 @@ slots. The relaxation region holds a lagged `κ` and `α` per wheel.
 | T3-reserved chassis | heave/pitch/roll + rates (6), four unsprung z + rates (8) | reserved (reads 0 in M4) |
 | Relaxation (`RelaxState`, ×4) | lagged `κ`, `α` | populated in PR4 |
 
-Slow states (temperatures, wear, SOC, fuel) live in a **separate** buffer sized at assembly and
-advanced on the decimated slow clock (see [the integrator](integrator.md)).
+Slow states — temperatures, wear, SOC, and fuel — live in a **separate** buffer. Assembly sizes it,
+and the decimated slow clock advances it. See [the integrator](integrator.md).
 
-## Assembler — phase order and topological sort
+## The assembler: phase order and topological sort
 
-The assembler runs **once at load** (allocation is fine here) and produces a frozen, deterministic
-`Schedule`. It fixes the global phase order
+The assembler runs **once, at load**, where allocation is acceptable. It produces a `Schedule` that
+is frozen and deterministic.
+
+First it fixes the global phase order:
 
 ```
 sense → control → actuate → integrate
 ```
 
-then, within each phase, topologically sorts blocks so every intra-phase **writer precedes its
-readers** (Kahn's algorithm). Cross-phase dependencies pointing *backwards* (a `sense`-phase reader
-of an `integrate`-phase writer) are **one-step-lag** by design — they use the previous step's value
-and impose no ordering constraint, which is exactly how the `fz_coupling: one_step_lag` normal-load
-loop is closed. A genuine intra-phase write→read **cycle** is a hard `AssemblyError` — it must be
-broken by a phase change or the one-step-lag path. Ties are broken by registration index, so the
-schedule is **bit-deterministic**: identical inputs always yield the identical order.
+Then, within each phase, it sorts the blocks topologically with Kahn's algorithm, so that every
+writer inside a phase precedes its readers.
 
-After assembly the hot loop touches zero strings, hashes, or config logic — variety is paid for
-entirely at load time (HANDOFF §6.2b).
+A cross-phase dependency that points *backward* is **one-step-lag** by design. An example is a
+reader in the `sense` phase that depends on a writer in the `integrate` phase. Such a dependency
+uses the value from the previous step, and it imposes no ordering constraint. This is exactly how
+the normal-load loop closes under `fz_coupling: one_step_lag`.
+
+A genuine write-to-read **cycle** inside one phase is a hard `AssemblyError`. Break it with a phase
+change, or with the one-step-lag path.
+
+Ties break by registration index. The schedule is therefore **bit-deterministic**: identical inputs
+always produce an identical order.
+
+After assembly, the hot loop touches no strings, no hashes, and no configuration logic. Load time
+pays for all the variety (HANDOFF §6.2b).

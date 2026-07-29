@@ -1,30 +1,37 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# outlap.tirefit — MF6.1 fitting pipeline
+# outlap.tirefit: the MF6.1 fitting pipeline
 
-Test-data ingestion (TTC `.mat` v7/v7.3, `.dat`, `.csv` → SI/ISO-8855), a vectorized numpy
-MF6.1 forward model (clean-room mirror of the Rust kernels, validated against the same golden
-CSVs and tolerance rule), and a staged least-squares fit
-(nominals → pure Fx0 → pure Fy0 → combined → Mz → Mx/My) with documented init/bounds tables.
+This package does three things.
+
+It reads test data and converts it to SI units and the ISO 8855 convention. It accepts TTC `.mat`
+files in v7 and v7.3, `.dat` files, and `.csv` files.
+
+It holds a vectorized MF6.1 forward model in numpy. That model is a clean-room mirror of the Rust
+kernels. It is validated against the same golden CSVs, under the same tolerance rule.
+
+It runs a least-squares fit in stages: nominals, then pure Fx0, then pure Fy0, then combined, then
+Mz, then Mx and My. Documented tables give the initial values and the bounds.
 
 ```
 python -m outlap.tirefit fit   run1.mat run2.mat --unloaded-radius 0.26 -o car.tyr.yaml --report-dir report/
 python -m outlap.tirefit synth car.tyr.yaml -o synth.csv --seed 0
 ```
 
-The fit stages need scipy — install the extra: `uv sync --extra tire-fit`.
+The fit stages need scipy. Install the extra with `uv sync --extra tire-fit`.
 
-## Redistribution policy (read this)
+## Redistribution policy: read this
 
-**Parsers yes — redistribution of TTC data or TTC-derived parameter sets, NO.**
+**Parsers are permitted. Redistribution of TTC data, or of a parameter set derived from TTC data,
+is NOT.**
 
-FSAE Tire Test Consortium data is membership-locked and non-redistributable. This package
-exists so members can fit locally:
+Data from the FSAE Tire Test Consortium is locked to members, and you may not redistribute it. This
+package exists so that a member can fit locally. Follow three rules:
 
-- keep raw TTC files in a local `ttc-data/` directory — it is gitignored at the repo root;
-- never commit TTC files, excerpts, or **parameter sets fitted from TTC data** to this
-  repository or any public artifact;
-- fit reports (`report.json`/`report.md`) do not embed input data, but a report fitted from
-  TTC data still describes a TTC-derived parameter set — treat it the same way.
+- Keep raw TTC files in a local `ttc-data/` directory. The root `.gitignore` covers it.
+- Never commit a TTC file, an excerpt of one, or **a parameter set fitted from TTC data**. This
+  applies to this repository and to any public artifact.
+- A fit report (`report.json` or `report.md`) embeds no input data. But a report fitted from TTC
+  data still describes a parameter set derived from TTC data. Treat it the same way.
 
-Synthetic data (`synth`) and literature-cited parameter sets (see `data/tires/`) are the only
-things that ship with outlap.
+Only two kinds of data ship with outlap: synthetic data from `synth`, and parameter sets that cite
+the literature. See `data/tires/`.

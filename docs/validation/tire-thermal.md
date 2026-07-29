@@ -1,31 +1,37 @@
-# Tyre thermal ring — warm-up + steady-state bands (Decision #48)
+# Tire thermal ring: warm-up and steady-state bands (Decision #48)
 
-**Oracle.** The reduced Farroni thermo-racing-tyre model and published temperature bands:
+**Oracle.** The reduced Farroni thermo-racing-tire model, and its published temperature bands:
 
 - F. Farroni, D. Giordano, M. Russo, F. Timpone, *TRT: thermo racing tyre — a physical model to
   predict the tyre temperature distribution*, **Meccanica 49**(3), 707–723, 2014.
 - F. Farroni, A. Sakhnevych, F. Timpone, *TRT EVO: advances in real-time thermodynamic tyre
   modelling*, Proc. IMechE Part L, 2017.
 
-Published behaviour used here:
+This page uses three published behaviors:
 
 | Quantity | Value | Where |
 |---|---|---|
-| Slick tread-surface working range | **≈ 85–115 °C** | Farroni TRT surface-node traces; F1 broadcast tyre-temp overlays |
-| Warm-up | monotone rise from ambient to the working range over an out/in-lap timescale | TRT step-heating response |
-| Node ordering | surface hotter than carcass hotter than gas under load | TRT 3-node energy balance |
+| Working range of the tread surface on a slick | **≈ 85–115 °C** | Surface-node traces in Farroni TRT; tire-temperature overlays on F1 broadcasts |
+| Warm-up | A monotone rise from ambient to the working range, over the time of an out-lap or in-lap | The step-heating response of TRT |
+| Node ordering | Under load, the surface is hotter than the carcass, and the carcass is hotter than the gas | The 3-node energy balance of TRT |
 
-The model itself (three-node ring, semi-implicit Euler) and its clean-room provenance are in
-[`docs/theory/tire-thermal.md`](../theory/tire-thermal.md); this page is the numeric cross-check.
+[`docs/theory/tire-thermal.md`](../theory/tire-thermal.md) describes the model itself, which is a
+three-node ring integrated with semi-implicit Euler. It also records the clean-room provenance.
+This page is the numerical cross-check.
 
-**Consulted (clean-room policy):** none beyond the cited literature. Game-engine tyre-thermal code
-(Speed Dreams / VDrift) was **not** consulted as a source of derivation. No code was taken.
+**What was consulted, under the clean-room policy.** Nothing beyond the literature cited above.
+Tire-thermal code in game engines, such as Speed Dreams and VDrift, was **not** consulted as a
+source for the derivation. No code was taken.
 
 ## Configuration
 
-`limebeer_2014_f1` (racing-slick `.tyr`, thermal ring from M5 PR1) on `catalunya_osm`,
-`sim.flat_track: true`, coarse CI envelope (8×7×2), T0 stint. Cold start seeds the surface at
-20 °C; the equilibrium start seeds at the grip optimum. Reproduce with:
+The car is `limebeer_2014_f1`, with a racing-slick `.tyr` and the thermal ring from M5 PR1. The
+track is `catalunya_osm`, with `sim.flat_track: true`. The envelope is the coarse CI envelope,
+8×7×2. The run is a T0 stint.
+
+A cold start seeds the surface at 20 °C. An equilibrium start seeds it at the grip optimum.
+
+To reproduce:
 
 ```sh
 python python/tools/plot_tire_thermal_validation.py
@@ -39,26 +45,31 @@ The CI test is `python/tests/test_wear_validation.py::test_thermal_warmup_and_st
 
 | Gate | Ours | Oracle | Result |
 |---|---|---|---|
-| Cold-start warm-up monotone | rises 20 → 33 → 100 °C (lap-end, cold-start) | monotone to working range | ✅ asserted |
-| Node ordering T_s > T_c > T_g | surface leads carcass leads gas | TRT 3-node | ✅ asserted (property test, PR1) |
-| Settled surface temp in band | **≈ 99 °C mean, 101 °C peak** | 85–115 °C | ✅ asserted (peak in band) |
-| Warm-up time constant | **≈ 6 laps to 63 % rise (~500 s)** | out/in-lap timescale | recorded, **not gated** (below) |
+| Warm-up from a cold start is monotone | Rises 20 → 33 → 100 °C, measured at lap end from a cold start | Monotone to the working range | ✅ asserted |
+| Node ordering, T_s > T_c > T_g | Surface leads carcass, carcass leads gas | TRT, 3 nodes | ✅ asserted, by a property test in PR1 |
+| Settled surface temperature is in band | **≈ 99 °C mean, 101 °C peak** | 85–115 °C | ✅ asserted, on the peak |
+| Time constant of warm-up | **≈ 6 laps to 63 % of the rise, about 500 s** | The time of an out-lap or in-lap | Recorded, and **not gated**. See below. |
 
-## Recorded, not gated — the warm-up timescale
+## Recorded but not gated: the warm-up timescale
 
-The steady-state surface temperature (~99–101 °C) sits squarely in the published slick band and is
-**asserted**. The warm-up *time constant* is **recorded**: from a 20 °C cold seed the surface
-crosses 63 % of the rise to equilibrium at lap ~6 (~500 s), and reaches the working range by lap
-~12–15. This is slower than a real F1 out-lap (~1–2 laps). The decomposition:
+The steady-state surface temperature, near 99 °C to 101 °C, sits well inside the published band for
+a slick. That value is **asserted**.
 
-1. **Lumped heat capacities** — the ring uses a generic racing-slick `c_s`/`c_c` (M5 PR1,
-   `docs/theory/tire-thermal.md`), not a compound-specific fit; larger capacities lengthen the time
-   constant. These are calibration targets, not model errors — the *equilibrium* they relax to is
-   in band.
-2. **QSS heat input** — in T0/T1 the frictional sliding power is estimated from the friction-circle
-   utilisation at the quasi-static solution (`outlap_qss::tire`), a per-segment average rather than
-   the peak transient loading a real out-lap sees, so the ramp is gentler.
+The *time constant* of the warm-up is **recorded** instead. From a cold seed at 20 °C, the surface
+crosses 63 % of its rise to equilibrium at about lap 6, near 500 s. It reaches the working range by
+lap 12 to 15. A real F1 out-lap does this in 1 to 2 laps, so the model is slower.
 
-Because the equilibrium band is the robust, physically-anchored quantity, it is asserted; the
-warm-up timescale is surfaced honestly and left as a calibration record rather than a green gate
-that the generic (uncalibrated-per-compound) capacities do not support.
+Two things cause the difference.
+
+1. **The heat capacities are lumped.** The ring uses a generic `c_s` and `c_c` for a racing slick
+   (M5 PR1, `docs/theory/tire-thermal.md`). Neither is fitted to a specific compound. A larger
+   capacity lengthens the time constant. These values are calibration targets, not errors in the
+   model, because the *equilibrium* that they relax to is in band.
+2. **The QSS heat input is an average.** At T0 and T1, `outlap_qss::tire` estimates the frictional
+   sliding power from how much of the friction circle the quasi-static solution uses. That is an
+   average over each segment. It is not the peak transient load that a real out-lap applies.
+   Therefore the ramp is gentler.
+
+The equilibrium band is the quantity that is robust and anchored in physics, so this page asserts
+it. The warm-up timescale is surfaced honestly and left as a calibration record. Generic capacities
+that are not calibrated for each compound cannot support a green gate.

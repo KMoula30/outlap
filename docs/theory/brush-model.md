@@ -1,90 +1,106 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# Brush tire model (parabolic pressure)
+# The brush tire model, with parabolic pressure
 
-`outlap-tire`'s `brush` module implements the classic physical brush tire model with a parabolic
-pressure profile — a first-principles alternative to the empirical [MF6.1 force core](mf61-steady-state.md).
-Implemented clean-room from Pacejka's book (3rd ed., 2012, Chapter 3) only. It is offered for tyres
-supplied as a `brush:` block (`tyr/1.1`) instead of a full Magic-Formula coefficient set: a
-handful of physical parameters — two tread stiffnesses, a base friction, and the contact
-half-length — reproduce the pure- and combined-slip force with a closed form.
+The `brush` module in `outlap-tire` implements the classic physical brush tire model with a
+parabolic pressure profile. It is an alternative to the empirical
+[MF6.1 force core](mf61-steady-state.md), derived from first principles. It is implemented
+clean-room, from Chapter 3 of the Pacejka book (3rd ed., 2012), and from nothing else.
+
+Use it for a tire that arrives as a `brush:` block (`tyr/1.1`) instead of a full Magic-Formula
+coefficient set. A few physical parameters reproduce the force under pure slip and combined slip,
+in closed form: two tread stiffnesses, a base friction, and the contact half-length.
 
 ## The model
 
-The contact patch is a row of elastic bristles. Under slip each bristle deflects; where the local
-elastic shear would exceed the friction bound `μ0·p(x)` the bristle slides. With a **parabolic**
-pressure distribution `p(x) ∝ 1 − (x/a)²` over the contact half-length `a`, integrating the
-adhesion and sliding regions gives a closed-form force.
+The contact patch is a row of elastic bristles. Under slip, each bristle deflects. Where the local
+elastic shear would exceed the friction bound `μ0·p(x)`, that bristle slides instead.
+
+Give the pressure a **parabolic** distribution, `p(x) ∝ 1 − (x/a)²`, over the contact half-length
+`a`. Integrating over the region that adheres and the region that slides then gives a closed-form
+force.
 
 ## Symbols
 
 | symbol | meaning |
 |---|---|
-| `κ`, `α` | longitudinal slip ratio and slip angle (rad), ISO-W sign contract |
-| `C_κ` | longitudinal tread stiffness, N (`∂F_x/∂κ` at the origin) |
-| `C_α` | lateral (cornering) tread stiffness, N/rad (`−∂F_y/∂α` at the origin) |
-| `μ0` | base sliding friction (scaled at runtime by `mu_scale_*`) |
-| `a` | contact half-length, m |
-| `F_z` | vertical load, N (`≤ 0` ⇒ all-zero output) |
+| `κ`, `α` | Longitudinal slip ratio and slip angle (rad), under the ISO-W sign contract |
+| `C_κ` | Longitudinal tread stiffness, N. It equals `∂F_x/∂κ` at the origin. |
+| `C_α` | Lateral, or cornering, tread stiffness, N/rad. It equals `−∂F_y/∂α` at the origin. |
+| `μ0` | Base sliding friction. At run time `mu_scale_*` scales it. |
+| `a` | Contact half-length, m |
+| `F_z` | Vertical load, N. At `F_z ≤ 0` every output is zero. |
 
-## Equations (combined slip)
+## The equations, under combined slip
 
-Theoretical slips, with an ε-guarded `1 + κ` so a locked wheel stays finite:
+The theoretical slips use an ε-guarded `1 + κ`, so that a locked wheel stays finite:
 
 ```
 σx = κ / (1 + κ),   σy = tan α / (1 + κ)
 ```
 
-Stiffness-weighted generalised-force magnitude and its reduced form:
+Next take the magnitude of the generalized force, weighted by the stiffnesses, and reduce it:
 
 ```
 ‖·‖ = √((C_κ σx)² + (C_α σy)²),   ψ = ‖·‖ / (3 μ0 F_z)
 ```
 
-The force magnitude is the cubic brush law, saturating at the friction bound:
+The magnitude of the force is the cubic brush law. It saturates at the friction bound:
 
 ```
 |F| = 3 μ0 F_z · ψ(1 − ψ + ψ²/3)   for ψ < 1
 |F| = μ0 F_z                       for ψ ≥ 1   (full sliding)
 ```
 
-`ψ(1 − ψ + ψ²/3)` rises monotonically to `1/3` at `ψ = 1`, so `|F| ≤ μ0 F_z` always — the friction
-circle is respected by construction. The force acts along the generalised-force direction
-`(+C_κ σx, −C_α σy)/‖·‖`: the longitudinal sign flip is already carried by `κ` (driving `κ > 0` ⇒
-`F_x > 0`), while the lateral force opposes the slip (`α > 0` ⇒ `F_y < 0`). The origin slopes are
-therefore `∂F_x/∂κ|₀ = +C_κ` and `∂F_y/∂α|₀ = −C_α` — the sign pins the property tests assert.
+`ψ(1 − ψ + ψ²/3)` rises monotonically to `1/3` at `ψ = 1`. Therefore `|F| ≤ μ0 F_z` always, and the
+model respects the friction circle by construction.
 
-The self-aligning moment uses the closed-form brush pneumatic trail
+The force acts along the direction of the generalized force, `(+C_κ σx, −C_α σy)/‖·‖`. The
+longitudinal sign flip is already carried by `κ`, because driving means `κ > 0` and therefore
+`F_x > 0`. The lateral force opposes the slip, so `α > 0` gives `F_y < 0`. The slopes at the origin
+are therefore `∂F_x/∂κ|₀ = +C_κ` and `∂F_y/∂α|₀ = −C_α`. The property tests assert these signs.
+
+The self-aligning moment uses the closed-form pneumatic trail of the brush model:
 
 ```
 t = (a/3) · (1 − ψ)³ / (1 − ψ + ψ²/3),   M_z = −t · F_y
 ```
 
-which runs from `t(0) = a/3` at vanishing slip down to `0` at full sliding (`ψ ≥ 1`). `M_z` is
-restoring because `F_y < 0` for `α > 0` — the same sign contract as MF6.1 (see
-[`mf61-steady-state.md`](mf61-steady-state.md)).
+The trail runs from `t(0) = a/3` at vanishing slip down to `0` at full sliding, where `ψ ≥ 1`. `M_z`
+restores, because `F_y < 0` when `α > 0`. This is the same sign contract that MF6.1 uses. See
+[`mf61-steady-state.md`](mf61-steady-state.md).
 
-## Deliberate omissions (documented, not silent)
+## What the model deliberately omits, documented and not silent
 
-The brush tier models neither camber nor inflation pressure: `γ` and `p` are **accepted and
-ignored**, and the overturning/rolling-resistance moments are `M_x = M_y ≡ 0`. When a brush tyre is
-assembled these are surfaced as loaded-model notes (nothing silent). The runtime friction
-multipliers `mu_scale_x`/`mu_scale_y` scale `μ0` per axis (both `1.0` until the M5 thermal grip
-window); at `1.0` the model is isotropic in friction. At the T0 point-mass tier a brush tyre's
-peak `μ` is simply `μ0` (load- and pressure-independent), while a tyre that carries the full MF6.1
-force core uses that higher-fidelity model instead — a partial force set never constructs one.
+The brush tier models neither camber nor inflation pressure. It **accepts and ignores** `γ` and `p`.
+The overturning moment and the rolling-resistance moment are `M_x = M_y ≡ 0`.
+
+When outlap assembles a brush tire, it surfaces each of these as a note in the loaded-model report.
+Nothing is silent.
+
+The runtime friction multipliers `mu_scale_x` and `mu_scale_y` scale `μ0` on each axis. Both are
+`1.0` until the M5 thermal grip window arrives. At `1.0` the friction of the model is isotropic.
+
+At the T0 point-mass tier, the peak `μ` of a brush tire is simply `μ0`. It depends on neither load
+nor pressure. A tire that carries the full MF6.1 force core uses that higher-fidelity model
+instead. A partial force set never builds one.
 
 ## Numerical safety
 
-Panic-free and finite for all finite inputs: `F_z ≤ 0` and zero slip short-circuit to zero;
-`1 + κ` is ε-guarded sign-preservingly (the `κ = −1` locked-wheel pole); the trail denominator
-`1 − ψ + ψ²/3 ≥ 1/3` on `ψ ∈ [0, 1]` needs no guard. Evaluation is pure, allocation-free
-(dhat-gated in CI), and generic over `f32`/`f64`.
+The model is panic-free, and it returns finite values for every finite input.
+
+`F_z ≤ 0` and zero slip short-circuit to zero. `1 + κ` is ε-guarded in a way that preserves sign,
+which handles the locked-wheel pole at `κ = −1`. The denominator of the trail, `1 − ψ + ψ²/3`, is at
+least `1/3` on `ψ ∈ [0, 1]`, so it needs no guard.
+
+Evaluation is pure. It allocates nothing, which CI gates with dhat. It is generic over `f32` and
+`f64`.
 
 ## Validation
 
-Property tests pin: finiteness over a hostile input box, the airborne zero, the friction bound
-`|F| ≤ μ0 F_z`, the origin slopes `+C_κ`/`−C_α`, the restoring `M_z` sign, exact saturation to
-`μ0 F_z` at full sliding, and `mu_scale_*` scaling the peak per axis.
+The property tests pin seven things: that outputs stay finite over a hostile box of inputs; that an
+airborne tire gives zero; that `|F| ≤ μ0 F_z`; that the slopes at the origin are `+C_κ` and `−C_α`;
+that `M_z` restores; that the force saturates to exactly `μ0 F_z` at full sliding; and that
+`mu_scale_*` scales the peak on each axis.
 
 ## References
 
