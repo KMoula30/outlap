@@ -37,8 +37,10 @@ from outlap.importers.osm_track import (
     MissingWidthSourceError,
     OsmTrackError,
     OutputExistsError,
+    TornBuildError,
     fit_snapshot_centerline,
     run_import,
+    verify_track_dir,
 )
 
 # --- fixture builders ----------------------------------------------------------------------------
@@ -145,7 +147,8 @@ def _ring_orthophoto_npz(
 
 def test_assemble_circuit_resolves_theta_to_the_long_loop() -> None:
     osm = _theta_osm()
-    loop = osm_track._assemble_circuit(osm)  # pyright: ignore[reportPrivateUsage]
+    loop, method = osm_track._assemble_circuit(osm)  # pyright: ignore[reportPrivateUsage]
+    assert method == osm_track.ASSEMBLY_THETA
     # The bypass chord node (6) and the pit spur nodes (7, 8) must NOT be in the main lap.
     assert 6 not in loop, "the short bypass chord was taken instead of the racing loop"
     assert 7 not in loop and 8 not in loop, "the pit-lane spur was not pruned"
@@ -166,11 +169,10 @@ def test_assemble_circuit_falls_back_to_longest_way_without_a_cycle() -> None:
             _way(200, [0, 1, 2], "Main Straight"),
         ]
     }
-    assert osm_track._assemble_circuit(osm) == [  # pyright: ignore[reportPrivateUsage]
-        0,
-        1,
-        2,
-    ]
+    loop, method = osm_track._assemble_circuit(osm)  # pyright: ignore[reportPrivateUsage]
+    assert loop == [0, 1, 2]
+    # The fallback must announce itself — it caps the accuracy class downstream.
+    assert method == osm_track.ASSEMBLY_LONGEST_WAY
 
 
 def test_assemble_circuit_drops_disused_raceway() -> None:
@@ -184,7 +186,7 @@ def test_assemble_circuit_drops_disused_raceway() -> None:
         tags={"disused:highway": "raceway"},
     )
     osm = {"elements": live["elements"] + disused["elements"]}
-    loop = osm_track._assemble_circuit(osm)  # pyright: ignore[reportPrivateUsage]
+    loop, _ = osm_track._assemble_circuit(osm)  # pyright: ignore[reportPrivateUsage]
     assert all(nid < 5000 for nid in loop), "a disused raceway way entered the lap"
 
 
@@ -398,3 +400,92 @@ def test_lidar_stage_with_injected_sampler_reaches_class_a(tmp_path: Path) -> No
     manifest = yaml.safe_load((track_dir / MANIFEST_FILE).read_text(encoding="utf-8"))
     assert manifest["inputs"]["lidar"]["tiles"] == ["tile_a", "tile_b"]
     assert manifest["inputs"]["lidar"]["banking"]["method"] == "lidar-cross-section"
+
+
+# --- hardening: degraded results must never masquerade as measurements --------------------------
+
+
+def test_longest_way_fallback_caps_the_accuracy_class() -> None:
+    """Enriching a fragment very precisely is still the wrong shape — it cannot earn an A."""
+    assert (
+        osm_track.derive_accuracy_class(
+            ["widths", "lidar"],
+            has_elevation=True,
+            assembly=osm_track.ASSEMBLY_LONGEST_WAY,
+        )
+        == "C"
+    )
+    # The same stages on a properly assembled lap do earn it.
+    assert (
+        osm_track.derive_accuracy_class(
+            ["widths", "lidar"], has_elevation=True, assembly=osm_track.ASSEMBLY_CYCLE
+        )
+        == "A"
+    )
+
+
+def test_import_records_the_assembly_method_and_fit(tmp_path: Path) -> None:
+    track_dir = tmp_path / "ring"
+    _write_snapshot(track_dir, _circle_snapshot())
+    run_import(track_dir, name="Ring", half_width_m=6.0, elevation=False)
+
+    meta = yaml.safe_load((track_dir / "track.yaml").read_text(encoding="utf-8"))[
+        "meta"
+    ]
+    assert meta["assembly"] == osm_track.ASSEMBLY_CYCLE
+    fit = yaml.safe_load((track_dir / MANIFEST_FILE).read_text(encoding="utf-8"))["fit"]
+    # Which smoother ran is not derivable from the declared settings — the bias-correction
+    # step is a data-dependent branch — so the manifest has to carry it.
+    for key in (
+        "residual_rms_m",
+        "discrepancy_rms_m",
+        "smoothing_lambda",
+        "bias_corrected",
+        "effective_dof",
+        "assembly",
+    ):
+        assert key in fit, f"manifest fit record is missing {key}"
+
+
+def test_torn_build_is_detected_not_silent(tmp_path: Path) -> None:
+    """New geometry beside a stale manifest must be loud, not a silently wrong track."""
+    track_dir = tmp_path / "ring"
+    _write_snapshot(track_dir, _circle_snapshot())
+    run_import(track_dir, name="Ring", half_width_m=6.0, elevation=False)
+    verify_track_dir(track_dir)  # a complete build is coherent
+
+    # Simulate an interruption after centerline.csv landed but before the manifest did.
+    centerline = track_dir / "centerline.csv"
+    centerline.write_text(
+        centerline.read_text(encoding="utf-8") + "# torn\n", encoding="utf-8"
+    )
+    with pytest.raises(TornBuildError, match="interrupted"):
+        verify_track_dir(track_dir)
+
+
+def test_null_dem_elevation_is_an_error_not_a_fabricated_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DEM with no coverage must not commit a fake sea-level sample."""
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "status": "OK",
+                "results": [
+                    {"elevation": 12.5, "location": {"lat": 0.0, "lng": 0.0}},
+                    {"elevation": None, "location": {"lat": 0.1, "lng": 0.1}},
+                ],
+            }
+
+    fake = type("_R", (), {"post": staticmethod(lambda *a, **k: _Resp())})
+    monkeypatch.setitem(__import__("sys").modules, "requests", fake)
+    with pytest.raises(MissingElevationError, match="no elevation"):
+        osm_track._dem_batch(  # pyright: ignore[reportPrivateUsage]
+            "eudem25m", [(0.0, 0.0), (0.1, 0.1)]
+        )
