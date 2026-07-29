@@ -1,37 +1,47 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# The ideal driver — MacAdam preview steering + PI speed tracking
+# The ideal driver: MacAdam preview steering and PI speed tracking
 
-This page documents the transient tier's ideal deterministic driver
-([`outlap_vehicle::control::Driver`]), the `control`-phase block that closes the T2 loop: it steers
-the car along the target line and tracks the QSS speed profile. It is a clean-room implementation
-from the cited literature; no other project's source was consulted or copied.
+This page documents the ideal deterministic driver of the transient tier,
+[`outlap_vehicle::control::Driver`]. It is the block in the `control` phase that closes the T2 loop.
+It steers the car along the target line, and it tracks the QSS speed profile.
 
-The driver is **ideal and deterministic** in v1 (Locked Decision #21): the gains are vehicle data,
-there is no skill or noise model yet. Two future Monte-Carlo error channels are anticipated but not
-built here — a "wander off the line" perception error rides on the preview channels (§1), and a
-"late shift" timing error rides on the PR6 shift-event queue, not on this block.
+It is a clean-room implementation, from the literature cited at the end. No source from another
+project was read or copied.
 
-## 1. Reference: the QSS profile and the preview channels
+The driver is **ideal and deterministic** in v1 (Locked Decision #21). Its gains are vehicle data.
+There is no model of skill and no model of noise, yet.
 
-Using the QSS speed profile as the transient driver's reference makes tier parity a built-in
-regression test (HANDOFF §7.7): if the transient car cannot follow what the point-mass solver said
-was achievable, the QSS↔T2 parity gate catches it. The driver never touches a track or an envelope
-in the loop — the orchestrator publishes, each step, the current-station target-line channels
-(`n_ref`, `κ_ref`, `v_ref`) and the **preview** channels sampled at the look-ahead station
+Two future error channels for Monte Carlo work are anticipated, and neither is built here. A "wander
+off the line" perception error will ride on the preview channels (§1). A "late shift" timing error
+will ride on the shift-event queue of PR6, not on this block.
+
+## 1. The reference: the QSS profile and the preview channels
+
+The transient driver takes the QSS speed profile as its reference. That choice makes tier parity a
+built-in regression test (HANDOFF §7.7). If the transient car cannot follow what the point-mass
+solver called achievable, the parity gate between QSS and T2 catches it.
+
+The driver never touches a track or an envelope inside the loop. On each step the orchestrator
+publishes the target-line channels at the current station — `n_ref`, `κ_ref`, `v_ref` — and the
+**preview** channels, sampled at the look-ahead station
 
 ```
 s_p = s + L_p,   L_p = max(v_x · t_preview, L_floor)
 ```
 
-(`n_ref(s_p)`, `κ_ref(s_p)`, `v_ref(s_p)`). The preview *time* `t_preview` — not a fixed distance —
-is the human-driver invariant MacAdam (1981) identifies; the floor `L_floor` keeps the look-ahead
-well-posed at low speed. The block is pure: it reads these channels and the fast state, and writes
-the steer/throttle/brake bus signals plus one augmented-ODE derivative (§3).
+which gives `n_ref(s_p)`, `κ_ref(s_p)`, and `v_ref(s_p)`.
 
-## 2. Steering: curvature feed-forward + preview path law + yaw-rate stabilisation
+The preview *time*, `t_preview`, is what stays invariant for a human driver. MacAdam (1981)
+identifies this, and it is why the look-ahead is a time and not a fixed distance. The floor
+`L_floor` keeps the look-ahead well-posed at low speed.
 
-The steer is a **feed-forward** that anticipates the corner, a MacAdam-style **preview feedback** that
-nulls the path error, and a **yaw-rate stabiliser** that catches a slide:
+The block is pure. It reads those channels and the fast state. It writes the steer, throttle, and
+brake signals to the bus, plus one derivative for the augmented ODE (§3).
+
+## 2. Steering: curvature feed-forward, a preview path law, and yaw-rate stabilization
+
+The steer has three parts. A **feed-forward** anticipates the corner. A MacAdam-style **preview
+feedback** nulls the path error. A **yaw-rate stabilizer** catches a slide.
 
 ```
 δ_ff    = κ_ref(s_p) · (L + K_us · v_x²)                      (understeer-gradient feed-forward)
@@ -43,42 +53,60 @@ recover = clamp(k_slip·(|β| − β_lim), 0, 1)                   (slide severi
 δ       = clamp(δ_ff + δ_fb, ±δ_max)
 ```
 
-**Feed-forward.** `δ_ff = κ(L + K_us·v²)` is the classical understeer-gradient steering law: `L·κ`
-is the Ackermann (kinematic) steer for the target curvature, and `K_us·v²·κ = K_us·a_y` is the extra
-steer an understeering car needs to generate the lateral acceleration `a_y = v²κ`. `K_us` is the
-vehicle's **own** understeer gradient `K = dδ/da_y − L/v²` (`T1Vehicle::understeer_gradient`,
-Decision #8), so the same driver data transfers across cars. At steady cornering `δ_fb → 0` and the
-FF alone delivers the target yaw `r → v·κ` (verified by the `step_steer` property test). The offset is
-predicted from the body heading (a well-damped path law; extrapolating the sideslip-laden lateral
-velocity over the long preview arm would destabilise the transient).
+**The feed-forward.** `δ_ff = κ(L + K_us·v²)` is the classical steering law of the understeer
+gradient. `L·κ` is the Ackermann, or kinematic, steer for the target curvature. `K_us·v²·κ =
+K_us·a_y` is the extra steer that an understeering car needs, to generate the lateral acceleration
+`a_y = v²κ`.
 
-**Yaw-rate stabilisation is what lets a front-steer driver catch a slide.** Damping the yaw to the
-*reference* rate `r_tgt = v·κ_ref` — not to zero — makes the driver **counter-steer** whenever the
-car over-rotates (`|r| > |r_tgt|` ⇒ oversteer). Two things escalate the recovery as the rear steps
-out: the path term, which would steer *further into* the corner and worsen the slide, is faded out by
-`(1 − recover)`; and the counter-steer gain ramps up sharply (`k_r·(1 + 5·recover)`) so a loose rear
-gets strong opposite lock. When gripping (`recover ≈ 0`) the law reduces to gentle path-following +
-yaw damping and does not touch clean cornering (the smooth-track property tests are unchanged).
+`K_us` is the car's **own** understeer gradient, `K = dδ/da_y − L/v²`. It comes from
+`T1Vehicle::understeer_gradient` (Decision #8). The same driver data therefore transfers across
+cars.
 
-**Sideslip damping catches the slide the yaw damper cannot see.** The yaw-rate term only reacts to
-*rotational* slides (`r` far from `r_tgt`). A **translational** slide — the car "crabbing" off the
-line with the nose crooked but `r ≈ r_tgt ≈ 0`, the measured post-corner-exit failure mode — is
-invisible to it, and the path term is faded exactly when it happens. The `−k_β·β` term closes that
-gap: it steers the heading back toward the velocity vector, killing the crab's quasi-equilibrium.
-During clean cornering `β` is small (1–3°) and the term is a mild trim the feed-forward absorbs.
+In steady cornering, `δ_fb → 0`, and the feed-forward alone delivers the target yaw, `r → v·κ`. The
+`step_steer` property test verifies this.
 
-On a real track the driver also tracks a **corner-scaled grip margin** — the shaped speed reference
-of `outlap_qss::margin`: the full QSS profile where lateral demand is low, a stability margin
-(default 0.85) where the profile rides the lateral grip limit, each corner's margin propagated back
-through its braking zone plus a settle ramp, and friction-ellipse-aware braking/traction feasibility
-passes so the shaped target is dynamically reachable at every corner entry and exit. The margin at
-the limit is the honest boundary of this driver: the QSS envelope boundary is not filtered for
-open-loop stability, and tracking the raw profile spins the car. Gains are Limebeer-tuned
-literature defaults (§4), surfaced as estimated.
+The offset is predicted from the body heading, which gives a well-damped path law. Extrapolating the
+lateral velocity, which carries the sideslip, over the long preview arm would destabilize the
+transient.
 
-## 3. Speed: PI tracking with a preview feed-forward (augmented-ODE integral)
+**Yaw-rate stabilization is what lets a front-steer driver catch a slide.** The driver damps the yaw
+toward the *reference* rate, `r_tgt = v·κ_ref`, and not toward zero. It therefore **counter-steers**
+whenever the car over-rotates, which is when `|r| > |r_tgt|`, and means oversteer.
 
-The longitudinal loop tracks the QSS profile `v_ref` with a preview feed-forward and a PI:
+Two things escalate the recovery as the rear steps out. The path term would steer *further into* the
+corner and worsen the slide, so `(1 − recover)` fades it out. And the counter-steer gain ramps up
+sharply, through `k_r·(1 + 5·recover)`, so a loose rear gets strong opposite lock.
+
+When the car grips, `recover ≈ 0`. The law then reduces to gentle path-following plus yaw damping,
+and it does not touch clean cornering. The property tests on a smooth track are unchanged.
+
+**Sideslip damping catches the slide that the yaw damper cannot see.** The yaw-rate term reacts only
+to *rotational* slides, where `r` is far from `r_tgt`.
+
+A **translational** slide is invisible to it. That is the car crabbing off the line with its nose
+crooked, while `r ≈ r_tgt ≈ 0`. It is the failure mode measured after corner exit. The path term is
+faded out at exactly that moment.
+
+The `−k_β·β` term closes that gap. It steers the heading back toward the velocity vector, which
+kills the quasi-equilibrium of the crab. In clean cornering `β` is small, at 1° to 3°, and the term
+is a mild trim that the feed-forward absorbs.
+
+On a real track the driver also tracks a **grip margin that scales with the corner**. This is the
+shaped speed reference of `outlap_qss::margin`. It has four parts: the full QSS profile where
+lateral demand is low; a stability margin, 0.85 by default, where the profile rides the lateral grip
+limit; the margin of each corner propagated back through its braking zone, plus a settle ramp; and
+feasibility passes for braking and traction that know the friction ellipse, so that the shaped
+target is dynamically reachable at the entry and exit of every corner.
+
+The margin at the limit is the honest boundary of this driver. Nothing filters the QSS envelope
+boundary for open-loop stability, and tracking the raw profile spins the car.
+
+The gains are literature defaults, tuned on the Limebeer car (§4), and surfaced as estimated.
+
+## 3. Speed: PI tracking with a preview feed-forward, as an augmented ODE
+
+The longitudinal loop tracks the QSS profile `v_ref`, with a preview feed-forward and a PI
+controller:
 
 ```
 e_v  = v_ref(s) − v_x
@@ -89,40 +117,54 @@ throttle = max(clamp(u, ±1), 0) · (1 − recover) · tc,  brake = max(−clamp
 ξ̇  = e_v         (held at 0 when the pedal is saturated and e_v would push further — anti-windup)
 ```
 
-**Feed-forward.** `a_ff` is the constant acceleration that would carry the car from its current speed
-to the previewed target speed over the look-ahead distance; dividing by `a_scale`, the **gg-headroom
-usable acceleration**, maps that demand onto the `[−1, 1]` pedal axis. Anticipating the braking/
-throttle zone this way lets the PI trim only the residual, which is what keeps the transient lap
-close to the point-mass reference.
+**The feed-forward.** `a_ff` is the constant acceleration that would carry the car from its current
+speed to the previewed target speed, over the look-ahead distance. Dividing by `a_scale`, the
+**usable acceleration in the gg headroom**, maps that demand onto the pedal axis, `[−1, 1]`.
 
-**Power is cut as the rear slides.** The throttle is scaled by `(1 − recover)` — the same slide
-factor that fades the steer path term (§2) — so a rear that steps out under power loses the drive that
-is overloading it and can recover grip. This is the longitudinal half of the minimal stabiliser.
+Anticipating the braking zone and the throttle zone this way leaves the PI to trim only the
+residual. That is what keeps the transient lap close to the point-mass reference.
 
-**And modulated against wheelspin.** With a race gearing, low-gear wheel torque is a *multiple* of
-the grip limit, so even a modest pedal fraction can light up the driven axle mid-corner-exit — the
-measured slide trigger once the `f1_2026` reference gained its realistic final drive. The governor
-`tc` cuts the pedal proportionally as the worst positive (drive-side) lagged slip ratio passes the
-force-peak region `κ_lim`; braking slips are negative and untouched. This is the ideal driver
-modulating the pedal the way a human does, not a traction-control system on the car: it reads the
-same lagged slip states the tyre model integrates, deterministically.
+**Power is cut as the rear slides.** `(1 − recover)` scales the throttle. It is the same slide factor
+that fades the path term in the steer (§2). A rear that steps out under power therefore loses the
+drive that is overloading it, and can recover grip. This is the longitudinal half of the minimal
+stabilizer.
 
-**The integral is a real state, not a per-step snapshot.** `ξ = ∫(v_ref − v_x) dt` is carried in the
-fast state as a continuous **augmented ODE** ([`ControllerState::SpeedIntegral`]) and advanced by the
-split integrator's RK sweep alongside the chassis DOF — so the PI loop is stepped consistently across
-the Runge–Kutta stages (a step-boundary accumulator would be inconsistent within a stage and degrade
-the integrator order). Anti-windup is **conditional integration**: `ξ̇` is held at zero whenever the
-pedal is already saturated and the error would drive it further into saturation, with a hard clamp on
-`|ξ|` as a backstop. The whole loop is deterministic (fixed `dt`, fixed-order reductions), so a lap is
-bit-reproducible across runs (verified by the full-lap determinism test).
+**The pedal is also modulated against wheelspin.** With race gearing, the wheel torque in a low gear
+is a *multiple* of the grip limit. Even a modest pedal fraction can therefore light up the driven
+axle in the middle of a corner exit. That was the measured trigger for slides once the `f1_2026`
+reference gained its realistic final drive.
+
+The governor `tc` cuts the pedal in proportion, as the worst positive lagged slip ratio on the drive
+side passes the region of the force peak, `κ_lim`. Braking slips are negative, and it leaves them
+untouched.
+
+This is the ideal driver modulating the pedal the way a human does. It is not a traction-control
+system on the car. It reads the same lagged slip states that the tire model integrates, and it does
+so deterministically.
+
+**The integral is a real state, not a snapshot at each step.** `ξ = ∫(v_ref − v_x) dt` is carried in
+the fast state as a continuous **augmented ODE**, [`ControllerState::SpeedIntegral`]. The RK sweep of
+the split integrator advances it alongside the chassis DOF. The PI loop is therefore stepped
+consistently across the Runge–Kutta stages. An accumulator at the step boundary would be
+inconsistent within a stage, and it would degrade the order of the integrator.
+
+Anti-windup is **conditional integration**. `ξ̇` is held at zero whenever the pedal is already
+saturated and the error would drive it further into saturation. A hard clamp on `|ξ|` is the
+backstop.
+
+The whole loop is deterministic, with a fixed `dt` and fixed-order reductions. A lap is therefore
+bit-reproducible across runs, which the full-lap determinism test verifies.
 
 ## 4. Gains and defaults
 
-Every gain is vehicle data (a new optional `driver:` section, schema `vehicle/1.5`). Unset gains fall
-back to the literature defaults below — tuned once on `limebeer_2014_f1` (Decision #8) — and each
-default is surfaced as **estimated** in the loaded-model report (nothing silent, #41). `K_us` is the
-one derived quantity: it comes from the vehicle's own `understeer_gradient()` at assembly, not from
-the file.
+Every gain is vehicle data, in a new optional `driver:` section of schema `vehicle/1.5`.
+
+A gain that is not set falls back to the literature default below. Those defaults were tuned once,
+on `limebeer_2014_f1` (Decision #8). The loaded-model report surfaces each default as **estimated**.
+Nothing is silent (#41).
+
+`K_us` is the one derived quantity. It comes from the car's own `understeer_gradient()` at assembly,
+not from the file.
 
 | symbol | field | default | meaning |
 |--------|-------|---------|---------|
@@ -140,31 +182,38 @@ the file.
 | `κ_lim` | `traction_slip_limit` | 0.09 | drive-wheel slip ratio where the pedal governor starts cutting |
 | `k_κ` | `traction_slip_gain` | 25 /slip | governor cut rate past `κ_lim` |
 
-The PI gains follow a bandwidth rule (the proportional gain sets the speed-loop crossover; the
-integral time `k_p/k_i` removes the residual drag/rolling offset that would otherwise leave a
-steady-state tracking error and cost lap-time parity).
+The PI gains follow a rule on bandwidth. The proportional gain sets the crossover of the speed loop.
+The integral time, `k_p/k_i`, removes the residual offset from drag and rolling resistance. Without
+it, a steady-state tracking error would remain, and it would cost parity in lap time.
 
-## 5. Minimal actuation (PR5 scope)
+## 5. Minimal actuation, the scope of PR5
 
-To close a lap the driver's demands are turned into forces by the minimal
-[`Powertrain`](outlap_vehicle::control::Powertrain) block: throttle scales the **best-gear** wheel
-drive-force ceiling `F_drive_max(v)` — the QSS traction envelope, which already picks the gear at
-each speed, so the shift is *instantaneous and ideal* — distributed to the wheels by the static axle/
-side split (reusing `DriveControl::Split`), and brake scales a balance-bar-split friction torque. The
-full shift state machine (torque-cut → ratio-swap → clutch-ramp, consuming `shift_time_s` on the
-step-boundary event queue) and the yaw-moment torque-vectoring allocator are PR6.
+To close a lap, the minimal [`Powertrain`](outlap_vehicle::control::Powertrain) block turns the
+demands of the driver into forces.
 
-## 6. Behaviour
+Throttle scales the ceiling on wheel drive force in the **best gear**, `F_drive_max(v)`. That is the
+QSS traction envelope, which already picks the gear at each speed. The shift is therefore
+*instantaneous and ideal*. The static split between axles and sides distributes the force to the
+wheels, reusing `DriveControl::Split`.
 
-The two loops track cleanly on smooth tracks — the closed-loop skidpad holds the reference line to a
+Brake scales a friction torque, split by the balance bar.
+
+Two things are PR6: the full shift state machine, which cuts torque, swaps the ratio, and ramps the
+clutch, consuming `shift_time_s` on the event queue at step boundaries; and the torque-vectoring
+allocator for yaw moment.
+
+## 6. Behavior
+
+Both loops track cleanly on a smooth track. The closed-loop skidpad holds the reference line to a
 small proportional offset, and the speed loop follows a QSS-style profile almost exactly:
 
 ![Driver line + speed tracking](img/driver_tracking.png)
 
-On the real `catalunya_osm` racing line, the transient car tracks the **corner-scaled** reference
-(below, seeded at the straightest station): it meets the raw QSS profile at the top of the straights
-and holds the stability margin through the corners — the residual corner gap is the recorded
-transient-vs-point-mass parity signal (`docs/validation/limebeer.md`).
+On the real racing line at `catalunya_osm`, the transient car tracks the **corner-scaled** reference.
+The figure below is seeded at the straightest station. The car meets the raw QSS profile at the top
+of the straights, and holds the stability margin through the corners. The residual gap in the
+corners is the recorded parity signal between the transient tier and the point mass
+(`docs/validation/limebeer.md`).
 
 ![QSS↔T2 speed profile on catalunya_osm](img/driver_parity_catalunya.png)
 
@@ -178,5 +227,5 @@ transient-vs-point-mass parity signal (`docs/validation/limebeer.md`).
 - T. D. Gillespie, *Fundamentals of Vehicle Dynamics*, SAE, 1992 — the understeer-gradient steering
   law `δ = L/R + K_us·a_y`.
 
-No external open-source project was consulted for the driver; it is authored from the literature
+No external open-source project was consulted for the driver. It is authored from the literature
 above.

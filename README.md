@@ -1,75 +1,106 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # outlap
 
-A parametric vehicle simulator — F1 → GT → passenger car — with a race-strategy Monte Carlo layer
-planned on top. A Rust core (`crates/`), a Python API (`python/outlap/`, PyO3 + maturin), and
-published JSON Schemas (`schemas/`). Code is AGPL-3.0; the schemas are Apache-2.0.
+outlap is a parametric vehicle simulator. It covers F1 cars, GT cars, and passenger cars. A
+Monte Carlo layer for race strategy is planned on top of it.
 
-**New here? Read [`docs/GUIDE.md`](docs/GUIDE.md) — the zero-to-hero user guide.** It assumes no
-vehicle-dynamics background and takes you from "what is a lap simulator" to running, understanding,
-and extending outlap, with the physics, the API, and worked recipes.
+It has three parts: a Rust core in `crates/`, a Python API in `python/outlap/` built with PyO3 and
+maturin, and published JSON Schemas in `schemas/`. The code is AGPL-3.0. The schemas are
+Apache-2.0.
 
-The full architecture and specification live in [`docs/HANDOFF.md`](docs/HANDOFF.md); the working
-agreement is in [`CLAUDE.md`](CLAUDE.md).
+**New here? Read [`docs/GUIDE.md`](docs/GUIDE.md), the guide that takes you from zero to
+competence.** It assumes that you know nothing about vehicle dynamics. It starts at "what is a lap
+simulator" and ends with you running, understanding, and extending outlap. It covers the physics,
+the API, and worked recipes.
+
+[`docs/HANDOFF.md`](docs/HANDOFF.md) holds the full architecture and specification.
+[`CLAUDE.md`](CLAUDE.md) holds the working agreement.
 
 ## What works at v0.4.0
 
-- **One vehicle description** consumed by every solver tier — chassis, aero, suspension, tyres, a
-  drivetrain topology graph, ERS/battery, brakes — with a strict, friendly load pipeline (miette
-  spans, did-you-mean, plain-language topology errors). Powertrains enter *only* as neutral `.ptm`
-  map files (the firewall).
-- **Four solver tiers.** **T0**, a point-mass forward/backward velocity-profile solve on the 3D
-  ribbon; **T1**, a double-track per-station trim that emits per-wheel loads, slips, and forces
-  plus setup metrics, and generates a **g-g-g-v envelope** the fast T0 path then consumes; and
-  **T2, the transient tier** — a 7-DOF chassis integrated through time at 1 ms in the curvilinear
-  3D road frame (symbolically verified to 1e-12 in CI), with tyre relaxation, an ideal preview
-  driver behind a corner-scaled stability margin, a gear-shift state machine, torque vectoring,
-  and regen blending. T2 returns a time-indexed data-logger trace: steering, yaw, sideslip,
-  per-wheel loads/slips, gear, regen power, SoC. And **T3**, a 14-DOF tier that adds the four
-  unsprung masses on their own springs, dampers, anti-roll bars and bumpstops, so ride height,
-  pitch and heave are states rather than assumptions — the platform moves under braking and the
-  aero balance moves with it (symbolically verified against the same SymPy derivation as T2).
-- **Tyres**: a steady-state Magic Formula 6.1 model and a physical brush model, with a `.tir` codec
-  and a Python MF6.1 fitting pipeline; citation-backed reference `.tyr` sets; first-order slip
-  relaxation, live in T2. Plus the **flagship thermal ring + wear/degradation stack** (v0.3): a
-  reduced Farroni-TRT three-node thermal model (grip that depends on temperature), Archard wear
-  with a positive-feedback cliff, and irreversible thermal damage — marched as slow states in every
-  tier so a **stint** is simulable, inverse-calibrated from stint pace by `outlap.wearcal`, with
-  soft/medium/hard compound presets.
-- **Powertrain, thermal, and battery**: `.ptm` maps flowing through the drivetrain topology graph
-  (gearboxes, splits, open/locked/LSD/solid diffs); an N-node machine-thermal network with torque
-  derating; and a Thévenin battery whose SoC-dependent terminal voltage feeds back into the
-  drive-unit maps (the Vdc–SoC coupling). Slow states march along a QSS lap — and at T2 the pack
-  charges under braking and discharges under power, live in the time loop.
-- **A 2026-style energy manager and fuel mass.** A regulatory `policy:` overlay governs an electric
-  unit's deployment and recovery: a piecewise-linear power-vs-speed taper evaluated exactly as the
-  regulation writes it, a per-lap harvest allowance, an override ("overtake") envelope, and the
-  power-demand ramp-down that makes recharge phases a real constraint. It marches as a slow state
-  across a lap and across a whole race, so state of charge moves in both directions and the ledger
-  closes. Fuel is mass: the load adds to the dry car, drains as the engine burns it, migrates the
-  centre of gravity, and makes the car faster as it goes — with the flow ceiling shrinking the
-  engine's traction envelope rather than being bolted on afterwards.
-- **A 3D track model** (`track.yaml` + `centerline.csv`) with curvature, grade, banking, and the
-  road frame by arc length, plus **two racing-line generators**: the minimum-curvature QP and its
-  **time-weighted** refinement (weights ∝ time spent, the first step toward the minimum-time
-  line). Ships 28 circuits: the 3D `catalunya_osm` and `spa_osm` (OSM + DEM; Spa carries its real
-  ~100 m of elevation), `barcelona_real_2026` (the geometry the f1 reference car is calibrated
-  against), and 25 flat TUMFTM circuits (LGPL-3.0).
-- **Importers**: OSM+DEM tracks (with closed-lap graph assembly for fragmented circuits), TUMFTM
-  tracks, PDT HDF5 powertrains (→ `.ptm` maps, battery params, an `.emotor` thermal network), and
-  `.tir` tyre files.
-- **A notebook course** (`notebooks/00`–`11`, CI-executed with committed outputs): from the car as
-  data to reading T2 traces like a race engineer — corner anatomy, the friction circle in action,
-  car balance via what-if overrides — closing on a full race distance of energy accounting.
-- **Validation, honestly reported**: the Perantoni & Limebeer 2014 F1 cross-check (top speed
-  within 1 %, corner apexes within 5 %); the QSS↔T2 **hull-containment** parity gate (every T2
-  operating point inside the T1 grip envelope — measured 0.0 % exceedance on all three reference
-  cars); and the numbers that do *not* meet their ambitions recorded with full decompositions
-  instead of hidden — the T2 lap-time gap (driver stability margin) and the transient throughput
-  ceiling (`docs/validation/`).
+**One description of the vehicle, which every solver tier reads.** It covers the chassis, aero,
+suspension, tires, a graph of the drivetrain topology, the ERS and battery, and the brakes. The
+load pipeline is strict, and its errors are friendly: it gives miette spans, it suggests the field
+you meant, and it explains topology problems in plain language. A powertrain enters *only* as a
+neutral `.ptm` map file. This is the firewall.
 
-See [`docs/GUIDE.md`](docs/GUIDE.md) for the full capability tour, including an honest account of
-the limits (Chapter 15).
+**Four solver tiers.**
+
+- **T0** solves a velocity profile on the 3D ribbon with a point mass, in a forward pass and a
+  backward pass.
+- **T1** trims a double-track model at each station. It emits per-wheel loads, slips, and forces,
+  and it emits setup metrics. It also generates a **g-g-g-v envelope**, which the fast T0 path then
+  reads.
+- **T2 is the transient tier.** It integrates a 7-DOF chassis through time at 1 ms, in the
+  curvilinear 3D road frame. CI verifies its equations symbolically to 1e-12. It adds tire
+  relaxation, an ideal preview driver behind a stability margin that scales with the corner, a
+  state machine for gear shifts, torque vectoring, and blending of regeneration. T2 returns a trace
+  indexed by time, like a data logger: steering, yaw, sideslip, per-wheel loads and slips, gear,
+  regeneration power, and SoC.
+- **T3** has 14 DOF. It adds the four unsprung masses, each on its own spring, damper, anti-roll
+  bar, and bumpstop. Ride height, pitch, and heave therefore become states instead of assumptions.
+  The platform moves under braking, and the aero balance moves with it. It is verified symbolically
+  against the same SymPy derivation as T2.
+
+**Tires.** There is a steady-state Magic Formula 6.1 model and a physical brush model. A `.tir`
+codec reads and writes them, and a Python pipeline fits MF6.1. Reference `.tyr` sets ship with
+citations. First-order slip relaxation is live in T2.
+
+The thermal and wear stack arrived in v0.3. A reduced three-node Farroni-TRT thermal model makes
+grip depend on temperature. Archard wear feeds back on itself past a cliff. Thermal damage does not
+reverse. Every tier marches these as slow states, so outlap can simulate a **stint**.
+`outlap.wearcal` calibrates them by inversion from stint pace. Soft, medium, and hard compound
+presets ship.
+
+**Powertrain, thermal, and battery.** `.ptm` maps flow through the graph of the drivetrain
+topology, which holds gearboxes, splits, and differentials that are open, locked, limited-slip, or
+solid. An N-node thermal network for the machine derates torque. A Thévenin battery gives a
+terminal voltage that depends on SoC, and that voltage feeds back into the maps of the drive units.
+This is the Vdc–SoC coupling. Slow states march along a QSS lap. At T2 the pack charges under
+braking and discharges under power, live in the time loop.
+
+**An energy manager in the 2026 style, and fuel mass.** A `policy:` overlay states the regulation
+and governs how an electric unit deploys and recovers. It holds a taper of power against speed,
+piecewise linear, evaluated exactly as the regulation writes it. It holds a harvest allowance for
+each lap, an override envelope for overtaking, and the ramp-down of power demand that makes a
+recharge phase a real constraint. It marches as a slow state across one lap and across a whole
+race. State of charge therefore moves in both directions, and the ledger closes.
+
+Fuel is mass. The load adds to the dry car. The engine burns it, and it drains. The center of
+gravity migrates as it drains. The car gets faster as the race runs. The flow ceiling shrinks the
+traction envelope of the engine, rather than being applied afterward.
+
+**A 3D track model**, held as `track.yaml` plus `centerline.csv`. It gives curvature, grade,
+banking, and the road frame against arc length.
+
+**Two generators for the racing line.** One solves the minimum-curvature QP. The other refines it
+with **time weighting**, where the weights are proportional to time spent. That is the first step
+toward the minimum-time line.
+
+28 circuits ship. `catalunya_osm` and `spa_osm` are 3D, from OSM and a DEM; Spa carries its real
+climb of about 100 m. `barcelona_real_2026` is the geometry that the f1 reference car is calibrated
+against. The other 25 are flat TUMFTM circuits, under LGPL-3.0.
+
+**Importers.** They read OSM and DEM tracks, and they assemble a closed lap from a fragmented
+circuit. They read TUMFTM tracks. They read PDT HDF5 powertrains and write `.ptm` maps, battery
+parameters, and an `.emotor` thermal network. They read `.tir` tire files.
+
+**A course of notebooks**, `notebooks/00` through `11`. CI executes them, and their outputs are
+committed. They start at the car as data. They end with you reading T2 traces like a race engineer:
+the anatomy of a corner, the friction circle in action, and car balance through what-if overrides.
+The last one accounts for energy over a full race distance.
+
+**Validation, reported honestly.** The cross-check against Perantoni & Limebeer 2014 puts top speed
+within 1 % and corner apexes within 5 %. The parity gate between QSS and T2 checks **hull
+containment**: every T2 operating point must sit inside the T1 grip envelope. Measured exceedance
+is 0.0 % on all three reference cars.
+
+The numbers that do *not* meet their ambitions are recorded, not hidden, and each comes with a full
+decomposition. There are two: the gap in T2 lap time, which the stability margin of the driver
+causes, and the ceiling on transient throughput. See `docs/validation/`.
+
+[`docs/GUIDE.md`](docs/GUIDE.md) tours every capability. Chapter 15 gives an honest account of the
+limits.
 
 ## Quick start
 
@@ -90,7 +121,7 @@ uv run python examples/plot_lap.py examples/output/catalunya_t0.csv
 uv run python examples/plot_line_compare.py
 ```
 
-The Catalunya T0 lap, coloured by speed (yellow on the straights, dark at the hairpins):
+Here is the T0 lap at Catalunya, colored by speed. The straights are yellow. The hairpins are dark.
 
 ![Catalunya T0 lap](python/examples/output/catalunya_t0_map.png)
 
@@ -98,21 +129,21 @@ The Catalunya T0 lap, coloured by speed (yellow on the straights, dark at the ha
 
 | Path | What |
 |------|------|
-| `crates/outlap-schema` | file-format contract: serde/schemars types + load pipeline |
-| `crates/outlap-core`   | shared numerics (monotone Hermite, C² splines, N-D gridded maps) + the block/bus/SoA scaffolding and the fixed-step split integrator |
-| `crates/outlap-tire`   | MF6.1 + brush tyre models, slip relaxation, `.tir` codec |
-| `crates/outlap-track`  | 3D track model |
-| `crates/outlap-thermal`| N-node machine thermal network (LPTN) |
-| `crates/outlap-qss`    | T0/T1 quasi-steady-state lap solvers + g-g-g-v envelope + the corner-scaled T2 speed targets |
-| `crates/outlap-raceline` | min-curvature + time-weighted racing lines |
-| `crates/outlap-vehicle` | T2 physics blocks: 7-DOF chassis RHS, load transfer, tyres with relaxation, the preview driver |
-| `crates/outlap-transient` | T2 lap orchestration: split-integrator step loop, line table, shift/TV/regen control layer |
-| `crates/outlap-py`     | PyO3 bindings (the `outlap_core` extension) |
-| `python/outlap`        | Python API, OSM/DEM + TUMFTM + PDT importers, tyre fitting, plotting |
-| `schemas/`             | published JSON Schemas (generated from the Rust types) |
-| `docs/GUIDE.md`        | the zero-to-hero user guide |
-| `data/`                | reference vehicles and imported tracks |
+| `crates/outlap-schema` | The contract for the file formats: the serde and schemars types, and the load pipeline |
+| `crates/outlap-core`   | Shared numerics: monotone Hermite interpolation, C² splines, and N-D gridded maps. Also the block, bus, and SoA scaffolding, and the fixed-step split integrator |
+| `crates/outlap-tire`   | The MF6.1 and brush tire models, slip relaxation, and the `.tir` codec |
+| `crates/outlap-track`  | The 3D track model |
+| `crates/outlap-thermal`| The N-node thermal network for a machine (LPTN) |
+| `crates/outlap-qss`    | The T0 and T1 quasi-steady-state lap solvers, the g-g-g-v envelope, and the T2 speed targets that scale with the corner |
+| `crates/outlap-raceline` | Racing lines: minimum-curvature and time-weighted |
+| `crates/outlap-vehicle` | The T2 physics blocks: the 7-DOF chassis RHS, load transfer, tires with relaxation, and the preview driver |
+| `crates/outlap-transient` | T2 lap orchestration: the step loop of the split integrator, the line table, and the control layer for shifting, torque vectoring, and regeneration |
+| `crates/outlap-py`     | The PyO3 bindings, which build the `outlap_core` extension |
+| `python/outlap`        | The Python API, the OSM/DEM, TUMFTM, and PDT importers, tire fitting, and plotting |
+| `schemas/`             | The published JSON Schemas, generated from the Rust types |
+| `docs/GUIDE.md`        | The guide that takes you from zero to competence |
+| `data/`                | Reference vehicles and imported tracks |
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). Contributions are under AGPL-3.0 with a DCO sign-off.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md). You contribute under AGPL-3.0, with a DCO sign-off.

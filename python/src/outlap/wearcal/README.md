@@ -1,25 +1,30 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# `outlap.wearcal` — stint-pace inverse calibration
+# `outlap.wearcal`: inverse calibration from stint pace
 
-The thermal-ring wear/degradation model (HANDOFF §7.2/§7.3) has physically-meaningful parameters
-(`k_w`, `w_c`, `s_w`, `Δ_c`, the grip-window and thermal-damage terms) whose *magnitudes* are not
-knowable a priori. `wearcal` fixes them the way a race engineer does: **inversely, from the per-lap
-pace curve of a real stint** — recovering the parameters that reproduce the observed pace loss and
-cliff.
+The wear and degradation model on the thermal ring (HANDOFF §7.2 and §7.3) has parameters that mean
+something physical: `k_w`, `w_c`, `s_w`, `Δ_c`, the grip-window terms, and the thermal-damage terms.
+Nobody can know their *magnitudes* in advance.
+
+`wearcal` fixes them the way a race engineer does. It works **backward from the per-lap pace curve
+of a real stint**, and recovers the parameters that reproduce the observed loss of pace and the
+observed cliff.
 
 ## How it works
 
-The optimiser (`scipy.optimize.least_squares`, `trf` + `soft_l1`) inverts a **fast reduced-order
-stint-pace surrogate** (`model.py`) — a clean-room numpy mirror of the Rust ring's laws (Archard
-sliding-energy wear, Grosch temperature-hardness, the C¹ cliff sigmoid, threshold-power thermal
-damage, the Farroni grip window). This mirrors how `outlap.tirefit` uses a numpy MF6.1 model
-against the Rust force kernels. Running the real stint driver inside a fit is impractical — every
-evaluation rebuilds the g-g-g-v envelope across its tyre-state axes — so the surrogate is anchored
-to a reference F1-on-Catalunya stint and validated end-to-end against the real driver (PR9
-`docs/validation/wear-cliff.md`). The faithful (slow, opt-in) forward model wrapping the real
-driver is in `sim.py`.
+The optimizer is `scipy.optimize.least_squares`, with the `trf` method and the `soft_l1` loss. It
+inverts a **fast reduced-order surrogate of stint pace** in `model.py`. That surrogate is a
+clean-room numpy mirror of the laws in the Rust ring: Archard wear from sliding energy, Grosch
+temperature-hardness, the C¹ cliff sigmoid, thermal damage above a power threshold, and the Farroni
+grip window. `outlap.tirefit` works the same way, running a numpy MF6.1 model against the Rust
+force kernels.
 
-## CLI
+Running the real stint driver inside a fit is impractical, because every evaluation rebuilds the
+g-g-g-v envelope across its tire-state axes. The surrogate is therefore anchored to a reference
+stint of the F1 car at Catalunya, and it is validated end to end against the real driver (PR9,
+`docs/validation/wear-cliff.md`). The faithful forward model wraps the real driver. It is slow, it
+is opt-in, and it lives in `sim.py`.
+
+## Command line
 
 ```bash
 # Recover known parameters from a synthetic stint (round-trip recovery test):
@@ -34,8 +39,12 @@ python -m outlap.wearcal sim-check fitted.tyr.yaml --vehicle data/vehicles/limeb
 
 ## Redistribution policy (HANDOFF §15)
 
-FastF1 telemetry and any parameters fitted from it are **calibration/validation artefacts only**.
-This package **never** commits raw telemetry or fitted TTC parameter sets. The live FastF1 loader
-(`load_fastf1`, needs the `wear-cal` extra: `uv sync --extra wear-cal`) retains only anonymised
-per-lap times — use it to produce your own private fixtures. The committed offline fixture under
-`data/wear/` is a small *derived* pace curve, sufficient for the CI gate.
+Use FastF1 telemetry, and any parameter fitted from it, only to calibrate and to validate. This
+package **never** commits raw telemetry. It never commits a fitted TTC parameter set.
+
+The live FastF1 loader is `load_fastf1`. It needs the `wear-cal` extra: run
+`uv sync --extra wear-cal`. It keeps only anonymized lap times. Use it to produce your own private
+fixtures.
+
+The committed offline fixture under `data/wear/` is a small *derived* pace curve. It is sufficient
+for the CI gate.

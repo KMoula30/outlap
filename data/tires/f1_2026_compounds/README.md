@@ -1,30 +1,36 @@
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
-# F1 2026 compound presets — soft / medium / hard
+# F1 2026 compound presets: soft, medium, and hard
 
-Three **synthetic** dry-slick compound presets built on the generic racing-slick MF6.1 core (the
-`f1_2026` default slick), differentiated the way real compounds differ: peak grip, the temperature
-window, and the wear/degradation rate. They exist for the multi-compound strategy demo (M5 PR10,
-`notebooks/10_stint_strategy.ipynb`) — a dry-only stage-2 tease (wet is stage-2 per Decision #4).
+These are three **synthetic** dry-slick compound presets. Each one builds on the generic
+racing-slick MF6.1 core, which is the default `f1_2026` slick. They differ in the three ways that
+real compounds differ: peak grip, temperature window, and wear rate.
 
-The thermal/wear blocks are in the racing-slick band calibrated by `outlap.wearcal` (M5 PR7/PR8);
-the compounds scale that baseline. **These are not measured tyre data** — no FastF1/TTC parameters
-are redistributed (HANDOFF §15).
+They exist for the multi-compound strategy demonstration (M5 PR10,
+`notebooks/10_stint_strategy.ipynb`). That demonstration is dry only, and it previews stage 2. Wet
+conditions are stage-2 work. See Decision #4.
+
+`outlap.wearcal` calibrated the thermal and wear blocks into the racing-slick band (M5 PR7 and
+PR8). Each compound scales that baseline. **These presets are not measured tire data.** outlap
+redistributes no FastF1 parameter and no TTC parameter (HANDOFF §15).
 
 | | peak grip (LMUX/LMUY) | `t_opt` | `k_w` (wear) | `w_c` cliff | `delta_c` | character |
 |---|---|---|---|---|---|---|
-| **soft** | 1.02 | 88 °C | 7.0e-9 | 1.7 mm | 0.15 | most grip, warms in fast, wears fastest, earliest cliff |
+| **soft** | 1.02 | 88 °C | 7.0e-9 | 1.7 mm | 0.15 | most grip, warms up quickest, wears quickest, earliest cliff |
 | **medium** | 1.00 | 95 °C | 4.4e-9 | 2.0 mm | 0.12 | the baseline |
-| **hard** | 0.98 | 102 °C | 2.6e-9 | 2.5 mm | 0.09 | least grip, slow to switch on, wears slowest, latest cliff |
+| **hard** | 0.98 | 102 °C | 2.6e-9 | 2.5 mm | 0.09 | least grip, warms up slowest, wears slowest, latest cliff |
 
-The result is a lap-time **crossover**: the soft is quickest for the opening laps (more grip) but
-degrades fastest; the hard starts slower but holds pace longest — the trade that drives pit-stop
-strategy. To run a stint on a compound, point a vehicle's `tires:` block at the preset (or pass it
-through the `overrides`/scratch mechanism); the notebook demonstrates the comparison.
+These values give a **crossover** in lap time. The soft has more grip, so it is quickest for the
+first laps. It also degrades quickest. The hard starts slower, but it holds its pace longest. This
+trade-off drives pit-stop strategy.
+
+To run a stint on a compound, point the `tires:` block of a vehicle at that preset. You can also
+pass the preset through the `overrides` mechanism or the scratch mechanism. The notebook shows the
+comparison.
 
 ![Compound crossover](../../../docs/validation/img/compound_crossover.png)
 
-Regenerate with `python python/tools/plot_compound_crossover.py`; the full walkthrough is
-`notebooks/10_stint_strategy.ipynb`.
+To regenerate the figure, run `python python/tools/plot_compound_crossover.py`. For the full
+walkthrough, read `notebooks/10_stint_strategy.ipynb`.
 
 ## Usage
 

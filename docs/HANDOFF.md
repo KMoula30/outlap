@@ -1,15 +1,19 @@
 # RACESIM PROJECT HANDOFF — Complete Bootstrap Document
 
-> **Purpose of this file.** This is a self-contained engineering handoff for starting a new
-> open-source project on a fresh Linux machine. The reader (human or AI assistant) is assumed to
-> have **zero knowledge** of the author's prior work, employers, or tools. Everything needed —
-> vision, constraints, verified open-source landscape, full system architecture, physics models,
-> file-format contracts, the PDT HDF5 importer specification (with the actual file schemas
-> documented from inspection), language/tooling decisions, milestones, and validation plan — is in
-> this one document. It was produced on 2026-07-02 after a 29-agent research workflow (93 OSS
-> projects surveyed, 18 license/activity-verified) plus direct inspection of three real PDT `.h5`
-> files, and **updated 2026-07-03 after a 12-question decision round with the author** — see the
-> Locked Decisions log at the end of §1; those answers override anything that contradicts them.
+> **What this file is for.** This is a self-contained engineering handoff. It tells you how to start
+> a new open-source project on a fresh Linux machine. The reader, whether human or AI assistant, is
+> assumed to know **nothing** about the author's prior work, employers, or tools.
+>
+> Everything you need is in this one document: the vision, the constraints, the verified
+> open-source landscape, the full system architecture, the physics models, the file-format
+> contracts, the specification for the PDT HDF5 importer (with the actual file schemas, documented
+> from inspection), the decisions on language and tooling, the milestones, and the validation plan.
+>
+> It was produced on 2026-07-02, after a research workflow of 29 agents that surveyed 93 OSS
+> projects and verified 18 of them for license and activity, plus direct inspection of three real
+> PDT `.h5` files. It was **updated on 2026-07-03, after a round of 12 questions with the author**.
+> See the Locked Decisions log at the end of §1. Those answers override anything that contradicts
+> them.
 
 ---
 
@@ -39,48 +43,62 @@
 
 ## 1. Vision & Hard Constraints
 
-**What we are building.** An open-source, parametric vehicle simulation foundation for motorsport
-and road cars — "anything with 4 wheels": a Formula 1 car, an LMP/GT car, a track-day hatchback —
-built from shared foundational building blocks, where a specific car is *pure data*, never code.
-On top of it (stage 2, designed-for now, built later): a Monte Carlo race-strategy simulator and
-lap-time analysis tools.
+**What we are building.** A parametric foundation for vehicle simulation, open source, covering
+motorsport and road cars. It must handle "anything with 4 wheels": a Formula 1 car, an LMP or GT
+car, a track-day hatchback.
 
-**Versatility is the product.** Community adoption hinges on how easily *any* concept can be
-expressed and compared. The canonical example (and v1's hero demo): take one EV chassis and
-compare optimal laps at a given circuit for a 1-drive-unit RWD car vs 2-DU AWD vs 4-DU with
-torque vectoring vs FWD — then swap to a GT car with a big ICE + small electric machine at an
-80/20 or 90/10 hybrid split — all through data changes only. This forces the powertrain to be a
-**topology graph** (§8.0), not a fixed layout, and every subsystem (tires, aero, dynamics) to be
-independently swappable.
+It is built from shared foundational blocks. A specific car is *pure data*. It is never code.
 
-**Product philosophy.** V1 ships **feature-rich** — the community's role is next-generation
-improvements, new data (tracks, vehicles, tire fits), and bug fixes — not building the foundation.
-One experienced simulation engineer builds v1 solo.
+On top of that foundation, and designed for now but built later, comes stage 2: a Monte Carlo
+simulator for race strategy, and tools for lap-time analysis.
 
-**Hard constraints (non-negotiable):**
+**Versatility is the product.** The community will adopt this only if *any* concept is easy to
+express and to compare.
 
-1. **Conflict-of-interest firewall.** The author works professionally in (a) humanoid robotics
-   (actuators, motion control) and (b) electric-powertrain design tooling (electromagnetic motor
-   design, drive units, battery packs — the "PDT" toolchain). Therefore this project:
-   - **Never designs or models machines electromagnetically.** Powertrains (electric or ICE) enter
-     ONLY as torque/speed/efficiency **maps** in a neutral, open file format (`.ptm`, §9).
-   - **Never touches actuator/motion-control/robot-dynamics territory.**
-   - The author's private tools export to the neutral format; this project only consumes it. A
-     PDT→neutral converter ships as an importer (§10) so PDT users can bring their own maps —
-     but the importer reads plain HDF5, never imports PDT code.
-2. **Strong copyleft — AGPL-3.0** (author's explicit decision, 2026-07-03). The author wants the
-   strongest available guarantee that anyone building on or serving this code must publish their
-   source; commercial use is welcome but never closed-source. AGPL (not plain GPL) because the
-   network-use clause also covers SaaS/web deployments — which matters because the Web UI is the
-   declared endgame (constraint 5). Full dependency-compatibility policy in §15.
-3. **Languages chosen deliberately to flex engineering range**: Rust systems core, Python user API,
-   GPU batch path designed-in, WebAssembly as a first-class target. See §11.
-4. **The single canonical vehicle description** feeds every fidelity tier (§6). No per-tier
-   re-parameterization, ever.
-5. **Web UI is the endgame.** V1 is API/CLI-first, but the WASM build is not a throwaway demo — it
-   is the seed of the eventual primary interface (Stage 3, §16). Consequence enforced from day 1:
-   core crates stay wasm-clean (no filesystem/threading assumptions in `outlap-core`; IO behind
-   traits; schemas losslessly JSON-convertible).
+Here is the canonical example, which is also the hero demonstration of v1. Take one EV chassis.
+Compare optimal laps at a circuit for four layouts: a 1-drive-unit RWD car, a 2-DU AWD car, a 4-DU
+car with torque vectoring, and an FWD car. Then swap to a GT car with a large ICE and a small
+electric machine, at a hybrid split of 80/20 or 90/10. Change nothing but data.
+
+That requirement forces two things. The powertrain must be a **topology graph** (§8.0), not a fixed
+layout. And every subsystem — tires, aero, dynamics — must be swappable on its own.
+
+**Product philosophy.** V1 ships **feature-rich**. The community's role is the next generation of
+improvements, new data such as tracks, vehicles, and tire fits, and bug fixes. It is not to build
+the foundation. One experienced simulation engineer builds v1 alone.
+
+**Hard constraints. None of these is negotiable.**
+
+1. **A firewall against conflicts of interest.** The author works professionally in two fields:
+   humanoid robotics, covering actuators and motion control; and tooling for electric-powertrain
+   design, covering electromagnetic motor design, drive units, and battery packs. That second
+   toolchain is called "PDT" here. Therefore this project obeys three rules.
+   - **It never designs or models a machine electromagnetically.** A powertrain, electric or ICE,
+     enters ONLY as a **map** of torque, speed, and efficiency, in a neutral open file format:
+     `.ptm`, §9.
+   - **It never touches actuators, motion control, or robot dynamics.**
+   - The author's private tools export to the neutral format, and this project only consumes it. A
+     converter from PDT to that format ships as an importer (§10), so that PDT users can bring
+     their own maps. The importer reads plain HDF5. It never imports PDT code.
+2. **Strong copyleft: AGPL-3.0.** This is the author's explicit decision, of 2026-07-03. The author
+   wants the strongest available guarantee: anyone who builds on this code, or serves it, must
+   publish their source. Commercial use is welcome, but never closed-source.
+
+   AGPL rather than plain GPL, because the network-use clause also covers SaaS and web deployments.
+   That matters, because the Web UI is the declared endgame; see constraint 5. §15 gives the full
+   policy on dependency compatibility.
+3. **The languages were chosen deliberately, to flex engineering range**: a Rust systems core, a
+   Python user API, a GPU batch path designed in from the start, and WebAssembly as a first-class
+   target. See §11.
+4. **One canonical vehicle description feeds every fidelity tier** (§6). There is never a
+   re-parameterization for a tier.
+5. **The Web UI is the endgame.** V1 is API-first and CLI-first. But the WASM build is not a
+   throwaway demonstration. It is the seed of the eventual primary interface, which is Stage 3,
+   §16.
+
+   One consequence is enforced from day 1. The core crates stay wasm-clean: `outlap-core` assumes
+   no filesystem and no threading, IO sits behind traits, and every schema converts to JSON without
+   loss.
 
 ### Locked Decisions log (Q&A with the author, 2026-07-03)
 
@@ -160,7 +178,7 @@ One experienced simulation engineer builds v1 solo.
 
 ## 2. Project Name
 
-Availability checked 2026-07-02 (GitHub search, crates.io API, PyPI API):
+Availability was checked on 2026-07-02, by GitHub search and through the crates.io and PyPI APIs:
 
 | Candidate | GitHub | crates.io | PyPI | Verdict |
 |---|---|---|---|---|
@@ -171,39 +189,43 @@ Availability checked 2026-07-02 (GitHub search, crates.io API, PyPI API):
 | undercut | **collides**: undercut-f1 (896★ F1 timing TUI) | available | available | Avoid |
 | racelab | scattered | available | **taken** | Avoid |
 
-**DECIDED (2026-07-03): `outlap`.** The out-lap is where tire temperature, fuel, and strategy all
-converge before a flying lap; it is short, motorsport-native, and unclaimed on both package
-registries. Repo description carries the descriptive long name:
-*"outlap — open vehicle racing simulator & strategy optimizer"*. Register the crates.io and PyPI
-names with placeholder 0.0.1 releases early (name-squatting insurance); repo is **public from
-day 1**.
+**DECIDED on 2026-07-03: `outlap`.** The out-lap is where tire temperature, fuel, and strategy all
+converge, before a flying lap. The word is short, native to motorsport, and unclaimed on both
+package registries.
+
+The repository description carries the descriptive long name: *"outlap — open vehicle racing
+simulator & strategy optimizer"*.
+
+Register the names on crates.io and PyPI early, with placeholder 0.0.1 releases. That is insurance
+against name-squatting. The repository is **public from day 1**.
 
 ---
 
 ## 3. Development Environment (Linux)
 
-**DECIDED: the author's existing Ubuntu 24.04 desktop is the dev machine.**
+**DECIDED: the author's existing Ubuntu 24.04 desktop is the development machine.**
 
 ```
 OS:  Ubuntu 24.04.4 LTS x86_64 (kernel 6.17)     RAM: 16 GB
 CPU: Intel i5-6500 (4 cores) @ 3.6 GHz           GPU: NVIDIA GTX 1060 3GB
 ```
 
-- This is fine for v1 development: the core is CPU-light during development, the GTX 1060 runs
-  Vulkan/wgpu for later GPU experiments, and CI parity holds (GitHub Actions `ubuntu-latest`
-  runners are Ubuntu — where the code is *developed* doesn't matter to CI, but local == CI
-  eliminates "works on my machine").
-- **Known limitation**: 4 cores means batch benchmarks run ~4× slower than a modern desktop.
-  Treat this box as the *dev* machine; nominate a faster machine later as the documented
-  "benchmarks-of-record" hardware (BENCHMARKS.md per release).
-- **HARD RULE: never develop this project on the work laptop** (no dual-boot, no repo checkout).
-  Personal OSS on employer-adjacent hardware undermines the §1 conflict firewall and risks the
-  machine the author earns with. This is part of the firewall, not a convenience choice.
+- This machine is fine for developing v1. The core is light on CPU during development. The GTX 1060
+  runs Vulkan and wgpu for later GPU experiments. And CI parity holds: the `ubuntu-latest` runners
+  of GitHub Actions run Ubuntu. Where the code is *developed* does not matter to CI, but a local
+  environment that matches CI eliminates "works on my machine".
+- **A known limitation.** Four cores means that batch benchmarks run about 4 times slower than on a
+  modern desktop. Treat this box as the *development* machine. Nominate a faster machine later, and
+  document it as the hardware of record for benchmarks, in a BENCHMARKS.md for each release.
+- **HARD RULE: never develop this project on the work laptop.** No dual boot, and no checkout of
+  the repository. Personal OSS on hardware adjacent to an employer undermines the firewall of §1,
+  and it risks the machine the author earns with. This is part of the firewall. It is not a matter
+  of convenience.
 
-The toolchains are distro-agnostic anyway (`rustup` for Rust, `uv` for Python, `maturin` for
-wheels); Ubuntu LTS just optimizes for boring stability + driver support.
+The toolchains are agnostic to the distribution in any case: `rustup` for Rust, `uv` for Python,
+and `maturin` for wheels. Ubuntu LTS simply optimizes for boring stability and driver support.
 
-Setup script (run once on the fresh machine):
+Run this setup script once, on the fresh machine:
 
 ```bash
 # --- system toolchain ---
@@ -230,21 +252,25 @@ cargo new --lib crates/outlap-core
 uv init --package python/outlap
 ```
 
-Sanity checks: `cargo --version`, `vulkaninfo --summary` (wgpu backend present),
-`uv run python -c "import sys; print(sys.version)"`.
+Then run three sanity checks: `cargo --version`; `vulkaninfo --summary`, to confirm the wgpu
+backend is present; and `uv run python -c "import sys; print(sys.version)"`.
 
 ---
 
 ## 4. Verified Open-Source Landscape & Reuse Policy
 
-All licenses and activity verified against the actual repos on 2026-07-02.
+Every license and every activity claim was verified against the actual repository on 2026-07-02.
 
-> **License directionality under AGPL-3.0 (our license, §15):** permissive code (MIT/Apache/BSD/
-> Zlib) flows INTO an AGPL project freely — every dependency in §4.1 remains fully usable. The
-> LGPL-3.0 wall that existed under the original permissive plan **drops**: LGPL libraries are now
-> legally usable as dependencies too. We still *prefer* re-implementing core algorithms in Rust
-> from the papers — for quality, integration, and because the flagship contributions must be our
-> own — but the constraint is now engineering judgment, not law.
+> **How licenses flow under AGPL-3.0, which is our license, §15.** Permissive code, under MIT,
+> Apache, BSD, or Zlib, flows INTO an AGPL project freely. Every dependency in §4.1 therefore stays
+> fully usable.
+>
+> The LGPL-3.0 wall that existed under the original permissive plan **drops**. An LGPL library is
+> now legally usable as a dependency too.
+>
+> We still *prefer* to re-implement a core algorithm in Rust, from the papers. Three reasons:
+> quality, integration, and the fact that the flagship contributions must be our own. But the
+> constraint is now engineering judgment. It is no longer law.
 
 ### 4.1 Dependencies (permissive, actively maintained — link/depend directly)
 
@@ -300,39 +326,43 @@ All licenses and activity verified against the actual repos on 2026-07-02.
 
 ## 5. The Whitespace — Why This Project Wins
 
-Verified conclusions from the landscape sweep (each independently confirmed by 2+ research agents):
+These conclusions come from the landscape sweep. Two or more research agents confirmed each one
+independently.
 
-1. **No open-source tire thermal + wear/degradation model exists, anywhere, in any language.** The
-   physics is published (Farroni TRT/TRT-EVO ring models; TameTire papers; Archard/frictional-energy
-   wear laws) but every implementation is proprietary (MegaRide thermoRIDE/WeaRIDE, Michelin
-   TameTire, FTire add-ons) or a dead 0-star repo. OSS uniformly stops at Pac89/Pac02/TMeasy with
-   time-invariant grip. **→ Flagship contribution (§7.2).**
-2. **No complete open MF6.1/6.2 outside MATLAB**; no pip-installable maintained MF package; **no
-   Rust implementation of any tire model at all**.
-3. **No credible Rust vehicle-dynamics crate exists.** The language niche is vacant; the substrate
-   (diffsol/nalgebra) is ready.
-4. **No open "race car as data" schema** (suspension + aeromap + tires + powertrain); every project
-   invents its own. Defining one = chance to become the standard (§9).
-5. **No open ride-height/rake-dependent aero-map representation** for ground-effect cars.
-6. **No open ERS/hybrid race powertrain** (deployment strategies, energy limits) coupled to chassis
-   dynamics; battery models exist (PyBaMM/thevenin) but uncoupled from vehicle simulation.
-7. **Physics ↔ strategy is completely unconnected in OSS**: race-strategy sims use empirical
-   lap-time-delta degradation; physics engines have no wear states. Our stage-2 thesis occupies
-   exactly this seam.
-8. **No open 3D racetrack format or dataset** (elevation+banking+grip); the academic standard is 2D
-   and frozen since 2021.
-9. **No batch/GPU story in any motorsport OSS tool**; nothing browser-runnable (WASM/WebGPU demo =
-   cheap differentiator).
+1. **No open-source tire thermal model with wear and degradation exists. Anywhere, in any
+   language.** The physics is published: the TRT and TRT-EVO ring models of Farroni, the TameTire
+   papers, and the wear laws of Archard and frictional energy. But every implementation is
+   proprietary — MegaRide thermoRIDE and WeaRIDE, Michelin TameTire, add-ons for FTire — or it is a
+   dead repository with no stars. OSS uniformly stops at Pac89, Pac02, or TMeasy, with grip that
+   does not vary in time. **→ This is the flagship contribution (§7.2).**
+2. **No complete open MF6.1 or 6.2 exists outside MATLAB.** There is no maintained MF package that
+   pip can install. And there is **no Rust implementation of any tire model at all**.
+3. **No credible Rust crate for vehicle dynamics exists.** The niche in that language is vacant,
+   and the substrate — diffsol and nalgebra — is ready.
+4. **No open schema for a "race car as data" exists**, covering suspension, aero map, tires, and
+   powertrain. Every project invents its own. Defining one is a chance to become the standard (§9).
+5. **No open representation of an aero map that depends on ride height and rake exists**, for a
+   ground-effect car.
+6. **No open ERS or hybrid race powertrain exists**, with deployment strategies and energy limits,
+   coupled to chassis dynamics. Battery models exist, such as PyBaMM and thevenin, but they are
+   uncoupled from vehicle simulation.
+7. **Physics and strategy are completely disconnected in OSS.** A race-strategy simulator uses an
+   empirical delta in lap time for degradation. A physics engine has no wear states. Our stage-2
+   thesis occupies exactly that seam.
+8. **No open 3D racetrack format or dataset exists**, with elevation, banking, and grip. The
+   academic standard is 2D, and frozen since 2021.
+9. **No motorsport OSS tool has a batch or GPU story**, and nothing runs in a browser. A demo in
+   WASM and WebGPU is therefore a cheap differentiator.
 
 ---
 
 ## 6. System Architecture
 
-### 6.1 Core invariant: one vehicle description, four derived views
+### 6.1 The core invariant: one vehicle description, four derived views
 
-There is **one canonical parameter set** per vehicle (§9). Lower-fidelity tiers are **derived at
-runtime by evaluating the same objects** — parity between tiers is a *solver property* (testable in
-CI), not a data-entry discipline.
+There is **one canonical parameter set** for each vehicle (§9). A lower-fidelity tier is **derived
+at run time, by evaluating the same objects**. Parity between tiers is therefore a property of the
+solver, and CI can test it. It is not a discipline of data entry.
 
 ```
                  vehicle.yaml (+ track.yaml, *.tyr.yaml tires, *.ptm.yaml powertrain maps)
@@ -347,40 +377,58 @@ loop)                balance vs speed)                 workhorse)               
                                                                                  real" tier)
 ```
 
-- **T0** — forward/backward velocity-profile solver (TUM `calc_vel_profile` formulation,
-  re-implemented from the papers) on a spline track. **Full 3D (Locked Decision #13)**: the track
-  is a 3D ribbon (curvature κ(s), grade, banking, vertical curvature); envelopes are
-  **g-g-g-v** (Lovato/Massaro polar form) — the apparent-gravity/normal-load axis captures
-  banking load, crest unloading, and compression (Eau Rouge). Constraint envelope:
-  `gg(v, ax, g_normal | ride_heights, T_tire, wear, fuel_mass)` — **the tire-state axes are the
-  differentiator**: strategy-tier laps see physical degradation.
-- **T1** — for each (v, ay, ax): damped-Newton solve of the algebraic trim: unknowns
-  z = [steer δ, sideslip β, yaw rate r = κv, throttle/brake split, 4×Fz]; equations = X/Y/N force-moment
-  balance + quasi-static lateral/longitudinal load transfer (geometric via roll-center heights +
-  anti-effects; elastic via roll-stiffness distribution) + aero-platform equilibrium (ride heights
-  from wheel rates + aero loads, iterated against the aero map).
-- **T2** — states [s, n, ψ_rel, vx, vy, r, ω₁..₄] in the **curvilinear 3D road frame** (position
-  along track s + lateral offset n; road banking/grade rotate the gravity and load vectors) + tire
-  relaxation states + slow states (below). Load transfer algebraic (same expressions as T1).
-  Smooth ODE, no contact solver → GPU-batchable.
-- **T3** — adds sprung heave/pitch/roll (z, φ, θ + rates) + 4 unsprung vertical DOF; nonlinear
-  spring/damper tables, bumpstops, ARBs; kinematic camber/toe vs travel from K&C tables. Needed
-  because pitch-under-braking → aero-balance shift is *the* defining downforce-car behavior.
-- **Later (design-for, don't build):** full-multibody adapter to Chrono::Vehicle consuming the same
-  schema; MF-Swift-style rigid-ring tire; OpenCRG surfaces.
+- **T0** solves a velocity profile forward and backward, on a spline track. The formulation is that
+  of TUM's `calc_vel_profile`, re-implemented from the papers.
 
-**Slow vs fast state split** (used by every tier):
+  It runs in **full 3D** (Locked Decision #13). The track is a 3D ribbon, with curvature κ(s),
+  grade, banking, and vertical curvature. The envelopes are therefore **g-g-g-v**, in the polar
+  form of Lovato and Massaro. The axis of apparent gravity and normal load captures three effects:
+  load from banking, unloading over a crest, and compression, as at Eau Rouge.
+
+  The constraint envelope is `gg(v, ax, g_normal | ride_heights, T_tire, wear, fuel_mass)`. **The
+  tire-state axes are the differentiator**: a lap run for the strategy tier sees physical
+  degradation.
+- **T1** solves, for each (v, ay, ax), the algebraic trim, by damped Newton. The unknowns are
+  z = [steer δ, sideslip β, yaw rate r = κv, throttle and brake split, 4×Fz]. The equations are the
+  force and moment balance in X, Y, and N, plus quasi-static load transfer in the lateral and
+  longitudinal directions, plus the aero-platform equilibrium.
+
+  Load transfer has a geometric route, through roll-center heights and the anti effects, and an
+  elastic route, through the distribution of roll stiffness. The aero-platform equilibrium takes
+  ride heights from the wheel rates and the aero loads, and iterates against the aero map.
+- **T2** carries the states [s, n, ψ_rel, vx, vy, r, ω₁..₄], in the **curvilinear 3D road frame**.
+  Position along the track is s, and lateral offset is n. Banking and grade rotate the gravity
+  vector and the load vectors. It adds tire relaxation states, and the slow states listed below.
+
+  Load transfer is algebraic, using the same expressions as T1. The ODE is smooth, and there is no
+  contact solver. It is therefore batchable on a GPU.
+- **T3** adds sprung heave, pitch, and roll — z, φ, θ, and their rates — plus 4 unsprung vertical
+  DOF. It has nonlinear tables for springs and dampers, plus bumpstops and ARBs. It takes camber
+  and toe against travel from K&C tables.
+
+  It is needed because pitch under braking shifts the aero balance, and that is *the* defining
+  behavior of a downforce car.
+- **Later. Design for these, but do not build them.** An adapter to full multibody through
+  Chrono::Vehicle, consuming the same schema. A rigid-ring tire in the MF-Swift style. OpenCRG
+  surfaces.
+
+**The split between slow and fast states**, which every tier uses:
+
 - *Fast*: chassis velocities, wheel speeds, tire relaxation, actuator lags.
-- *Slow*: tire surface/carcass/gas temperatures, tread wear, thermal damage, brake disc temps, fuel
-  mass, battery SOC + temperature.
-- In T0/T1 (QSS) the slow states integrate **segment-to-segment with explicit Euler over the
-  quasi-static solution** — this is what makes the QSS tier *stint-capable* (unique in OSS).
+- *Slow*: tire temperatures at the surface, carcass, and gas; tread wear; thermal damage; brake
+  disc temperatures; fuel mass; battery SOC and temperature.
+- In the QSS tiers, T0 and T1, the slow states integrate **from segment to segment, by explicit
+  Euler over the quasi-static solution**. That is what makes the QSS tier *capable of running a
+  stint*, which is unique in OSS.
 
-### 6.2 Block abstraction
+### 6.2 The Block abstraction
 
-A **Block** = (immutable parameters, states, typed ports on a flat struct-of-arrays signal Bus).
-Blocks declare port reads/writes; the assembler topologically sorts once at model build — no
-runtime graph, no virtual dispatch in the inner loop (enum dispatch).
+A **Block** is three things: immutable parameters, states, and typed ports on a flat
+struct-of-arrays signal Bus.
+
+A block declares which ports it reads and writes. The assembler sorts the blocks topologically,
+once, when the model is built. There is therefore no graph at run time, and no virtual dispatch in
+the inner loop. Dispatch is through an enum.
 
 ```rust
 trait Block {
@@ -393,17 +441,21 @@ trait Block {
 }
 ```
 
-Block set: `Chassis` (7/14-DOF variants), `Tire` ×4, `Aero`, `Suspension` (lumped K&C), `Brakes`,
-`Ice`, `ElectricMachine`, `Gearbox`, `EnergyStore`, `EnergyManager`, `Driver`. **F1 vs hatchback is
-pure data** — same blocks, different parameter files; absent subsystems (ERS on a hatchback) simply
-don't instantiate.
+The block set is: `Chassis`, in 7-DOF and 14-DOF variants; `Tire` ×4; `Aero`; `Suspension`, as
+lumped K&C; `Brakes`; `Ice`; `ElectricMachine`; `Gearbox`; `EnergyStore`; `EnergyManager`; and
+`Driver`.
 
-### 6.2b The configuration backbone (Locked Decisions #37–47) — how variety stays fast AND friendly
+**An F1 car and a hatchback differ in data alone.** They use the same blocks with different
+parameter files. A subsystem that a car does not have, such as ERS on a hatchback, simply does not
+instantiate.
 
-**The input quartet:** every run = `vehicle.yaml + track.yaml + conditions.yaml + sim.yaml`
-(the last two optional, fully defaulted). Car identity, road, environment, and numerics never mix.
+### 6.2b The configuration backbone (Locked Decisions #37–47): how variety stays fast AND friendly
 
-**The assembly pipeline** (runs once per model load, never in the loop):
+**The input quartet.** Every run is `vehicle.yaml + track.yaml + conditions.yaml + sim.yaml`. The
+last two are optional, and fully defaulted. Car identity, road, environment, and numerics never
+mix.
+
+**The assembly pipeline** runs once for each model load. It never runs in the loop.
 
 ```
 parse (all referenced files)                         # serde/pydantic, schema-versioned
@@ -419,66 +471,92 @@ parse (all referenced files)                         # serde/pydantic, schema-ve
             → immutable CompiledVehicle              # hot loop sees only this
 ```
 
-After assembly the hot loop touches **zero** strings, hashes, or config logic — variety is paid
-for entirely at load time. The loaded-model report (what was inherited, what was estimated, what
-was degraded) prints with every run and embeds in artifacts: *nothing silent*.
+After assembly, the hot loop touches **zero** strings, hashes, and configuration logic. Load time
+pays for all the variety.
 
-**Step phases:** `sense → control → actuate → integrate`. Controllers (TV, ERS deployment, brake
-bias, shift logic) are first-class swappable blocks running in the `control` phase on the same
-bus — **Rust or C-ABI only (#38); no Python inside a timestep, ever**. Experimentation with
-custom control strategies happens by writing a Rust controller block (plugin point) or
-pre-computing control schedules `u(s)` as data. The ERS energy manager (`outlap-powertrain`,
-M6/PR1) is a pure struct with a policy enum consumed by the tiers' control phase — deliberately
-NOT plugin-registration machinery (that is the post-1.0 plugin surface).
+The loaded-model report states what was inherited, what was estimated, and what was degraded. It
+prints with every run, and it embeds in every artifact. *Nothing is silent.*
 
-**Two-layer control contract (M6/PR4).** The step-boundary **controllers** (the shift FSM, the
-battery slow stack, and the ERS energy manager) decide ONCE per step at the boundary and publish
-frozen bus channels; the per-stage **blocks** stay pure consumers that read those channels on every
-RHS evaluation (the bus is cleared and rebuilt each eval, so a boundary value must be re-published
-every eval, never once per step). The manager reaches the blocks exactly this way — an additive
-MGU-K deploy force plus the realized electrical deploy/harvest the powertrain block republishes as
-the pack draw/charge — and the per-lap energy ledger accumulates on the fast path from post-step bus
-values, resetting at the start/finish line. Both tiers consume only the manager's `ErsCommand`, so
-tier parity (gate #4) compares one implementation of the regulations, never two copies.
+**The step phases** are `sense → control → actuate → integrate`.
 
-**Exactly three plugin points (#37)** — everything else is core enums (fast, curated):
-1. Custom blocks: Rust trait + compile-time registration (a plugin crate depends on `outlap-core`,
-   registers its blocks; users build a custom binary or the project upstreams the block).
-2. Tire models: the stable C-ABI "Standard Tire Interface" (CPU-only by contract).
-3. Controllers: same trait mechanism, `control`-phase blocks.
+A controller — for torque vectoring, ERS deployment, brake bias, or shift logic — is a first-class
+swappable block. It runs in the `control` phase, on the same bus. It is written in **Rust or C-ABI
+only (#38). No Python inside a timestep, ever.**
 
-**Programmatic use (#44):** everything that accepts a file path accepts the equivalent validated
-in-memory object; sweeps use dotted-path overrides (#35); optimizers never touch the filesystem.
+To experiment with a custom control strategy, write a Rust controller block, which is a plugin
+point, or pre-compute a control schedule `u(s)` as data.
 
-### 6.3 Racing line (Locked Decision #14)
+The ERS energy manager, in `outlap-powertrain` from M6 PR1, is a pure struct with a policy enum.
+The control phase of each tier consumes it. It is deliberately NOT plugin-registration machinery.
+That machinery is the plugin surface after 1.0.
 
-V1 ships a **minimum-curvature line generator**: QP over the lateral offset n(s) within track
-bounds minimizing ∫κ² (TUM-style formulation, re-implemented from the papers), solved on the 3D
-ribbon. Users can also supply their own line (`raceline.csv`, same s-based format). Every lap
-result records which line it ran. Free-trajectory lap-time-optimal line+speed co-optimization
-(collocation OCP) is deferred post-v1 — the min-curvature line is the fair common denominator for
-comparisons (each vehicle variant gets its own generated line; see the hero demo, §12).
+**The two-layer control contract (M6 PR4).** The **controllers** at a step boundary — the shift
+FSM, the battery slow stack, and the ERS energy manager — decide ONCE for each step, at the
+boundary, and publish frozen bus channels.
+
+The **blocks** for each stage stay pure consumers. They read those channels on every evaluation of
+the RHS. The bus is cleared and rebuilt on each evaluation, so a boundary value must be re-published
+on every evaluation, and never once for each step.
+
+The manager reaches the blocks in exactly this way. It publishes an additive deploy force for the
+MGU-K, plus the realized electrical deploy and harvest, which the powertrain block republishes as
+the draw on and charge into the pack.
+
+The energy ledger for each lap accumulates on the fast path, from the bus values after each step. It
+resets at the start and finish line.
+
+Both tiers consume only the manager's `ErsCommand`. Tier parity, gate #4, therefore compares one
+implementation of the regulations. It never compares two copies.
+
+**There are exactly three plugin points (#37).** Everything else is a core enum, which is fast and
+curated.
+
+1. Custom blocks, through a Rust trait and registration at compile time. A plugin crate depends on
+   `outlap-core` and registers its blocks. Users then build a custom binary, or the project
+   upstreams the block.
+2. Tire models, through the stable C-ABI "Standard Tire Interface". It is CPU-only by contract.
+3. Controllers, through the same trait mechanism, as blocks in the `control` phase.
+
+**Programmatic use (#44).** Anything that accepts a file path equally accepts the validated
+in-memory object. Sweeps use dotted-path overrides (#35). An optimizer never touches the
+filesystem.
+
+### 6.3 The racing line (Locked Decision #14)
+
+V1 ships a **generator for the minimum-curvature line**. It solves a QP over the lateral offset
+n(s), within the track bounds, minimizing ∫κ². The formulation is TUM-style, re-implemented from
+the papers, and solved on the 3D ribbon.
+
+A user may also supply their own line, as `raceline.csv`, in the same format indexed by s. Every
+lap result records which line it ran.
+
+Co-optimizing the line and the speed for minimum lap time, over a free trajectory and by
+collocation OCP, is deferred until after v1. The minimum-curvature line is the fair common
+denominator for a comparison. Each vehicle variant gets its own generated line; see the hero
+demonstration in §12.
 
 ---
 
 ## 7. Physics Models
 
-### 7.1 Tire force backbone
+### 7.1 The tire force backbone
 
-- **MF6.1** (Pacejka 2012, incl. Besselink inflation-pressure terms), clean-room from the book:
-  steady-state Fx, Fy, Mz, Mx, combined slip via cosine weighting; turn-slip omitted in v1.
-- **Transient**: first-order relaxation per slip channel, σ_κ κ̇ + |vx| κ = |vx| κ_ss (same for α);
-  σ from PTX/PTY coefficients or Fz-dependent carcass stiffness.
-- **Brush model** (5 params: Cκ, Cα, μ0, patch length, pressure profile) ships as the low-data tier
-  for passenger cars / users without `.tir` files, and as the physical scaffold the thermal model
-  hooks into identically.
-- `.tir` parser/writer + scipy-based fitting pipeline (TTC-format ingestion for members) in the
-  Python layer.
+- **MF6.1** (Pacejka 2012, including the Besselink terms for inflation pressure), clean-room from
+  the book. It covers steady-state Fx, Fy, Mz, and Mx, with combined slip by cosine weighting.
+  Turn-slip is omitted in v1.
+- **Transient behavior**: first-order relaxation on each slip channel,
+  σ_κ κ̇ + |vx| κ = |vx| κ_ss, and the same for α. σ comes from the PTX and PTY coefficients, or
+  from a carcass stiffness that depends on Fz.
+- **The brush model**, with 5 parameters: Cκ, Cα, μ0, patch length, and pressure profile. It ships
+  as the tier for low data, which suits passenger cars and users with no `.tir` file. It is also
+  the physical scaffold that the thermal model hooks into, identically.
+- A parser and writer for `.tir`, plus a fitting pipeline built on scipy, which ingests the TTC
+  format for members. Both live in the Python layer.
 
-### 7.2 Tire thermal ring model — FLAGSHIP (per tire, 3+1 nodes, reduced Farroni-TRT)
+### 7.2 The tire thermal ring model — FLAGSHIP (3+1 nodes for each tire, a reduced Farroni-TRT)
 
-States: **T_s** (tread surface), **T_c** (tread bulk/carcass), **T_g** (inflation gas); rim as
-parameter or optional 4th node.
+The states are **T_s**, the tread surface; **T_c**, the tread bulk or carcass; and **T_g**, the
+inflation gas. The rim is a parameter, or an optional fourth node.
 
 ```
 C_s·dT_s/dt = Q_fric − G_sc(T_s−T_c) − h(v)·A_ext·(1−a_cp)·(T_s−T_air) − G_road·a_cp·(T_s−T_road)
@@ -486,79 +564,103 @@ C_c·dT_c/dt = Q_hyst + G_sc(T_s−T_c) − G_cg(T_c−T_g)
 C_g·dT_g/dt = G_cg(T_c−T_g) − G_gr(T_g−T_rim)
 ```
 
-Drivers:
-- Friction power `Q_fric = p_t·(|Fx·v_sx| + |Fy·v_sy|)`, sliding velocities from slip; partition
-  p_t ≈ 0.6–0.7 into the tread (rest to road).
-- Hysteresis `Q_hyst = c_h·Fz·δ_tire(Fz,p)·Ω` (deflection-rate/strain-energy-loss form; c_h fit to
-  rolling-resistance data).
-- Convection `h(v) = h₀ + h₁·v^0.8`; contact-patch fraction `a_cp = A_cp(Fz,p)/A_ext`.
+The drivers are:
 
-Couplings back to the force model:
-1. Gas law: `p = p_cold·T_g/T_cold` → MF6.1's native pressure terms (stiffnesses, μ, patch size).
-2. Grip window: `λ_μ(T_s) = exp(−c_T·((T_s−T_opt)/T_opt)²)` scaling LMUX/LMUY (asymmetric option:
-   separate cold/hot widths).
-3. Carcass softening: PKY1/PKX1 × (1 − k_c(T_c − T_c,ref)).
+- Friction power, `Q_fric = p_t·(|Fx·v_sx| + |Fy·v_sy|)`. The sliding velocities come from the
+  slip. The partition p_t is about 0.6 to 0.7 into the tread, and the rest goes to the road.
+- Hysteresis, `Q_hyst = c_h·Fz·δ_tire(Fz,p)·Ω`. This is the form for loss of strain energy against
+  deflection rate. Fit c_h to rolling-resistance data.
+- Convection, `h(v) = h₀ + h₁·v^0.8`, with the contact-patch fraction
+  `a_cp = A_cp(Fz,p)/A_ext`.
 
-### 7.3 Wear / degradation law — FLAGSHIP (two states)
+Three couplings run back to the force model:
 
-- **Tread depth w** [mm]: Archard frictional-power form `dw/dt = (k_w / H(T_s)) · Q_fric / A_cp`,
-  hardness H decreasing with T_s (hot tires wear faster). Effects: μ multiplier
-  `f_w = 1 − c_w1·(w/w_max)`; **reduced tread mass → C_s(w) shrinks → worn tires run hotter — the
-  physical positive-feedback cliff mechanism**.
-- **Thermal damage D ∈ [0,1]** (irreversible): `dD/dt = (1/τ_D)·⟨(T_c−T_deg)/ΔT_ref⟩₊^β`
-  (Arrhenius-like devulcanization proxy).
-- **Total grip factor with cliff**:
-  `λ_μ,total = λ_μ(T_s) · f_w · (1 − Δ_c·σ((w−w_c)/s_w)) · (1 − Δ_D·D)` — sigmoid σ gives a sharp
-  but C¹ pace collapse at critical wear w_c.
-- **Calibration**: thermal params from Farroni's published values scaled by tire size; T_opt/c_T per
-  compound class; k_w and w_c calibrated *inversely* from FastF1 stint pace data (reproduce
-  ~0.05–0.10 s/lap compound decay and observed cliff laps).
+1. The gas law, `p = p_cold·T_g/T_cold`, which drives the native pressure terms of MF6.1, and
+   therefore the stiffnesses, μ, and patch size.
+2. The grip window, `λ_μ(T_s) = exp(−c_T·((T_s−T_opt)/T_opt)²)`, which scales LMUX and LMUY. An
+   asymmetric option would give separate widths on the cold and hot sides.
+3. Carcass softening: PKY1 and PKX1, each times `(1 − k_c(T_c − T_c,ref))`.
 
-Everything above is implementable from public literature — no proprietary math (§15).
+### 7.3 The law for wear and degradation — FLAGSHIP (two states)
+
+- **Tread depth w**, in mm. It follows the Archard form on frictional power,
+  `dw/dt = (k_w / H(T_s)) · Q_fric / A_cp`. Hardness H decreases as T_s rises, so a hot tire wears
+  faster.
+
+  It has two effects. It multiplies μ by `f_w = 1 − c_w1·(w/w_max)`. And **the tread mass falls, so
+  C_s(w) shrinks, so a worn tire runs hotter. That is the physical positive feedback that produces
+  the cliff.**
+- **Thermal damage D ∈ [0,1]**, which is irreversible:
+  `dD/dt = (1/τ_D)·⟨(T_c−T_deg)/ΔT_ref⟩₊^β`. It is an Arrhenius-like proxy for devulcanization.
+- **The total grip factor, including the cliff**:
+  `λ_μ,total = λ_μ(T_s) · f_w · (1 − Δ_c·σ((w−w_c)/s_w)) · (1 − Δ_D·D)`. The sigmoid σ gives a
+  collapse in pace at the critical wear w_c that is sharp, but still C¹.
+- **Calibration.** The thermal parameters come from the published values of Farroni, scaled by tire
+  size. `T_opt` and `c_T` come from the class of compound. `k_w` and `w_c` are calibrated
+  *inversely*, from stint pace data in FastF1, so that the model reproduces a decay of about
+  0.05 s to 0.10 s per lap for a compound, and the cliff lap that was observed.
+
+Everything above is implementable from public literature. No math here is proprietary (§15).
 
 ### 7.4 Aero
 
-Map object `{C_z,front, C_z,rear, C_x} = f(h_front, h_rear, yaw [, roll, DRS_flag])` — gridded
-lookup + monotone-regularized fit, evaluated at dynamic ride heights (T3) or equilibrium ride
-heights (T1/T2). Yaw sensitivity makes the gg-diagram asymmetric mid-corner. Passenger car
-degenerates to constant CdA/ClA. This is the first open ride-height aero-map representation (§5.5).
+The map object is `{C_z,front, C_z,rear, C_x} = f(h_front, h_rear, yaw [, roll, DRS_flag])`. It is
+a gridded lookup with a fit that is regularized to stay monotone. It is evaluated at dynamic ride
+heights in T3, or at equilibrium ride heights in T1 and T2.
 
-### 7.5 Suspension (v1 = lumped K&C, not hardpoints)
+Sensitivity to yaw makes the gg diagram asymmetric in mid-corner. A passenger car degenerates to a
+constant CdA and ClA. This is the first open representation of an aero map over ride height (§5.5).
 
-Per axle: ride rate, roll-stiffness share, roll-center height (geometric transfer), anti-dive/
-anti-squat. Per corner: camber-vs-(heave,roll) and toe-vs-(heave, Fy, Mz) tables (kinematic +
-compliance steer). Motorsport-credible because it reproduces load-transfer distribution and
-camber/toe trajectories that dominate handling. A hardpoint→K&C preprocessing tool is a later
-community-sized project (OSS gap #8).
+### 7.5 Suspension (v1 uses lumped K&C, not hardpoints)
+
+For each axle: ride rate, share of roll stiffness, roll-center height for the geometric transfer,
+and anti-dive and anti-squat.
+
+For each corner: tables of camber against heave and roll, and of toe against heave, Fy, and Mz.
+Those cover kinematic steer and compliance steer.
+
+This is credible for motorsport, because it reproduces the two things that dominate handling: the
+distribution of load transfer, and the trajectories of camber and toe.
+
+A preprocessing tool from hardpoints to K&C is a later project, sized for the community. It is OSS
+gap #8.
 
 ### 7.6 Brakes
 
-Pedal → total torque via balance bar (+ dynamic bias / regen blending with the MGU-K). Per-corner
-disc thermal node `C_d·dT_d/dt = T_br·ω − h_d(v)·A_d·(T_d−T_air)`; pad fade `μ_pad(T_d)` table.
-Simple slip-limit ABS flag for road cars.
+The pedal maps to a total torque through the balance bar, plus dynamic bias, plus blending of
+regeneration with the MGU-K.
 
-### 7.7 Driver model (T2/T3)
+Each corner has a disc thermal node: `C_d·dT_d/dt = T_br·ω − h_d(v)·A_d·(T_d−T_air)`. Pad fade
+comes from a `μ_pad(T_d)` table.
 
-Two loops:
-- **Steering**: MacAdam-style preview point(s) on the target line + curvature feedforward
-  `δ_ff = κ(L + K_us·v²)`.
-- **Speed**: PI tracking of the **T0/T1 QSS speed profile** with gg-headroom feedforward, plus
-  lift-and-coast and ERS-deployment inputs from the energy manager.
+A road car also gets a simple ABS flag at the slip limit.
 
-Using the QSS profile as the transient driver's reference makes tier parity a built-in regression
-test.
+### 7.7 The driver model (T2 and T3)
+
+There are two loops.
+
+- **Steering**: preview points on the target line, in the style of MacAdam, plus a curvature
+  feed-forward, `δ_ff = κ(L + K_us·v²)`.
+- **Speed**: a PI that tracks the **QSS speed profile from T0 or T1**, with a feed-forward on the
+  gg headroom. It also takes lift-and-coast and ERS deployment inputs from the energy manager.
+
+Using the QSS profile as the reference for the transient driver makes tier parity a built-in
+regression test.
 
 ---
 
 ## 8. Powertrain, ERS (2026 Rules), Battery
 
-All power-producing hardware enters as **maps** (§1 firewall). Blocks and states:
+All hardware that produces power enters as a **map**. That is the firewall of §1. The blocks and
+states follow.
 
-### 8.0 Drivetrain topology graph (the versatility backbone)
+### 8.0 The drivetrain topology graph, which is the backbone of versatility
 
-**The powertrain is a directed graph, not a fixed layout**: torque **sources** (ICE, electric
-machines / drive units) connect to wheel **sinks** through **coupler** elements (gearbox, clutch,
-fixed ratio, differential, direct per-wheel). Any 4-wheeled concept is a topology + data:
+**The powertrain is a directed graph, not a fixed layout.** Torque **sources**, which are ICEs and
+electric machines or drive units, connect to wheel **sinks**, through **coupler** elements: a
+gearbox, a clutch, a fixed ratio, a differential, or a direct connection to one wheel.
+
+Any concept with four wheels is therefore a topology plus data:
 
 | Concept | Topology |
 |---|---|
@@ -569,39 +671,50 @@ fixed ratio, differential, direct per-wheel). Any 4-wheeled concept is a topolog
 | GT hybrid 80/20 | ICE → gearbox → rear diff → RL+RR; EM (P2 or axle) in parallel — split ratio is data |
 | F1 2026 | ICE + MGU-K on the same shaft → gearbox → rear diff → RL+RR |
 
-Schema: `drivetrain.units[]` each declare `{source: <.ptm ref>, path: [couplers...], wheels: [...]}`.
-The assembler validates the graph (every wheel reachable, no ratio conflicts) at load time.
+The schema is `drivetrain.units[]`. Each unit declares
+`{source: <.ptm ref>, path: [couplers...], wheels: [...]}`. The assembler validates the graph at
+load time: every wheel must be reachable, and no ratio may conflict.
 
-**Control layer (v1 = rule-based, per Locked Decision #2):**
-- Static split ratios (front/rear, left/right) as data.
-- Differential models: open, locked, LSD (preload + ramp), **solid** (kart/historic solid axle —
-  locked-diff limit case, Decision #47) — enters the double-track torque split.
-- **Torque vectoring**: yaw-moment-proportional controller — `ΔM_z = K_p·(r_target − r)` with
-  `r_target = v·κ_ref` (or steady-state yaw gain), allocated across available per-wheel sources
-  within friction-ellipse and machine-envelope limits; gains are vehicle data.
-- Regen/friction brake blending hooks into the same allocator (§7.6).
-- The allocator interface is designed so a QP-based optimal allocation (per-wheel torque over
-  friction ellipses) can replace the rule-based one post-v1 without touching the topology graph.
+**The control layer is rule-based in v1**, per Locked Decision #2.
 
-**Hero demo (ships with v1, M7):** one EV chassis, four drivetrain files (1-DU RWD / 2-DU AWD /
-4-DU TV / FWD), same track → compared optimal laps + energy consumption in one notebook.
+- Static split ratios, front to rear and left to right, as data.
+- Models for the differential: open, locked, LSD with preload and ramp, and **solid**, which suits
+  a kart or a historic solid axle and is the limit case of a locked differential (Decision #47).
+  This enters the torque split of the double-track model.
+- **Torque vectoring**, through a controller proportional to yaw moment:
+  `ΔM_z = K_p·(r_target − r)`, with `r_target = v·κ_ref`, or with the steady-state yaw gain. It is
+  allocated across the available per-wheel sources, within the friction ellipse and the machine
+  envelope. The gains are vehicle data.
+- Blending of regeneration and friction braking hooks into the same allocator (§7.6).
+- The interface of the allocator is designed so that a QP-based optimal allocation — per-wheel
+  torque over the friction ellipses — can replace the rule-based one after v1, without touching the
+  topology graph.
+
+**The hero demonstration ships with v1, in M7.** One EV chassis, four drivetrain files — 1-DU RWD,
+2-DU AWD, 4-DU TV, and FWD — on the same track. One notebook then compares their optimal laps and
+their energy consumption.
 
 ### 8.1 ICE
-- Torque map T(n, throttle); fuel-flow map ṁ_fuel(n, T) (or BSFC map).
-- State: fuel mass (feeds vehicle mass & CG migration).
-- Optional fuel-flow-limit constraint (F1-style ṁ_max) as config.
 
-### 8.2 Gearbox / driveline
-- Ratios + final drive, efficiency map or constant, shift time with torque interruption (discrete
-  event + small state machine: torque-cut timer → ratio swap → clutch ramp).
-- Differential: open/locked/LSD preload+ramp as v1 options (enters the double-track torque split).
+- A torque map T(n, throttle), and a fuel-flow map ṁ_fuel(n, T), or a BSFC map.
+- One state: fuel mass. It feeds vehicle mass and the migration of the CG.
+- An optional constraint on fuel flow, the F1-style ṁ_max, as configuration.
 
-### 8.3 ERS — 2026-Formula-1-style, MGU-K ONLY (no MGU-H, per current regulations)
+### 8.2 Gearbox and driveline
 
-**Design decision (2026-07-02): the MGU-H is removed from the architecture entirely.** The 2026 F1
-power-unit regulations deleted it; for any non-F1 car it never existed. What remains is one
-electric machine on the crank/axle (MGU-K) + an energy store, with *deployment/recovery rules as
-data*:
+- Ratios and a final drive. An efficiency map, or a constant. A shift time with an interruption of
+  torque, modeled as a discrete event and a small state machine: a timer for the torque cut, then
+  the ratio swap, then the clutch ramp.
+- A differential, with open, locked, and LSD-with-preload-and-ramp as the v1 options. This enters
+  the torque split of the double-track model.
+
+### 8.3 ERS in the style of 2026 Formula 1, with the MGU-K ONLY (there is no MGU-H in the current regulations)
+
+**A design decision of 2026-07-02: the MGU-H is removed from the architecture entirely.** The 2026
+F1 regulations for the power unit deleted it. For a car outside F1 it never existed.
+
+What remains is one electric machine on the crank or an axle, which is the MGU-K, plus an energy
+store. The rules for deployment and recovery are *data*:
 
 ```yaml
 ers:
@@ -635,88 +748,126 @@ ers:
   elec_mech_factor: 0.97           # optional; the fixed C5.2.14 electrical→mechanical correction
 ```
 
-Figures verified against **FIA 2026 Section C [Technical] Issue 19 (2026-06-25)** and **Section B
-[Sporting] Issue 07 (2026-06-25)**; article numbers cited in `docs/theory/ers-energy-manager.md`.
-The *mechanisms* (speed taper, override mode, per-lap Recharge budget, recharge phases) are the
-architecture; the numbers are config data (most are per-event parameters, B7.2.1b). The tapers are
-regulatory closed-form piecewise-linear lines and are evaluated as such (the recorded Decision #30
-exception) — a Hermite through the breakpoints bows up to +78 kW above C5.2.8i at 315 kph. All
-caps/budgets live on the electrical side (the CU-K DC bus) with ONE conversion seam (0.97,
-C5.2.14/C5.2.21); the per-lap ledger integrates electrical energy.
+The figures were verified against **FIA 2026 Section C [Technical] Issue 19 (2026-06-25)** and
+**Section B [Sporting] Issue 07 (2026-06-25)**. `docs/theory/ers-energy-manager.md` cites the
+article numbers.
 
-Energy-management control vector per track segment: `u(s) = [deploy/regen ∈ [−1,1], override_flag,
-lift_point, shift_map_id]`, accepted as a data-driven schedule (an API input, not vehicle schema).
-V1 ships rule-based deployment (feed-forward "deploy below taper speed, harvest under braking,
-recharge on designated straights" — greedy demand-gated deploy, no SoC input; automated Recharge
-paths steered by `recharge_target_soc`) + configurable integral constraints. Stage 2's strategy
-optimizer writes u(s).
+The *mechanisms* are the architecture: the speed taper, the override mode, the Recharge budget for
+each lap, and the recharge phases. The numbers are configuration data, and most are per-event
+parameters (B7.2.1b).
 
-Non-F1 hybrids are the same block with different data: LMDh = single 50 kW MGU on the rear axle;
-road PHEV = P2 machine + big ES; pure EV = MGU-K *is* the powertrain (no ICE block).
+The tapers are regulatory closed-form piecewise-linear lines, and they are evaluated as such. That
+is the recorded exception to Decision #30. A Hermite through the breakpoints bows up to 78 kW above
+C5.2.8i at 315 kph.
+
+Every cap and budget lives on the electrical side, at the DC bus of the CU-K, with ONE conversion
+seam: 0.97, from C5.2.14 and C5.2.21. The ledger for each lap integrates electrical energy.
+
+The control vector for energy management, for each track segment, is
+`u(s) = [deploy/regen ∈ [−1,1], override_flag, lift_point, shift_map_id]`. It is accepted as a
+data-driven schedule, which is an API input and not part of the vehicle schema.
+
+V1 ships rule-based deployment: a feed-forward policy that deploys below the taper speed, harvests
+under braking, and recharges on designated straights. Deployment is greedy and gated by demand,
+with no SoC input. `recharge_target_soc` steers the automated Recharge paths. V1 also ships
+configurable integral constraints. The strategy optimizer of stage 2 writes u(s).
+
+A hybrid outside F1 is the same block with different data. An LMDh is a single 50 kW MGU on the
+rear axle. A road PHEV is a P2 machine with a large ES. On a pure EV, the MGU-K *is* the
+powertrain, and there is no ICE block.
 
 ### 8.4 Battery
-Thevenin equivalent-circuit model (ported from NREL `thevenin`, BSD-3): states [SOC, V_RC1
-(,V_RC2), T_batt]; parameters OCV(SOC,T), R0(SOC,T), R1(SOC,T), τ1(SOC,T); entropic-heating term
-dU/dT; lumped thermal node with I²R + entropic heating; power derating vs T_batt and SOC window.
-Pack scaling Ns×Np. The PDT BatteryPack importer (§10.4) fills this block directly.
 
-### 8.5 Machine thermal model — `emotor.yaml` N-node LPTN (Locked Decision #25, amended 2026-07-05)
+The model is a Thevenin equivalent circuit, ported from NREL `thevenin` (BSD-3).
 
-**AMENDMENT (2026-07-05, author-authorized — M3/PR5): the model below is generalized from a fixed
-2-node network to a data-declared *N*-node LPTN, and outlap now *builds* the operator from machine
-internals for the detailed path.** The heat-transfer correlations (air-gap film, end-cavity/shaft
-convection, liquid-jacket channel) are ported into `outlap-thermal` and evaluated **per segment** at
-`(ω, T)`; the network state advances with a semi-implicit **Crank–Nicolson** step (A-stable), one
-pinned ambient node, and an optional coolant node closed by a quasi-static jacket balance. This is a
-deliberate, narrow reversal of the firewall for the (author-owned) thermal model only — see Decision
-#25. Two authoring tiers share the integrator: a **lumped** hand-authored reduced-node model
-(mass-heuristic-filled `C`/`G`, constant conductances, flagged as estimates) and a **detailed**
-imported model (full node set, explicit `C`, convection edges). The derating and loss treatment
-below are unchanged. The original 2-node design rationale is retained for context:
+Its states are [SOC, V_RC1 (,V_RC2), T_batt]. Its parameters are OCV(SOC,T), R0(SOC,T), R1(SOC,T),
+and τ1(SOC,T), plus the entropic-heating term dU/dT.
 
-**Design rationale (author's correction):** a community user typically has only a **peak torque
-envelope + loss data** for their machine — not continuous/overload envelopes. So outlap does not
-*consume* thermal capability curves; it *computes* capability from losses with a deliberately
-simple **2-node lumped thermal network**, parameterized in a per-machine `emotor.yaml` (§9.5)
-referenced from `vehicle.yaml`. Explicitly NOT PDT-grade: PDT's thermal sub-stage is a 19-node
-LPTN with FEA-region geometry and coolant-channel Nusselt correlations — that fidelity stays on
-PDT's side of the firewall. Outlap integrates whatever small network the data declares; it never
-*builds* one from machine internals.
+It has a lumped thermal node, heated by I²R and by entropic heating. Power derates against T_batt
+and against the SOC window. The pack scales as Ns×Np.
 
-States: **T_w** (winding, fast) and **T_c** (case/stator lump, coupled to coolant):
+The PDT importer for a BatteryPack (§10.4) fills this block directly.
+
+### 8.5 The machine thermal model: an N-node LPTN in `emotor.yaml` (Locked Decision #25, amended 2026-07-05)
+
+**AMENDMENT of 2026-07-05, authorized by the author, in M3 PR5. The model below is generalized,
+from a fixed 2-node network to an *N*-node LPTN declared in data. outlap now also *builds* the
+operator from machine internals, on the detailed path.**
+
+The heat-transfer correlations — the air-gap film, convection in the end cavity and at the shaft,
+and the liquid-jacket channel — are ported into `outlap-thermal`, and evaluated **on each segment**
+at `(ω, T)`.
+
+The network state advances with a semi-implicit **Crank–Nicolson** step, which is A-stable. There
+is one pinned ambient node, and an optional coolant node, closed by a quasi-static jacket balance.
+
+This is a deliberate, narrow reversal of the firewall, for the thermal model only, which the author
+owns. See Decision #25.
+
+Two tiers of authoring share the integrator. The **lumped** tier is a hand-authored model with a
+reduced set of nodes, whose `C` and `G` values are filled by mass heuristics, flagged as estimates,
+with constant conductances. The **detailed** tier is imported, with the full node set, explicit `C`
+values, and convection edges.
+
+The treatment of derating and of loss, below, is unchanged. The rationale for the original 2-node
+design is retained here for context:
+
+**The design rationale, from the author's correction.** A community user typically has only a **peak
+torque envelope and loss data** for their machine. They do not have continuous or overload
+envelopes.
+
+outlap therefore does not *consume* curves of thermal capability. It *computes* capability from
+losses, with a deliberately simple **2-node lumped thermal network**, parameterized in an
+`emotor.yaml` for each machine (§9.5), which `vehicle.yaml` references.
+
+This is explicitly NOT of PDT grade. The thermal sub-stage of PDT is a 19-node LPTN, with FEA-region
+geometry and Nusselt correlations for the coolant channel. That fidelity stays on PDT's side of the
+firewall. outlap integrates whatever small network the data declares. It never *builds* one from
+machine internals.
+
+The states are **T_w**, the winding, which is fast; and **T_c**, the case or stator lump, which
+couples to the coolant:
 
 ```
 C_w·dT_w/dt = split_w·P_loss(τ, n, T_w) − G_wc·(T_w − T_c)
 C_c·dT_c/dt = (1 − split_w)·P_loss(τ, n, T_w) + G_wc·(T_w − T_c) − G_cool·(T_c − T_coolant)
 ```
 
-- `P_loss` from the `.ptm` loss map (§9.2); if the map carries a loss *breakdown*
-  (winding/core/…, as PDT exports), `split_w` is computed per operating point instead of being a
-  constant. Optional copper-resistance feedback: `P_loss_w ∝ 1 + α_cu(T_w − T_ref)` (α_cu in
-  emotor.yaml; default off for map-only users).
-- **Derating**: commanded torque limit scales linearly from 1 → 0 as each node crosses
-  `T_warn → T_max` (winding limit normally binds). Slow states in both tiers (§6.1) — lap 1 ≠
-  lap 20, stints are honest.
-- ~8 user parameters total; sensible defaults derivable from machine mass alone (documented
-  heuristics: C_w ≈ 0.15·m·c_cu, etc., clearly labeled as estimates).
-- If the `.ptm` *does* carry continuous/overload envelopes (PDT imports), they are used as
-  **validation data**: CI fits nothing, but warns when the 2-node model's derived continuous
-  capability disagrees with the imported envelope by more than a stated band.
+- `P_loss` comes from the loss map in the `.ptm` file (§9.2). If that map carries a *breakdown* of
+  loss, by winding, core, and so on, as PDT exports, then `split_w` is computed at each operating
+  point instead of being a constant.
+
+  There is an optional feedback from copper resistance:
+  `P_loss_w ∝ 1 + α_cu(T_w − T_ref)`. `α_cu` lives in `emotor.yaml`, and it defaults to off for
+  users who have only a map.
+- **Derating.** The limit on commanded torque scales linearly from 1 to 0, as each node crosses
+  from `T_warn` to `T_max`. The winding limit normally binds first. These are slow states in both
+  tiers (§6.1). Lap 1 therefore differs from lap 20, and a stint is honest.
+- There are about 8 user parameters in total. A sensible default for every one is derivable from
+  machine mass alone, through documented heuristics such as `C_w ≈ 0.15·m·c_cu`. Each is clearly
+  labeled as an estimate.
+- If the `.ptm` file *does* carry continuous or overload envelopes, as a PDT import will, they are
+  used as **validation data**. CI fits nothing. It warns when the continuous capability that the
+  2-node model derives disagrees with the imported envelope by more than a stated band.
 
 ---
 
 ## 9. File Formats — The Product Contract
 
-**Pattern: YAML documents validated by published JSON Schema; bulk numeric tables in sidecar
-CSV/Parquet; a vehicle is a directory or zipped `.apx` bundle** (the glTF pattern: readable scene +
-binary buffers). Why not alternatives: XML/URDF-like = hostile to numeric arrays + poor diffs;
-TOML = unreadable at vehicle nesting depth; pure JSON = no comments; HDF5-only = opaque to git/PR
-review (fatal for a community data registry).
+**The pattern.** A YAML document, validated by a published JSON Schema. Bulk numeric tables live in
+a sidecar, as CSV or Parquet. A vehicle is a directory, or a zipped `.apx` bundle. This is the glTF
+pattern: a readable scene plus binary buffers.
 
-Versioning: every file carries `schema: <name>/<MAJOR.MINOR>`; loaders accept same-major; unknown
-non-`x-` fields are hard errors (catches typos); `outlap migrate` ships migrations.
+Why not the alternatives. XML, or anything URDF-like, is hostile to numeric arrays and diffs
+poorly. TOML is unreadable at the nesting depth a vehicle needs. Pure JSON has no comments. And a
+format that is only HDF5 is opaque to git and to PR review, which is fatal for a community data
+registry.
 
-### 9.1 `vehicle.yaml` (sketch)
+**Versioning.** Every file carries `schema: <name>/<MAJOR.MINOR>`. A loader accepts the same major
+version. An unknown field that does not start with `x-` is a hard error, which catches typos.
+`outlap migrate` ships the migrations.
+
+### 9.1 `vehicle.yaml` (a sketch)
 
 ```yaml
 schema: vehicle/1.0
@@ -745,7 +896,7 @@ brakes:     { ... }
 extensions: { x-anything: ... }               # namespaced, ignored-with-warning
 ```
 
-### 9.2 `.ptm.yaml` — the neutral powertrain-map contract (THE FIREWALL)
+### 9.2 `.ptm.yaml` — the neutral contract for a powertrain map (THE FIREWALL)
 
 ```yaml
 schema: ptm/2.0
@@ -772,33 +923,42 @@ mass_kg: 18.7
 meta: { source: "user-supplied", dc_voltage_V: 400 }   # provenance, free-form
 ```
 
-`kind` is the ENERGY SOURCE only (`combustion` | `electric`, ptm/2.0). Every map is referenced at
-the shaft its drive unit outputs onto; a map authored at the machine's own shaft declares the
-reduction as the unit's `fixed_ratio:` (vehicle/2.1).
+`kind` states the ENERGY SOURCE and nothing else: `combustion` or `electric`, in ptm/2.0.
+
+Every map is referenced at the shaft that its drive unit outputs onto. A map authored at the
+machine's own shaft declares the reduction in the unit's `fixed_ratio:` field (vehicle/2.1).
 
 ### 9.3 `track.yaml` + `centerline.csv`
 
-Columns: `s_m, x_m, y_m, z_m, banking_deg, width_left_m, width_right_m, grip_scale` — deliberately
-the first open 3D racetrack format.
+The columns are `s_m, x_m, y_m, z_m, banking_deg, width_left_m, width_right_m, grip_scale`. This is
+deliberately the first open 3D format for a racetrack.
 
-**Track importer (Python, elevated by the full-3D decision #13):** since no open 3D circuit data
-exists, the importer builds it: (1) centerline + widths from OpenStreetMap (ODbL — redistributable
-with attribution) or TUMFTM CSVs (LGPL, bootstrap only, 2D); (2) **elevation fused from open DEMs**
-(Copernicus GLO-30 / USGS 3DEP / national LiDAR where available) sampled along the centerline and
-smoothed spline-consistently (z and its derivatives must be C² for vertical curvature); (3) banking
-estimated from cross-track DEM sampling where resolution allows, else hand-annotated per corner
-(the format allows sparse banking keypoints interpolated in s). Document per-track provenance +
-accuracy class in `track.yaml` meta. Later importers: `.xodr`/OpenCRG.
+**The track importer**, written in Python, was elevated in importance by the full-3D decision, #13.
+No open 3D circuit data exists, so the importer builds it, in three steps.
+
+1. It takes the centerline and the widths from OpenStreetMap, which is ODbL and therefore
+   redistributable with attribution, or from TUMFTM CSVs, which are LGPL, 2D, and for bootstrap
+   only.
+2. It **fuses elevation from open DEMs** — Copernicus GLO-30, USGS 3DEP, or national LiDAR where
+   that exists. It samples them along the centerline, and smooths them consistently with the
+   spline. Both z and its derivatives must be C², for vertical curvature.
+3. It estimates banking from cross-track sampling of the DEM, where resolution allows. Otherwise
+   banking is annotated by hand, for each corner. The format allows sparse banking keypoints,
+   interpolated in s.
+
+Document the provenance and the accuracy class of each track, in the `meta` of its `track.yaml`.
+Later importers will read `.xodr` and OpenCRG.
 
 ### 9.4 `.tyr.yaml`
 
-MF6.1 coefficient block (superset of `.tir`, round-trippable) + `thermal:` (§7.2 params) +
-`wear:` (§7.3 params) + provenance/citation fields.
+This holds an MF6.1 coefficient block, which is a superset of `.tir` and round-trips to it. It adds
+a `thermal:` block with the parameters of §7.2, a `wear:` block with the parameters of §7.3, and
+fields for provenance and citation.
 
-### 9.5 `emotor.yaml` — machine thermal parameters (Locked Decision #25)
+### 9.5 `emotor.yaml` — parameters for the machine thermal model (Locked Decision #25)
 
-The *only* variables the simple 2-node model (§8.5) needs — a community user can fill this from a
-datasheet and a scale:
+These are the *only* variables that the simple 2-node model of §8.5 needs. A community user can
+fill this from a datasheet and a scale:
 
 ```yaml
 schema: emotor/1.0
@@ -816,13 +976,14 @@ loss_routing:
 meta: {source: datasheet | estimated | pdt-distilled, notes: "..."}
 ```
 
-Defaults/heuristics for every field are documented (mass-based estimates, labeled as such), so a
-minimal file is just node masses + coolant temperature + winding T_max.
+Every field has a documented default or heuristic, based on mass and labeled as such. A minimal
+file is therefore just the node masses, the coolant temperature, and the winding `T_max`.
 
 ### 9.6 `conditions.yaml` — session conditions (Locked Decision #46)
 
-Fourth input of the quartet; same track, different day. Full ISA defaults (20 °C, 1013.25 hPa,
-no wind) so it's optional:
+This is the fourth input of the quartet: the same track, on a different day.
+
+It has full ISA defaults — 20 °C, 1013.25 hPa, and no wind — so it is optional:
 
 ```yaml
 schema: conditions/1.0
@@ -834,8 +995,8 @@ ambient_C: 28                                    # thermal models' ambient / coo
 
 ### 9.7 `sim.yaml` — simulation settings (Locked Decision #42)
 
-Optional; every field defaulted; CLI/API override file values; the **resolved** settings embed in
-every result artifact:
+This file is optional. Every field has a default. The CLI and the API override the values in the
+file. The **resolved** settings embed in every result artifact:
 
 ```yaml
 schema: sim/1.0
@@ -848,46 +1009,57 @@ raceline: {generator: min_curvature}   # or {file: my_line.csv}
 allow_degraded: false             # Decision #40 escape hatch
 ```
 
-**Presets (`extends:`, Decision #41):** `data/presets/*.yaml` ship with the repo
-(formula_base, gt_base, passenger_base) and are ordinary vehicle-schema fragments — the deep-merge
-+ post-merge validation + loaded-model report pipeline is described in §6.2b.
+**Presets, through `extends:`, per Decision #41.** `data/presets/*.yaml` ship with the repository:
+formula_base, gt_base, and passenger_base. They are ordinary fragments of the vehicle schema. §6.2b
+describes the pipeline that deep-merges them, validates after the merge, and prints the
+loaded-model report.
 
 ---
 
 ## 10. PDT HDF5 Importer Specification
 
-**Purpose**: users of the author's professional toolchain ("PDT" — a motor/drive-unit/battery
-design pipeline that writes one HDF5 file per stage) can import their results as `.ptm`/battery
-files. The importer is a **pure-Python adapter** (`python/outlap/importers/pdt_h5.py`) reading with
-`h5py` only — it never imports PDT code (firewall, §1). Three stage files matter; their actual
-schemas were inspected on 2026-07-02 from these reference files:
+**Purpose.** A user of the author's professional toolchain, called "PDT", can import their results
+as `.ptm` files and battery files. PDT is a design pipeline for motors, drive units, and battery
+packs, and it writes one HDF5 file for each stage.
 
-- EDrive: `EDrive_121.0L_16Et_650.0I_400.0V_12ea1_SynRM_ref.h5` (a 136 kW SynRM traction machine)
-- DriveUnit: `DriveUnit_16.2GR_168NM_369RPM_666f3_R250_ref.h5` (a small 48 V geared actuator unit)
+The importer is a **pure-Python adapter**, at `python/outlap/importers/pdt_h5.py`. It reads with
+`h5py` and nothing else. It never imports PDT code. That is the firewall of §1.
+
+Three stage files matter. Their actual schemas were inspected on 2026-07-02, from these reference
+files:
+
+- EDrive: `EDrive_121.0L_16Et_650.0I_400.0V_12ea1_SynRM_ref.h5`, a 136 kW SynRM traction machine
+- DriveUnit: `DriveUnit_16.2GR_168NM_369RPM_666f3_R250_ref.h5`, a small 48 V geared actuator unit
 - BatteryPack: `BatteryPack_13S_3P_722Wh_48V_7158a_cleanTest2Bot.h5`
 
-### 10.1 Common PDT HDF5 conventions
+### 10.1 Conventions common to PDT HDF5 files
 
-- **Type-tagged tree**: most groups carry attrs `__mdt_type__` (e.g. `OperatingGrid`, `MotorInfo`,
-  `PeakCapability`) and `__mdt_module__` (e.g. `models.edrive_types`). Use them for validation/
-  dispatch; do not depend on them existing.
-- Strings are HDF5 object/bytes → decode UTF-8. Scalars are float32/int64; arrays float32; some
-  arrays are **complex128** (phasors — not needed for import).
-- `compute/<StageName>/` = provenance (git commit, host, timestamp). `hash/` = pipeline lineage
-  keys. `metrics/` = a flat camelCase scalar dump for a DB — **redundant; always prefer the
-  structured groups**.
-- **⚠ Unit pitfall (verified in the real files)**: summary scalars are inconsistent between files —
-  e.g. the EDrive file has `performance/peak_power = 135872.84` (**W**) while its sibling
-  `performance/power_at_base_speed = 135.87` (**kW**), and the DriveUnit file's
-  `performance_at_vdc/peak_power = 1.585` (**kW**). **Rule: never trust summary scalars; rebuild
-  power from arrays as τ[Nm] × ω[rad/s].** Reliable units in the arrays: speed axes in **RPM**
-  (`sweep/speed`), `omega`/`rotor_speed_rad` in rad/s, torque **Nm**, losses **W**, efficiency
-  **0–1**, voltage **V**, current **A**, temperature **°C**, mass **kg**, inertia **kg·m²**,
-  lengths **mm**.
+- **The tree is tagged by type.** Most groups carry the attributes `__mdt_type__`, with values such
+  as `OperatingGrid`, `MotorInfo`, and `PeakCapability`, and `__mdt_module__`, with values such as
+  `models.edrive_types`. Use them to validate and to dispatch. Do not depend on their existing.
+- Strings arrive as HDF5 objects or bytes, so decode them as UTF-8. Scalars are float32 or int64.
+  Arrays are float32. Some arrays are **complex128**, which are phasors, and the import does not
+  need them.
+- `compute/<StageName>/` holds provenance: the git commit, the host, and a timestamp. `hash/` holds
+  keys for pipeline lineage. `metrics/` is a flat dump of camelCase scalars for a database. It is
+  **redundant. Always prefer the structured groups.**
+- **⚠ A pitfall with units, verified in the real files.** The summary scalars are inconsistent
+  between files.
 
-### 10.2 EDrive stage file → `.ptm` (`kind: electric`, machine+inverter at motor shaft)
+  For example, the EDrive file has `performance/peak_power = 135872.84`, which is in **W**, while
+  its sibling `performance/power_at_base_speed = 135.87` is in **kW**. And the DriveUnit file has
+  `performance_at_vdc/peak_power = 1.585`, which is in **kW**.
 
-Verified layout (dataset → shape → meaning):
+  **The rule: never trust a summary scalar. Rebuild power from the arrays, as τ[Nm] × ω[rad/s].**
+
+  The units in the arrays are reliable. Speed axes are in **RPM** (`sweep/speed`). `omega` and
+  `rotor_speed_rad` are in rad/s. Torque is in **Nm**, losses in **W**, efficiency from **0 to 1**,
+  voltage in **V**, current in **A**, temperature in **°C**, mass in **kg**, inertia in **kg·m²**,
+  and lengths in **mm**.
+
+### 10.2 The EDrive stage file → `.ptm` (`kind: electric`, machine and inverter at the motor shaft)
+
+The layout below was verified. Each line gives a dataset, its shape, and its meaning.
 
 ```
 sweep/                          # grid axes (models.vector_types.Sweep)
@@ -916,34 +1088,45 @@ info/                           # machine metadata: alias, machine_type, pole_co
 performance/                    # summary scalars — DO NOT TRUST UNITS (§10.1); recompute instead
 ```
 
-**Conversion algorithm:**
-1. Pick the vdc slice nearest the user's declared system voltage (or interpolate across vdc).
-2. Re-grid from `load_ratio` to torque: for each speed, `shaft_torque[vdc, n, :]` is monotone in
-   load_ratio → invert to get efficiency(τ, n) on a regular torque axis (both quadrants).
-3. `max_torque_Nm_vs_speed` ← `peak_capability/torque_drive[vdc_idx]`;
-   `max_regen_torque_nm_vs_speed` ← `|peak_capability/torque_regen[vdc_idx]|` (the MEASURED
-   4th-quadrant envelope, ptm/2.0 — an imported machine never falls back to the
-   symmetric-machine assumption); `cont_torque` ← `thermal/continuous/torque`;
-   overload curves ← `thermal/peak/torque`.
-4. Mask infeasible cells (efficiency == 0 AND |torque| > envelope) as NaN in the parquet table.
-5. Emit `machine.ptm.yaml` + `maps.parquet`; stamp `meta.source: "PDT EDrive <alias> <git hash from
-   compute/EDrive>"`, `meta.dc_voltage_V`.
-6. **Emit `machine.emotor.yaml` (thermal distillation, Decision #25).** The PDT file carries a full
-   19-node LPTN under `thermal_obj/` (`C (19,)` node capacitances, `G_const (19,19)` conductance
-   matrix, `R_active`, `R_endturn`, `cu_temp_coeff`, and a `cooling/` group with
-   `coolant_inlet_K`, geometry and fluid properties) — far more than outlap wants. The importer
-   **distills** it to the 2-node parameters by least-squares fit: choose (C_w, C_c, G_wc, G_cool)
-   so the 2-node model, driven by the exported loss maps, reproduces the PDT-solved
-   `thermal/continuous/torque` envelope and the 10/20/30 s overload torques at 3–5 speeds.
-   Direct copies: `coolant_temp_C` ← `cooling/coolant_inlet_K` − 273.15;
-   `copper_alpha_per_K` ← `cu_temp_coeff`; winding split per-point from
-   `operating_grid/loss_breakdown` (winding_stator vs core_total vs inverter — inverter losses
-   route to the case node). Mark `meta.source: pdt-distilled` + fit residuals in `meta.notes`.
-   The un-distilled envelopes also land in `.ptm` `limits:` as validation references (§9.2).
+**The conversion algorithm:**
 
-### 10.3 DriveUnit stage file → `.ptm` (`kind: electric`, motor+inverter+gearbox at OUTPUT shaft)
+1. Pick the vdc slice nearest the system voltage that the user declares. Or interpolate across vdc.
+2. Re-grid from `load_ratio` to torque. At each speed, `shaft_torque[vdc, n, :]` is monotone in
+   load_ratio. Invert it, to get efficiency(τ, n) on a regular torque axis, in both quadrants.
+3. Set `max_torque_Nm_vs_speed` from `peak_capability/torque_drive[vdc_idx]`. Set
+   `max_regen_torque_nm_vs_speed` from `|peak_capability/torque_regen[vdc_idx]|`, which is the
+   MEASURED envelope in the 4th quadrant (ptm/2.0). An imported machine never falls back to the
+   assumption of a symmetric machine. Set `cont_torque` from `thermal/continuous/torque`, and the
+   overload curves from `thermal/peak/torque`.
+4. Mask the infeasible cells as NaN in the parquet table. A cell is infeasible when efficiency is 0
+   AND |torque| exceeds the envelope.
+5. Emit `machine.ptm.yaml` and `maps.parquet`. Stamp
+   `meta.source: "PDT EDrive <alias> <git hash from compute/EDrive>"`, and `meta.dc_voltage_V`.
+6. **Emit `machine.emotor.yaml`, by distilling the thermal model (Decision #25).**
 
-Verified layout:
+   The PDT file carries a full 19-node LPTN under `thermal_obj/`. It holds `C (19,)` for the node
+   capacitances, `G_const (19,19)` for the conductance matrix, `R_active`, `R_endturn`,
+   `cu_temp_coeff`, and a `cooling/` group with `coolant_inlet_K` plus geometry and fluid
+   properties. That is far more than outlap wants.
+
+   The importer therefore **distills** it to the 2-node parameters, by least squares. It chooses
+   (C_w, C_c, G_wc, G_cool) so that the 2-node model, driven by the exported loss maps, reproduces
+   two things: the `thermal/continuous/torque` envelope that PDT solved, and the overload torques
+   at 10, 20, and 30 s, at 3 to 5 speeds.
+
+   Three values are copied directly. `coolant_temp_C` is `cooling/coolant_inlet_K` − 273.15.
+   `copper_alpha_per_K` is `cu_temp_coeff`. The winding split comes from
+   `operating_grid/loss_breakdown` at each point, comparing winding_stator against core_total
+   against inverter. Inverter losses route to the case node.
+
+   Mark `meta.source: pdt-distilled`, and put the fit residuals in `meta.notes`.
+
+   The undistilled envelopes also land in the `limits:` block of the `.ptm` file, as validation
+   references (§9.2).
+
+### 10.3 The DriveUnit stage file → `.ptm` (`kind: electric`, motor, inverter, and gearbox at the OUTPUT shaft)
+
+The layout below was verified:
 
 ```
 sweep/
@@ -972,16 +1155,20 @@ inertia/
   at_input_j_kgm2, components/…
 ```
 
-**Conversion**: same re-grid recipe as §10.2 but on `opt_op/torque` + `du_eff`, output-shaft side.
-Set `kind: electric`, `max_regen_torque_nm_vs_speed` ← `|peak_op/torque_regen[vdc_idx]|` (the
-MEASURED 4th-quadrant envelope, ptm/2.0), `inertia_kgm2` ← `at_output_j_kgm2`, record
-`info/gearbox/gear_ratio` in `meta` (informational — ratio already applied), `drag_torque` ←
-`no_load/torque_drag` interpolated onto the speed axis. In a race car this block maps to a
-hub/corner drive or a whole e-axle.
+**The conversion** follows the same recipe for re-gridding as §10.2, but on `opt_op/torque` and
+`du_eff`, at the output shaft.
 
-### 10.4 BatteryPack stage file → battery block params
+Set `kind: electric`. Set `max_regen_torque_nm_vs_speed` from `|peak_op/torque_regen[vdc_idx]|`,
+which is the MEASURED envelope in the 4th quadrant (ptm/2.0). Set `inertia_kgm2` from
+`at_output_j_kgm2`. Record `info/gearbox/gear_ratio` in `meta`, for information only, because the
+ratio is already applied. Set `drag_torque` from `no_load/torque_drag`, interpolated onto the speed
+axis.
 
-Verified layout (small file, ~190 datasets):
+In a race car, this block maps to a hub drive, a corner drive, or a whole e-axle.
+
+### 10.4 The BatteryPack stage file → parameters for the battery block
+
+The layout below was verified. It is a small file, with about 190 datasets.
 
 ```
 vector/                         # grid axes (BatteryVectorSettings)
@@ -1007,11 +1194,12 @@ info/                           # ns (13), np (3), cell name/chemistry/format, s
                                 # max_c_rate, max currents, min/max cell voltage, coolant temp
 ```
 
-**Conversion**: emit `battery.yaml` for the §8.4 block: 1-RC ECM with bilinear (SOC,T) tables for
-OCV/R0/R1/τ1 + dU/dT, pack topology ns×np from `info`, SOC window ← `info/min_soc,max_soc`, power
-limits ← `pack/peak_*_power(SOC)`, lumped thermal node from mass·cp and `thermal_resistance`.
+**The conversion** emits a `battery.yaml` for the block of §8.4. That is a 1-RC ECM with bilinear
+tables over (SOC, T) for OCV, R0, R1, τ1, and dU/dT. The pack topology ns×np comes from `info`. The
+SOC window comes from `info/min_soc` and `info/max_soc`. The power limits come from
+`pack/peak_*_power(SOC)`. The lumped thermal node comes from mass·cp and `thermal_resistance`.
 
-### 10.5 Importer design & CLI
+### 10.5 Design of the importer, and its CLI
 
 ```
 outlap import pdt-edrive     <file.h5> -o machine.ptm.yaml   [--vdc 400]
@@ -1019,36 +1207,50 @@ outlap import pdt-driveunit  <file.h5> -o du.ptm.yaml        [--vdc 48]
 outlap import pdt-batterypack <file.h5> -o battery.yaml
 ```
 
-Implementation rules: `h5py` + `numpy` + `pyarrow` only; tolerate missing optional groups (PDT
-files evolve — key on dataset presence, not `__mdt_type__`); after export, validate the emitted
-files against the published JSON Schemas; round-trip test = load emitted `.ptm` in the Rust core
-and reproduce ≥3 spot efficiencies from the source arrays to 1e-6. Keep golden mini-fixtures:
-generate tiny synthetic PDT-shaped h5 files in the test suite (do **not** commit real PDT files —
-they are the author's private data).
+Four rules govern the implementation.
+
+Use `h5py`, `numpy`, and `pyarrow`, and nothing else.
+
+Tolerate a missing optional group. PDT files evolve, so key on the presence of a dataset, not on
+`__mdt_type__`.
+
+After export, validate the emitted files against the published JSON Schemas.
+
+The round-trip test loads the emitted `.ptm` in the Rust core, and reproduces at least 3 spot
+efficiencies from the source arrays, to 1e-6.
+
+Keep small golden fixtures. Generate tiny synthetic h5 files, shaped like PDT files, in the test
+suite. Do **not** commit a real PDT file. They are the author's private data.
 
 ---
 
 ## 11. Execution Architecture
 
-### 11.1 Language split (committed decisions)
+### 11.1 The split between languages (committed decisions)
 
-- **Core: Rust.** Rationale: the OSS Rust niche is vacant (differentiator + contributor magnet);
-  the permissive substrate exists (diffsol/nalgebra/rayon); every relevant C++ project is a
-  formulation reference, not a linkable dependency, so C++ ABI buys nothing; Cargo+maturin makes
-  solo maintenance viable; WASM and portable GPU are native.
-- **Python: configuration-time.** API façade, schema validation, tire fitting (scipy), importers
-  (§10), FastF1 adapters, plotting, notebooks. **Nothing Python inside a timestep.**
-- **C: one place.** A stable `extern "C"` tire-model plug-in vtable (init/eval/advance) — the open
-  "Standard Tire Interface" (the closed reference is Adams STI). Third parties write tire models in
-  C/C++/Fortran without touching the core. CPU-only by contract. Note: under AGPL, *distributed*
-  proprietary plugins are effectively derivative works — which matches the author's intent
-  (internal/private use remains unrestricted); a plugin-linking exception can be added later if
-  ever desired, since the author holds the copyright.
-- **License: AGPL-3.0** (Locked Decision #7; policy details §15). The published JSON Schemas
-  (§9) are licensed separately and permissively (Apache-2.0) so *other* tools can adopt the file
-  formats without copyleft concerns — the formats should spread even where the code cannot.
+- **The core is Rust.** There are five reasons. The OSS niche in Rust is vacant, which is both a
+  differentiator and a magnet for contributors. The permissive substrate exists, in diffsol,
+  nalgebra, and rayon. Every relevant C++ project is a formulation reference, not a linkable
+  dependency, so a C++ ABI buys nothing. Cargo and maturin make solo maintenance viable. And WASM
+  and portable GPU are native.
+- **Python is for configuration time.** It holds the API façade, schema validation, tire fitting
+  with scipy, the importers of §10, the adapters for FastF1, plotting, and notebooks. **Nothing
+  Python runs inside a timestep.**
+- **C is used in one place.** A stable `extern "C"` vtable for a tire-model plugin, with init,
+  eval, and advance. This is the open "Standard Tire Interface"; the closed reference is Adams STI.
+  A third party can then write a tire model in C, C++, or Fortran, without touching the core. It is
+  CPU-only by contract.
 
-Workspace layout:
+  Note one consequence of AGPL: a *distributed* proprietary plugin is effectively a derivative
+  work. That matches the author's intent, and internal or private use stays unrestricted. An
+  exception for plugin linking can be added later, if it is ever wanted, because the author holds
+  the copyright.
+- **The license is AGPL-3.0** (Locked Decision #7; §15 gives the policy details). The published
+  JSON Schemas of §9 are licensed separately and permissively, under Apache-2.0. *Other* tools can
+  therefore adopt the file formats with no concern about copyleft. The formats should spread even
+  where the code cannot.
+
+The workspace layout:
 
 ```
 outlap/
@@ -1071,138 +1273,182 @@ outlap/
 └─ docs/                  # mkdocs-material; every physics module gets a theory page + citations
 ```
 
-### 11.1b User-facing API surface (Locked Decisions #17–19)
+### 11.1b The user-facing API surface (Locked Decisions #17–19)
 
-- **Results: xarray Datasets.** Channel logs dims `(s | time)`, per-wheel dims `(wheel)`,
-  comparisons dims `(variant)`, sweeps add one dim per swept field; units in attrs; `.to_parquet`/
-  netCDF export. Zero-copy from the Rust batch buffers via rust-numpy where possible.
-- **Sweep API (first-class):** `outlap.sweep(vehicle, track, over={"aero.map.scale": [...],
-  "drivetrain.control.split.front": [...]})` → rayon-parallel batch → xarray cube. A documented
-  **cost-function interface** (callable: vehicle-overrides → scalar(s)) plus a pymoo/optuna example
-  notebook; optimizers stay user-side (no optimizer framework in v1, Decision #18).
-- **CLI (working, not decorative):** `outlap lap car.yaml track.yaml [--line min_curv]`,
-  `outlap compare car_a.yaml car_b.yaml track.yaml`, `outlap import pdt-{edrive,driveunit,
-  batterypack}`, `outlap validate <file>`, `outlap migrate <file>`. Outputs parquet + optional PNG
-  plots. The CLI wraps the Python API 1:1 — no separate code path.
+- **Results are xarray Datasets.** A channel log has dims `(s | time)`. A per-wheel channel adds
+  `(wheel)`. A comparison adds `(variant)`. A sweep adds one dim for each swept field. Units live
+  in attrs. Export goes through `.to_parquet` or netCDF. Where possible the data is zero-copy from
+  the Rust batch buffers, through rust-numpy.
+- **The sweep API is first-class.** Call
+  `outlap.sweep(vehicle, track, over={"aero.map.scale": [...], "drivetrain.control.split.front":
+  [...]})`. It runs a batch in parallel with rayon, and returns an xarray cube.
+
+  There is also a documented **cost-function interface**: a callable that takes vehicle overrides
+  and returns one or more scalars. An example notebook uses pymoo and optuna. The optimizers stay
+  on the user's side. There is no optimizer framework in v1 (Decision #18).
+- **The CLI works. It is not decorative.** The commands are
+  `outlap lap car.yaml track.yaml [--line min_curv]`,
+  `outlap compare car_a.yaml car_b.yaml track.yaml`,
+  `outlap import pdt-{edrive,driveunit,batterypack}`, `outlap validate <file>`, and
+  `outlap migrate <file>`.
+
+  Output is parquet, plus optional PNG plots. The CLI wraps the Python API one to one. There is no
+  separate code path.
 
 ### 11.2 Numerics
 
-- **T0/T1 (QSS)**: not an ODE — damped-Newton trim solves (no allocation) + forward/backward
-  velocity passes; slow states advance per-segment (explicit Euler is exact enough at 10–100 s
-  timescales). Target: full lap < 50 ms.
-- **T2/T3 (transient): fixed-step split integrator, NOT adaptive, NOT plain RK4**:
-  - Chassis/driveline: Heun/RK2 at dt = 1 ms (generic over Butcher tableau; RK4 selectable for
-    convergence studies).
-  - **Tire relaxation: exact exponential update** `κ ← κ_ss + (κ−κ_ss)·exp(−V·dt/σ)` —
-    unconditionally stable at all speeds, kills the stiffness without implicit solves. This is the
-    single most important integrator decision.
-  - Thermal/wear/SOC: semi-implicit Euler on the diagonal decay terms.
-  - **diffsol BDF/ESDIRK as the CI verification integrator**: production stepper must converge to
-    the reference solution at O(dt²).
-- **Load-transfer algebraic loop (Locked Decision #29):** exposed as a *simulation setting* —
-  `fz_coupling: one_step_lag` (default; previous step's accelerations feed load transfer,
-  optionally low-pass filtered) or `fz_coupling: fixed_point` (2–3 damped Fz→forces→accel
-  iterations per step, for users who want tighter coupling near the grip limit). Both
-  deterministic; the setting is recorded in every result artifact.
-- **Interpolation standard (Locked Decision #30):** ONE shared implementation — monotone cubic
-  Hermite (Fritsch–Carlson) on rectilinear grids, C¹ with analytic derivatives — used by every
-  gridded map (aero, efficiency/loss, envelopes, tire thermal params). No per-block interp choices.
-  **Amended M6/PR1:** regulatory *closed-form piecewise-linear formulas* (the FIA C5.2.8 ERS
-  tapers, the C5.12 ramp bounds) are evaluated by the shared exact piecewise-linear interpolant
-  (`outlap_core::PiecewiseLinear`) — a Hermite through a flat-plateau breakpoint set bows up to
-  +78 kW above the regulation line. Closed-form regs only; gridded maps stay on the Hermite.
-- **Envelope × slow states (Locked Decision #31):** T0 consumes a dense base table
-  `gg(v, ax, g_normal)` at reference state plus separable multiplicative corrections from T1
-  sensitivities (∂gg/∂μ_tire, ∂/∂mass, ∂/∂ClA at reference points); CI validates the corrected
-  envelope against full T1 re-solves at sampled off-reference states. **Amended M5/PR4 (Decision
-  #49):** the tyre's thermal + wear state is instead carried as *genuine* re-solved grid axes
-  `gg(v, ax, g_normal, T_tire, wear)` (opt-in `generate_with_tire_state`), with the `(T_opt, 0)` slice
-  bit-identical to this base table; μ_tire/mass/ClA stay separable corrections.
-- **Events** (gear shifts, ERS mode changes, pit entry, stage-2 safety car): scheduled or
-  condition-triggered discrete transitions at step boundaries, with one linear back-interpolation
-  of crossing time where needed. No root-finding in the hot loop.
-- **Determinism (CI-enforced)**: fixed dt; counter-based RNG (Philox/ChaCha8) keyed by
-  (seed, rollout_id, stream, step); no fast-math; fixed-order reductions; same-target bit-exactness
-  guaranteed, cross-platform tolerance-exactness documented; every artifact embeds seed + git hash
-  + dt + feature flags.
+- **T0 and T1, the QSS tiers**, are not an ODE. They run damped-Newton trim solves, which allocate
+  nothing, plus forward and backward velocity passes. The slow states advance on each segment;
+  explicit Euler is exact enough at timescales of 10 s to 100 s. The target is a full lap in under
+  50 ms.
+- **T2 and T3, the transient tiers, use a fixed-step split integrator.** It is NOT adaptive, and it
+  is NOT plain RK4.
+  - The chassis and driveline use Heun, which is RK2, at dt = 1 ms. The stepper is generic over the
+    Butcher tableau, and RK4 is selectable for convergence studies.
+  - **Tire relaxation uses an exact exponential update**,
+    `κ ← κ_ss + (κ−κ_ss)·exp(−V·dt/σ)`. It is stable at all speeds, without condition, and it
+    removes the stiffness with no implicit solve. This is the single most important decision about
+    the integrator.
+  - Thermal state, wear, and SOC use semi-implicit Euler on the diagonal decay terms.
+  - **diffsol, with BDF and ESDIRK, is the verification integrator in CI.** The production stepper
+    must converge to the reference solution at O(dt²).
+- **The algebraic loop in load transfer (Locked Decision #29)** is exposed as a *simulation
+  setting*.
 
-### 11.3 Batch & GPU
+  `fz_coupling: one_step_lag` is the default. The accelerations from the previous step feed the
+  load transfer, and they may optionally be low-pass filtered.
 
-Honest sizing: a strategy rollout at dt 0.1–0.25 s over a 2 h race ≈ 30–70k steps of a 30–60-state
-model → ~0.1 s/rollout/core → **10k rollouts ≈ 5–10 s on a 16-core desktop with rayon**. Ship that.
-Design NOW so a GPU tier is a drop-in later:
-- Struct-of-arrays state with an explicit batch dimension (batch=1 for single runs); public API
-  takes/returns batch views (zero-copy NumPy via rust-numpy).
-- Zero per-step allocation (preallocated `SimArena`; CI alloc-counter test asserts 0 allocs/step).
-- Block eval functions pure and generic over `f32/f64` (`Real` trait) → same code monomorphizes
-  into rayon loops today, CubeCL kernels tomorrow.
-- Discrete modes as small ints, mask/select-friendly logic.
-- GPU decision gate: only when a use case demands ≥10⁵ rollouts; then CubeCL (kernels stay Rust,
-  CUDA/Vulkan/Metal/WebGPU backends). JAX-vmap rewrite: rejected (branchy events, Python-locks the
-  core, kills WASM).
+  `fz_coupling: fixed_point` runs 2 to 3 damped iterations of Fz, then forces, then acceleration,
+  on each step. It suits a user who wants tighter coupling near the grip limit.
 
-### 11.4 WASM — first-class target (the Web UI seed)
+  Both are deterministic, and every result artifact records which one ran.
+- **The interpolation standard (Locked Decision #30)** is ONE shared implementation: monotone cubic
+  Hermite, in the Fritsch–Carlson form, on rectilinear grids, C¹ with analytic derivatives. Every
+  gridded map uses it: aero, efficiency and loss, envelopes, and the tire thermal parameters. No
+  block chooses its own interpolation.
 
-Per Locked Decision #8, the **Web UI is the endgame**: `outlap-wasm` is not a throwaway demo but
-the seed of the eventual primary interface (Stage 3, §16). V1 scope stays modest — QSS lap solver +
-one transient rollout run > real-time single-threaded in-browser; a lap-time widget with live
-sliders (wing, compound, fuel, drivetrain variant) over a bundled track — but the discipline is
-permanent:
-- `wasm32-unknown-unknown` builds in CI from M1 onward; a PR that breaks the wasm build fails.
-- No filesystem/threading/clock assumptions inside `outlap-core`/`outlap-tire`/solvers; IO behind
-  traits; heavyweight deps feature-gated out of the wasm profile.
-- Gate: < 2 MB gzipped bundle.
-- Stage-3 path: local-first browser app (files stay on the user's machine), WebGPU batch execution
-  via CubeCL/wgpu when stage-2 Monte Carlo needs it in-browser; optional hosted compute later —
-  the AGPL network clause (§15) protects exactly that surface.
+  **Amended in M6 PR1.** A regulatory *closed-form piecewise-linear formula* is evaluated by the
+  shared exact piecewise-linear interpolant, `outlap_core::PiecewiseLinear`. That covers the FIA
+  C5.2.8 ERS tapers and the C5.12 ramp bounds. A Hermite through a breakpoint set with a flat
+  plateau bows up to 78 kW above the regulation line. This applies to closed-form regulations only.
+  A gridded map stays on the Hermite.
+- **The envelope against the slow states (Locked Decision #31).** T0 consumes a dense base table,
+  `gg(v, ax, g_normal)`, at the reference state. It then applies separable multiplicative
+  corrections, from T1 sensitivities: ∂gg/∂μ_tire, ∂/∂mass, and ∂/∂ClA, taken at reference points.
+  CI validates the corrected envelope against full T1 re-solves, at sampled off-reference states.
 
-### 11.5 Benchmarks & perf gates
+  **Amended in M5 PR4 (Decision #49).** The thermal state and wear state of the tire are instead
+  carried as *genuine* re-solved grid axes, `gg(v, ax, g_normal, T_tire, wear)`, through the opt-in
+  `generate_with_tire_state`. The `(T_opt, 0)` slice is bit-identical to this base table. μ_tire,
+  mass, and ClA stay separable corrections.
+- **Events** — gear shifts, changes of ERS mode, pit entry, and the safety car in stage 2 — are
+  discrete transitions at step boundaries. They are either scheduled or triggered by a condition.
+  Where the crossing time is needed, one linear back-interpolation recovers it. No root-finding
+  runs in the hot loop.
+- **Determinism is enforced in CI.** The step is fixed. The RNG is counter-based, either Philox or
+  ChaCha8, keyed by (seed, rollout_id, stream, step). There is no fast-math, and every reduction
+  runs in a fixed order.
 
-Metrics: transient steps/s/core (target ≥ 500k = 500× real-time at 1 kHz); QSS lap ≤ 50 ms
-(Spa-length); 10k rollouts ≤ 10 s (16-core); allocs/step = 0; Python dispatch ≤ 1 ms/batch call.
-CI: iai-callgrind instruction-count gates on core kernels (fail > 3% regression) as the merge gate;
-criterion wall-time as a nightly trend job on self-hosted hardware; WASM build + demo smoke test in
-the same workflow.
+  Bit-exactness is guaranteed on the same target. Exactness within a tolerance across platforms is
+  documented. Every artifact embeds the seed, the git hash, the dt, and the feature flags.
 
-### 11.6 Code architecture, style & workflow (Locked Decisions #26–36)
+### 11.3 Batch and GPU
 
-- **Composition (#26):** runtime, data-driven — one binary loads any `vehicle.yaml`; blocks are
-  assembled and topologically sorted at load time; enum dispatch inside the loop. No
-  per-vehicle-architecture compile paths, ever (required by "car = pure data" + WASM).
-- **Errors (#27):** thiserror-typed error enums on every fallible public API (`SchemaError`,
-  `AssemblyError`, `SolverDiverged{...}`, …); solver kernels are panic-free and return `Result`;
-  `debug_assert!` guards physics invariants in dev builds; `anyhow` only inside `bin`/CLI edges.
-  Rationale: panics poison PyO3 and abort WASM.
-- **Lints (#28):** workspace-level `clippy::pedantic` with a curated, commented allow-list;
-  `#![deny(missing_docs)]` on all public items; `#![forbid(unsafe_code)]` in every crate except
-  the C-ABI tire-plugin crate (which isolates all `unsafe`); rustfmt defaults untouched.
-- **Naming (#33):** hybrid — descriptive names on public APIs (`slip_ratio`, `vertical_load_n`);
-  paper symbols inside math kernels (`kappa`, `f_z`, `sigma_y`) with a doc-comment header mapping
-  symbols to cited equation numbers ("Pacejka 2012 eq. 4.E19–4.E30"). Kernels must be diff-able
-  against the literature they implement.
-- **EOM verification (#32):** `docs/derivations/` SymPy notebooks derive the 7/14-DOF chassis EOMs
-  symbolically (Kane/Lagrange via `sympy.physics.mechanics`); CI lambdifies the symbolic RHS and
-  asserts agreement with the hand-written Rust RHS at randomized states/parameters to 1e-12.
-  Catches the classic sign errors; doubles as community-trust documentation.
-- **Python (#34):** uv-managed; ruff for lint + format; pyright strict; full type hints on the
-  public API; pydantic v2 models for config objects, validating against the JSON Schemas that are
-  **generated from the Rust schemars types** — Rust is the single source of truth for formats,
-  Python mirrors never drift (CI check: generated schemas == committed schemas).
-- **Overrides & variants (#35):** programmatic sweeps take dotted-path dicts
-  (`over={"aero.cl_scale": [...], "drivetrain.control.split.front": [...]}`); named variants are
-  YAML overlay files deep-merged onto the base vehicle and schema-validated *after* merge. Both
-  compose; every result records the resolved parameter set hash.
-- **Git/release (#36):** trunk-based with short-lived PR branches — CI gates enforced even solo
-  (keeps history reviewable and contributor-ready); Conventional Commits (`feat:`/`fix:`/`docs:`/
-  `perf:`…); tag + GitHub release + generated changelog (git-cliff) at every milestone.
+Honest sizing first. A strategy rollout at dt of 0.1 s to 0.25 s, over a 2 h race, is about 30k to
+70k steps of a model with 30 to 60 states. That is about 0.1 s for each rollout on each core.
+**10k rollouts therefore take about 5 s to 10 s, on a 16-core desktop, with rayon.** Ship that.
+
+Design NOW, so that a GPU tier drops in later. Five rules:
+
+- Use struct-of-arrays state, with an explicit batch dimension. A single run has batch = 1. The
+  public API takes and returns batch views, zero-copy to NumPy through rust-numpy.
+- Allocate nothing on a step. Use a preallocated `SimArena`. A CI alloc-counter test asserts 0
+  allocations for each step.
+- Keep block evaluation functions pure, and generic over `f32` and `f64`, through a `Real` trait.
+  The same code then monomorphizes into rayon loops today, and into CubeCL kernels tomorrow.
+- Represent a discrete mode as a small integer, and keep the logic friendly to masking and
+  selection.
+- The gate for a GPU decision: only when a use case demands 10⁵ rollouts or more. Then use CubeCL,
+  which keeps kernels in Rust and targets CUDA, Vulkan, Metal, and WebGPU. A rewrite in JAX with
+  vmap is rejected: the events are branchy, it locks the core to Python, and it kills WASM.
+
+### 11.4 WASM, a first-class target and the seed of the Web UI
+
+Per Locked Decision #8, the **Web UI is the endgame**. `outlap-wasm` is not a throwaway
+demonstration. It is the seed of the eventual primary interface, which is Stage 3, §16.
+
+The scope in v1 stays modest: the QSS lap solver, plus one transient rollout that runs faster than
+real time, single-threaded, in a browser; and a lap-time widget with live sliders for wing,
+compound, fuel, and drivetrain variant, over a bundled track.
+
+The discipline, however, is permanent:
+
+- `wasm32-unknown-unknown` builds in CI from M1 onward. A PR that breaks the wasm build fails.
+- `outlap-core`, `outlap-tire`, and the solvers assume no filesystem, no threading, and no clock.
+  IO sits behind traits. A heavyweight dependency is feature-gated out of the wasm profile.
+- The gate is a bundle under 2 MB, gzipped.
+- The path to stage 3: a local-first browser app, where files stay on the user's machine; batch
+  execution on WebGPU, through CubeCL and wgpu, when the Monte Carlo of stage 2 needs it in the
+  browser; and optional hosted compute later. The network clause of AGPL (§15) protects exactly
+  that surface.
+
+### 11.5 Benchmarks and performance gates
+
+The metrics are: transient steps per second on each core, targeting at least 500k, which is 500
+times real time at 1 kHz; a QSS lap in 50 ms or less, at Spa length; 10k rollouts in 10 s or less,
+on 16 cores; 0 allocations for each step; and Python dispatch of 1 ms or less for each batch call.
+
+In CI, iai-callgrind gates the instruction count on the core kernels. A regression above 3 % fails,
+and that is the merge gate. criterion measures wall time as a nightly trend job, on self-hosted
+hardware. The WASM build and a smoke test of the demonstration run in the same workflow.
+
+### 11.6 Code architecture, style, and workflow (Locked Decisions #26–36)
+
+- **Composition (#26)** is runtime and data-driven. One binary loads any `vehicle.yaml`. Blocks are
+  assembled and topologically sorted at load time. Dispatch inside the loop is through an enum.
+  Never add a compile path for a specific vehicle architecture. "Car = pure data" and the WASM
+  story both require this.
+- **Errors (#27)** are typed with thiserror, on every fallible public API: `SchemaError`,
+  `AssemblyError`, `SolverDiverged{...}`, and others. A solver kernel is panic-free and returns
+  `Result`. `debug_assert!` guards physics invariants in development builds. `anyhow` appears only
+  inside `bin` and CLI edges. The reason: a panic poisons PyO3, and it aborts WASM.
+- **Lints (#28).** `clippy::pedantic` at workspace level, with a curated allow-list that carries
+  comments. `#![deny(missing_docs)]` on every public item. `#![forbid(unsafe_code)]` in every
+  crate, except the crate that holds the C-ABI tire plugin, which isolates all `unsafe`. rustfmt
+  defaults are untouched.
+- **Naming (#33)** is hybrid. Public APIs take descriptive names, such as `slip_ratio` and
+  `vertical_load_n`. A math kernel uses the symbols of the paper, such as `kappa`, `f_z`, and
+  `sigma_y`, with a doc-comment header that maps each symbol to the cited equation numbers, for
+  example "Pacejka 2012 eq. 4.E19–4.E30". A kernel must be diff-able against the literature that it
+  implements.
+- **EOM verification (#32).** SymPy notebooks under `docs/derivations/` derive the 7-DOF and 14-DOF
+  chassis equations symbolically, by Kane or Lagrange, through `sympy.physics.mechanics`. CI
+  lambdifies the symbolic RHS, and asserts that it agrees with the hand-written Rust RHS, at
+  randomized states and parameters, to 1e-12. This catches the classic sign errors, and it doubles
+  as documentation that earns community trust.
+- **Python (#34)** is managed by uv. ruff does lint and format. pyright runs strict. The public API
+  carries full type hints. Configuration objects are pydantic v2 models, validated against the JSON
+  Schemas that are **generated from the Rust schemars types**. Rust is therefore the single source
+  of truth for the formats, and the Python mirrors cannot drift. CI checks that the generated
+  schemas equal the committed schemas.
+- **Overrides and variants (#35).** A programmatic sweep takes a dict of dotted paths, such as
+  `over={"aero.cl_scale": [...], "drivetrain.control.split.front": [...]}`. A named variant is a
+  YAML overlay file, deep-merged onto the base vehicle, and validated against the schema *after*
+  the merge. The two compose. Every result records a hash of the resolved parameter set.
+- **Git and release (#36).** Trunk-based, with short-lived PR branches. CI gates are enforced even
+  when working alone, which keeps the history reviewable and ready for contributors. Commits follow
+  the Conventional Commits format: `feat:`, `fix:`, `docs:`, `perf:`, and so on. Each milestone gets
+  a tag, a GitHub release, and a changelog generated by git-cliff.
 
 ---
 
 ## 12. V1 Milestones
 
-Calendar estimates assume the author's stated 10–20 h/week (Locked Decision #12). The full-3D
-decision (#13) adds ~4–6 weeks across M1/M3/M4 → **v1 in roughly 7–11 months**. Every milestone
-ends in something runnable and demo-able (public repo).
+The calendar estimates assume the 10 to 20 hours each week that the author stated, in Locked
+Decision #12. The full-3D decision, #13, adds about 4 to 6 weeks across M1, M3, and M4. That puts
+**v1 at roughly 7 to 11 months**.
+
+Every milestone ends in something that runs and that can be demonstrated, in the public repository.
 
 | M | Deliverable | ~Effort | Ships |
 |---|---|---|---|
@@ -1215,39 +1461,56 @@ ends in something runnable and demo-able (public repo).
 | MT | **Track fidelity overhaul (standalone) — the tracks are now the dominant sim-vs-real error source once the car is calibrated.** Real track widths + racing surface (OSM boundary tags / trackmap, not defaulted widths); a curvature-clean centerline pipeline that preserves true apex radii (audited against telemetry-derived corner radii); elevation + banking properly fused (C² z; banking from DEM cross-sections or per-corner keypoints); a **telemetry-derived importer** (FastF1 X/Y position → outlap track, robust circle-fit/spline — prototyped in the M6 calibration); and a **track-quality validation gate**: real lap telemetry vs the calibrated car on the SAME geometry (grip-matched) → corner-radius + apex-speed agreement within tolerance. Re-import/validate the reference set (Catalunya/Spa/Silverstone) so M7 compares on trustworthy geometry. Prereq for the M7 hero demo. | 3–5 wk | |
 | M7 | `outlap-batch` (rayon, SoA) + sweep API + working CLI (§11.1b) + **all four reference vehicles** (Locked Decision #1) + the **hero demo as redefined by the author (Decision #22)**: F1 2026-config vs GT hybrid vs EV sports 2-DU AWD vs EV sports 1-DU RWD — each on **its own min-curvature line**, compared lap times + energy on Catalunya/Spa/Silverstone (4-DU TV + FWD ship as extra example configs) + docs site + WASM demo widget | 6–8 wk | **1.0** |
 
-**MT — Track Fidelity, why it is now a standalone milestone.** Through M1–M5 the *car* models
-(chassis, tyre thermal/wear, powertrain) were validated against oracles; M6 calibrated the f1_2026
-grip to real 2026 Barcelona telemetry (FastF1). With the car correct, the **track** is the largest
-remaining error: the calibrated f1 does **83 s on the real reverse-engineered Barcelona geometry**
-(real fastest lap 80.1 s) but **94 s on the shipped `catalunya_osm`** — an ~11 s gap that is *pure
-geometry*, not the vehicle. Root causes: OSM imports default their widths and leave banking
-unresolved (`track.yaml` meta says so); no track was ever ground-truthed against real lap data;
-reverse-engineering geometry from ~10 Hz telemetry position has curvature noise (tightest apex
-~31 m vs a ~34 m circle-fit, capping v_min ~10 % low). The seed exists — `data/tracks/barcelona_real_2026`
-(FastF1-derived) plus the M6 calibration scripts — but it needs a real pipeline and a validation
-gate. Diagnostic rule of thumb from the M6 overlay: a **uniform** sim-faster-than-real offset on
-every straight is a *vehicle-state* effect (race fuel mass — the sim runs 768 kg dry — plus race
-engine/ERS modes and lift-and-coast); a **localized** corner speed mismatch is *track geometry*.
-Only the latter is MT's problem; the former belongs to a future race-trim / fuel-load model.
+**MT: why track fidelity is now a standalone milestone.**
 
-**Post-1.0 roadmap (in order):**
-1. **v1.x — sim-racing telemetry importers** (MoTeC `.ld`, ACC, iRacing; Locked Decision #10): the
-   community-growth push AND the author's own validation data source (no proprietary data access
-   today — Locked Decision #9).
-2. **Stage 2 — race-strategy Monte Carlo** (§16): time-discrete race sim + stochastic layer +
-   strategy optimizer on the T0-with-slow-states physics.
-3. **Stage 3 — outlap-web**: the browser app grows from the WASM widget into the primary interface
-   (local-first; WebGPU batch; optional hosted compute under AGPL).
-4. **Integrations backlog (Locked Decision #24, in this order):** Gymnasium race-strategy
-   environment (with stage 2 — likely becomes the community RL reference), then FMU/FMI export of
-   vehicle blocks (opens the Simulink/Modelica professional world). A ROS 2 bridge was considered
-   and **withdrawn by the author** — out of scope (and robotics-adjacent, which sits badly with
-   the §1 firewall).
-5. Community surface throughout: a separate **CC-BY-SA-4.0 data registry** repo (schema-validated
-   tracks/vehicles/tire fits, CI smoke-lap on every PR); plugin traits (`TireModel`, `DriverModel`,
-   `AeroModel`) + Python entry points; stage-2 `StrategyPolicy`/`SafetyCarModel` plugins.
-   Quick-start "10-parameter car" mode deliberately **not** in v1 (Locked Decision #3) —
-   revisit on community demand.
+Through M1 to M5, the *car* models were validated against oracles: the chassis, the tire thermal
+state and wear, and the powertrain. M6 then calibrated the grip of `f1_2026` to real 2026 telemetry
+from Barcelona, through FastF1.
+
+With the car correct, the **track** is the largest remaining error. The calibrated f1 car does
+**83 s on the real, reverse-engineered Barcelona geometry**, against a real fastest lap of 80.1 s.
+It does **94 s on the shipped `catalunya_osm`**. That gap of about 11 s is *pure geometry*. It is
+not the vehicle.
+
+There are three root causes. An OSM import defaults its widths, and leaves banking unresolved; the
+`meta` of the `track.yaml` says so. No track was ever ground-truthed against real lap data. And
+reverse-engineering geometry from telemetry position at about 10 Hz carries curvature noise: the
+tightest apex comes out at about 31 m, against a circle-fit of about 34 m, which caps v_min about
+10 % low.
+
+The seed exists. `data/tracks/barcelona_real_2026`, derived from FastF1, plus the calibration
+scripts from M6. What it needs is a real pipeline and a validation gate.
+
+A diagnostic rule of thumb, from the M6 overlay. When the simulation is faster than reality by a
+**uniform** offset on every straight, the cause is *vehicle state*: race fuel mass, since the
+simulation runs 768 kg dry, plus race modes for the engine and ERS, plus lift-and-coast. When a
+corner speed mismatches **locally**, the cause is *track geometry*.
+
+Only the second is MT's problem. The first belongs to a future model of race trim and fuel load.
+
+**The roadmap after 1.0, in order:**
+
+1. **v1.x: importers for sim-racing telemetry** — MoTeC `.ld`, ACC, and iRacing (Locked Decision
+   #10). This is the push for community growth, AND it is the author's own source of validation
+   data, because there is no access to proprietary data today (Locked Decision #9).
+2. **Stage 2: Monte Carlo for race strategy** (§16). A time-discrete race simulator, a stochastic
+   layer, and a strategy optimizer, all on the physics of T0 with slow states.
+3. **Stage 3: outlap-web.** The browser app grows from the WASM widget into the primary interface.
+   It is local-first, with WebGPU batch execution, and optional hosted compute under AGPL.
+4. **The backlog of integrations (Locked Decision #24), in this order:** a Gymnasium environment
+   for race strategy, arriving with stage 2, which will likely become the RL reference for the
+   community; then FMU and FMI export of the vehicle blocks, which opens the professional world of
+   Simulink and Modelica.
+
+   A ROS 2 bridge was considered, and **the author withdrew it**. It is out of scope. It is also
+   adjacent to robotics, which sits badly with the firewall of §1.
+5. **The community surface, throughout.** A separate **CC-BY-SA-4.0 data registry** repository,
+   holding tracks, vehicles, and tire fits that are validated against the schema, with a CI smoke
+   lap on every PR. Plugin traits — `TireModel`, `DriverModel`, `AeroModel` — plus Python entry
+   points. And, in stage 2, `StrategyPolicy` and `SafetyCarModel` plugins.
+
+   A quick-start "10-parameter car" mode is deliberately **not** in v1 (Locked Decision #3).
+   Revisit it if the community asks.
 
 ---
 
@@ -1266,131 +1529,176 @@ Only the latter is MT's problem; the former belongs to a future race-trim / fuel
 | Chassis EOMs | SymPy symbolic derivation (docs/derivations) | Rust RHS == symbolic RHS at randomized states to 1e-12 (CI) |
 | Machine thermal (2-node) | imported PDT continuous/overload envelopes (when present) | derived continuous capability within stated band of the imported envelope (warn-level gate) |
 
-**QSS↔transient parity gates (CI, every reference car, frozen tire state, smooth track):**
-1. lap time |T2 − T0| ≤ 0.3%; 2. per-corner apex speeds ≤ 1%; 3. transient (ax, ay, v) samples
-inside the T1 gg-g-v hull with ≤ 2% exceedance area; 4. fuel + ERS energy per lap ≤ 1%. With live
-tire states: T0 stint lap-time decay vs T2 long-run ≤ 0.1 s/lap. These gates are exactly what
-stage-2 Monte Carlo needs to trust T0.
+**The parity gates between QSS and transient.** They run in CI, on every reference car, with frozen
+tire state, on a smooth track.
+
+1. Lap time: |T2 − T0| ≤ 0.3%.
+2. Apex speed at each corner: ≤ 1%.
+3. Transient samples of (ax, ay, v) sit inside the T1 gg-g-v hull, with an exceedance area of ≤ 2%.
+4. Fuel and ERS energy for each lap: ≤ 1%.
+
+With live tire states, one more gate applies: the decay in T0 stint lap time, against a long T2
+run, must agree to ≤ 0.1 s per lap.
+
+These gates are exactly what the Monte Carlo of stage 2 needs, in order to trust T0.
 
 ---
 
 ## 14. Testing & CI
 
-- **Golden files**: committed Parquet outputs per reference vehicle × track × tier, per-channel
-  tolerances, regenerated only via explicit `--bless`.
-- **Property tests** (proptest): tire force symmetry/sign conventions; friction-circle containment;
-  energy-accounting closure (ES in/out + fuel LHV vs work + losses); wear monotonic in sliding
-  energy; schema round-trip load→save→load.
-- **Fuzzing** on all file loaders (YAML/CSV/`.tir`/HDF5 importer).
-- **Determinism tests**: same seed twice + across thread counts → bit-identical.
-- **Convergence test**: production split-stepper vs diffsol reference at O(dt²).
-- GitHub Actions: Linux + macOS + Windows wheel builds (maturin), WASM build, docs build,
-  iai-callgrind perf gate.
+- **Golden files.** Committed Parquet outputs, for each reference vehicle × track × tier, with a
+  tolerance for each channel. Regenerate them only through an explicit `--bless`.
+- **Property tests**, with proptest. They cover: symmetry and sign conventions of tire force;
+  containment in the friction circle; closure of energy accounting, comparing ES in and out plus
+  fuel LHV against work plus losses; wear monotone in sliding energy; and a schema round trip of
+  load, save, load.
+- **Fuzzing** on every file loader: YAML, CSV, `.tir`, and the HDF5 importer.
+- **Determinism tests.** The same seed twice, and across thread counts, must give bit-identical
+  results.
+- **A convergence test.** The production split-stepper against diffsol, as the reference, at
+  O(dt²).
+- **GitHub Actions.** Wheel builds on Linux, macOS, and Windows, through maturin. A WASM build. A
+  docs build. And the iai-callgrind performance gate.
 
 ---
 
 ## 15. License & Clean-Room Policy
 
-**Project license: AGPL-3.0** (Locked Decision #7 — author's words: *"forces the disclosure of
-the source if our code will be used … the strongest … commercialization OK but always with open
-source code"*). AGPL over plain GPL-3.0 because §13's network clause covers SaaS/web deployment —
-without it, anyone could serve a modified outlap as a closed web product, which is exactly the
+**The project license is AGPL-3.0** (Locked Decision #7). In the author's words: *"forces the
+disclosure of the source if our code will be used … the strongest … commercialization OK but always
+with open source code"*.
+
+AGPL rather than plain GPL-3.0, because the network clause of §13 covers SaaS and web deployment.
+Without it, anyone could serve a modified outlap as a closed web product. That is exactly the
 Stage-3 surface (§16).
 
 **What AGPL means here, stated plainly:**
-- Anyone may use, modify, sell, or host outlap — but distributed or network-served versions must
-  publish their complete corresponding source under AGPL.
-- Private/internal use (a race team running it in-house without offering it to others) carries no
-  disclosure obligation — copyleft triggers on distribution/network service, not on use.
-- Trade-off accepted knowingly: some corporations and permissive-minded contributors will pass.
-  That is the price of the guarantee the author wants.
 
-**Licensing structure:**
-- Code: AGPL-3.0-only. Each file: SPDX header.
-- `schemas/` (the published JSON Schemas): **Apache-2.0** — the file formats should spread to
-  other tools even where the code cannot.
-- Data registry (reference vehicles/tracks/tires): **CC-BY-SA-4.0** (share-alike, matching spirit).
-- **Contributions: DCO now; decide on a CLA before the first significant external contribution.**
-  As sole author, the author can later dual-license (e.g. sell commercial exceptions) — but only
-  while holding all copyright. Accepting external contributions under DCO-only permanently forfeits
-  unilateral relicensing. If commercial dual-licensing is a live option, adopt a CLA from day 1.
+- Anyone may use outlap, modify it, sell it, or host it. But a version that is distributed, or
+  served over a network, must publish its complete corresponding source, under AGPL.
+- Private and internal use carries no obligation to disclose. A race team may run it in-house
+  without offering it to others. Copyleft triggers on distribution and on network service. It does
+  not trigger on use.
+- The trade-off is accepted knowingly. Some corporations, and some contributors who prefer
+  permissive licenses, will pass. That is the price of the guarantee the author wants.
 
-**Dependency compatibility (one-way flows INTO AGPL):**
-- MIT / Apache-2.0 / BSD / Zlib: freely usable (all §4.1 dependencies remain valid).
-- LGPL-3.0 (TUM ecosystem): now usable as dependencies/oracles (§4.3).
-- GPL-3.0(+): compatible with AGPL-3.0 (GPLv3 §13); usable if genuinely needed.
-- Incompatible: GPL-2.0-only, proprietary SDKs (e.g. AiM's closed DLL) — wrap externally or avoid.
+**The licensing structure:**
 
-**Authorship & provenance rules (unchanged by the license flip):**
-- The flagship models (tire thermal ring, wear/cliff, ERS energy manager) are **implemented from
-  the published literature** (Farroni, Pacejka, Archard, FIA regs), never derived from other
-  codebases — GPL game-engine tire code (Speed Dreams, VDrift) is off-limits as a *source of
-  derivation* regardless of license compatibility. The docs theory pages (equations + citations)
-  are the provenance record.
-- FSAE TTC data: parsers/fitting yes; redistribution of data or fitted parameter sets NO.
-- FastF1/F1 data: calibration/validation artifacts only; do not redistribute raw telemetry.
-- PDT `.h5` files: private to the author. Importer reads the documented schema (§10); synthetic
-  fixtures in tests; no real files committed.
+- Code is AGPL-3.0-only. Each file carries an SPDX header.
+- `schemas/`, which holds the published JSON Schemas, is **Apache-2.0**. The file formats should
+  spread to other tools, even where the code cannot.
+- The data registry — reference vehicles, tracks, and tires — is **CC-BY-SA-4.0**, which is
+  share-alike and matches the spirit.
+- **Contributions use DCO now. Decide on a CLA before the first significant external
+  contribution.**
+
+  As the sole author, the author can later dual-license, and for example sell commercial
+  exceptions. But only while holding all copyright. Accepting external contributions under DCO
+  alone permanently forfeits the ability to relicense unilaterally. If commercial dual-licensing is
+  a live option, adopt a CLA from day 1.
+
+**Dependency compatibility. Licenses flow one way, INTO AGPL:**
+
+- MIT, Apache-2.0, BSD, and Zlib are freely usable. Every dependency in §4.1 stays valid.
+- LGPL-3.0, which covers the TUM ecosystem, is now usable as a dependency and as an oracle (§4.3).
+- GPL-3.0 and later are compatible with AGPL-3.0, through GPLv3 §13. Use them if genuinely needed.
+- Incompatible: GPL-2.0-only, and proprietary SDKs such as the closed DLL from AiM. Wrap them
+  externally, or avoid them.
+
+**Rules on authorship and provenance, which the change of license did not alter:**
+
+- The flagship models — the tire thermal ring, the wear and cliff model, and the ERS energy manager
+  — are **implemented from the published literature**: Farroni, Pacejka, Archard, and the FIA
+  regulations. They are never derived from another codebase.
+
+  Tire code in a GPL game engine, such as Speed Dreams or VDrift, is off-limits as a *source of
+  derivation*, whatever the license compatibility. The theory pages in the documentation, with
+  their equations and citations, are the record of provenance.
+- FSAE TTC data: parsers and fitting, yes. Redistribution of the data, or of a fitted parameter
+  set, NO.
+- FastF1 and F1 data: use them as artifacts for calibration and validation only. Do not
+  redistribute raw telemetry.
+- PDT `.h5` files are private to the author. The importer reads the documented schema (§10). The
+  tests use synthetic fixtures. No real file is committed.
 
 ---
 
 ## 16. Stage 2 Preview — Race Strategy Monte Carlo
 
-Designed-for now (hooks in v1), built after 1.0:
+Design for this now, through hooks in v1. Build it after 1.0.
 
-- **Time-discrete** race simulator (not lap-discrete) — the acknowledged right architecture (the
-  TUM author's own Rust proof-of-concept validates the choice; it was never built out — that repo
-  is dual Apache/MIT and may serve as a design seed).
-- Physics coupling: T0-with-slow-states provides lap time as a function of (tire age/temp/wear,
-  fuel, ERS/battery state, traffic) — replacing every prior project's empirical lap-time-delta
-  model.
-- Stochastic layer: safety car / VSC / red flag hazard models, pit-stop time distributions,
-  overtaking/traffic model (Heilmeier 2020 formulation as the baseline), reliability. Counter-based
-  RNG already in the core (§11.2).
-- Optimizer: strategy tree search / policy optimization over pit laps, compounds, ERS deployment
-  plans (`u(s)` from §8.3), override-mode usage.
-- **Fuel-to-finish + fuel-saving (strategy, not physics).** The M6/PR5 fuel model already burns
-  fuel from real ICE work and feeds mass/CG back into the lap (§8.1) — a *consumption* model, not a
-  prescribed mass(t). The race-level rule sits on top: F1 requires ≥ 1.0 L of fuel to remain at the
-  flag for the FIA sample, so teams start with just enough to finish as close to that reserve as
-  possible. Two pieces belong here, NOT in the fuel slow state or the vehicle schema:
-  (1) **Load-to-finish optimization** — pick the initial fuel load so terminal fuel ≈ reserve at the
-  flag. It is an outer fixed point (load → lap times → total consumption → the load you needed),
-  solved by bisecting `initial_kg` against a simulated race; the reserve is `1.0 L × fuel_density`
-  (F1 fuel ≈ 0.72–0.78 kg/L → ~0.75 kg). The initial load for a *race* is a strategy input, not car
-  identity — keep it off the vehicle document (an override / strategy-computed value), preserving the
-  input-quartet firewall.
-  (2) **Fuel-saving = lift-and-coast** — when projected to run short, the driver lifts early; this is
-  exactly the `lift_point` component of the `u(s)` control vector (§8.3, wired at M6/PR5A), so the
-  strategy layer *acts* on a fuel target by shaping the lift schedule (coupled to the ERS harvest it
-  also drives). An honest, cheap precursor that could land earlier as physics-side reporting: an
-  optional fuel `reserve_kg` (or `1.0 L × density`) floor so a full-race result reports the
-  end-of-race margin and *flags running dry* rather than silently clamping fuel at 0 (the
-  estimated/degraded-surfaces discipline, §6.1) — but the load optimizer itself stays here in stage 2.
-- **Rain/wet weather lives here** (Locked Decision #4): wet tire parameter sets, track grip
-  scaling (`grip_scale` already in the track format), crossover-lap estimation, drying-line
-  evolution — a first-class strategy axis, not a v1 physics feature.
-- Open dataset contribution: a maintained post-2019 SC/VSC/accident-phase dataset built on
-  FastF1+jolpica (the existing annotated DB stops at 2019 — standalone whitespace).
-- A Gymnasium-compatible strategy environment would likely become the community RL reference.
+- A **time-discrete** race simulator, not a lap-discrete one. This is the acknowledged right
+  architecture. The TUM author's own Rust proof-of-concept validates the choice. It was never built
+  out, and that repository is dual Apache and MIT, so it may serve as a design seed.
+- **The coupling to physics.** T0 with slow states gives lap time as a function of tire age,
+  temperature, and wear, plus fuel, plus the state of ERS and the battery, plus traffic. That
+  replaces the empirical delta in lap time that every prior project used.
+- **The stochastic layer.** Hazard models for the safety car, the VSC, and a red flag.
+  Distributions for pit-stop time. A model for overtaking and traffic, taking the Heilmeier 2020
+  formulation as the baseline. And reliability. The counter-based RNG is already in the core
+  (§11.2).
+- **The optimizer.** Tree search over strategies, or policy optimization, over pit laps, compounds,
+  plans for ERS deployment — which is `u(s)` from §8.3 — and use of the override mode.
+- **Fuel to finish, and fuel saving. These are strategy, not physics.**
 
-**Stage 3 — outlap-web (the declared endgame, Locked Decision #8):** the WASM widget grows into
-the primary interface — local-first browser app (vehicle/track files never leave the user's
-machine), interactive lap/stint/strategy studies, WebGPU batch Monte Carlo via CubeCL/wgpu, and
-optionally hosted compute — the AGPL network clause (§15) guarantees any hosted derivative stays
-open.
+  The fuel model from M6 PR5 already burns fuel from real ICE work, and feeds mass and CG back into
+  the lap (§8.1). It is a model of *consumption*. It is not a prescribed mass(t).
+
+  The rule at race level sits on top. F1 requires at least 1.0 L of fuel to remain at the flag, for
+  the FIA sample. Teams therefore start with just enough to finish as close to that reserve as
+  possible.
+
+  Two pieces belong here, and NOT in the fuel slow state or the vehicle schema.
+
+  (1) **Optimizing the load to finish.** Pick the initial fuel load so that the terminal fuel is
+  about the reserve at the flag. This is an outer fixed point: load gives lap times, which give
+  total consumption, which gives the load you needed. Solve it by bisecting `initial_kg` against a
+  simulated race. The reserve is `1.0 L × fuel_density`; F1 fuel is about 0.72 to 0.78 kg/L, so
+  about 0.75 kg.
+
+  The initial load for a *race* is a strategy input. It is not car identity. Keep it off the vehicle
+  document, as an override or a value that the strategy computes. That preserves the firewall
+  around the input quartet.
+
+  (2) **Fuel saving, which means lift-and-coast.** When the car is projected to run short, the
+  driver lifts early. That is exactly the `lift_point` component of the `u(s)` control vector
+  (§8.3), wired at M6 PR5A. The strategy layer therefore *acts* on a fuel target by shaping the lift
+  schedule, coupled to the ERS harvest that it also drives.
+
+  There is an honest, cheap precursor that could land earlier, as reporting on the physics side: an
+  optional fuel `reserve_kg`, or `1.0 L × density`, as a floor. A full-race result would then report
+  the margin at the end of the race, and *flag that the car ran dry*, rather than silently clamping
+  fuel at 0. That follows the discipline of surfacing estimates and degradations, §6.1. But the load
+  optimizer itself stays here, in stage 2.
+- **Rain and wet weather live here** (Locked Decision #4). That covers wet tire parameter sets,
+  scaling of track grip, which `grip_scale` already carries in the track format, estimating the
+  crossover lap, and the evolution of a drying line. It is a first-class axis of strategy. It is not
+  a physics feature of v1.
+- **A contribution of open data.** A maintained dataset of safety car, VSC, and accident phases,
+  after 2019, built on FastF1 and jolpica. The existing annotated database stops at 2019, which is
+  standalone whitespace.
+- A Gymnasium-compatible environment for strategy would likely become the RL reference for the
+  community.
+
+**Stage 3: outlap-web, the declared endgame (Locked Decision #8).** The WASM widget grows into the
+primary interface: a local-first browser app, where vehicle and track files never leave the user's
+machine; interactive studies of laps, stints, and strategy; batch Monte Carlo on WebGPU, through
+CubeCL and wgpu; and, optionally, hosted compute. The network clause of AGPL (§15) guarantees that
+any hosted derivative stays open.
 
 ---
 
 ## 17. Reading List
 
-**Books / core references**
+**Books and core references**
+
 - Pacejka, *Tire and Vehicle Dynamics*, 3rd ed. (2012) — MF6.x, relaxation, combined slip.
 - Milliken & Milliken, *Race Car Vehicle Dynamics* — trim, load transfer, K&C, driver.
 - Guiggiani, *The Science of Vehicle Dynamics* — rigorous double-track formulation.
 - Eriksson & Nielsen, *Modeling and Control of Engines and Drivelines* — ICE mean-value (later).
 
 **Papers (all public)**
+
 - Perantoni & Limebeer 2014, "Optimal control of a Formula One car…" VSD 52(5) — F1 parameter set + 3D track companion papers.
 - Heilmeier et al. 2020, "Application of Monte Carlo Methods … Race Simulation" — strategy MC formulation; + Heilmeier race-sim companion papers (tire deg as lap-time delta, overtaking model).
 - Farroni et al. — TRT / TRT-EVO thermal tire model papers (the thermal ring formulation).
@@ -1400,7 +1708,8 @@ open.
 - Limebeer & Rao — review of minimum-lap-time optimal control.
 - FIA 2026 Formula 1 Technical Regulations — ERS numbers (§8.3) **must be verified against this**.
 
-**Codebases to study (in this order)**
+**Codebases to study, in this order**
+
 1. Open-Car-Dynamics (Apache-2.0) — composable submodel architecture, MF52 usage.
 2. fastest-lap (MIT) — OCP lap-sim structure, F1 3-DOF model, g-g computation.
 3. Chrono::Vehicle JSON vehicle templates — parametric data design.
@@ -1411,28 +1720,34 @@ open.
 
 ## 18. First-Week Task List
 
-1. **Day 1**: environment (§3); create **public** GitHub repo `outlap` with `LICENSE` =
-   AGPL-3.0-only, DCO in `CONTRIBUTING.md` (CLA decision noted as open, §15), `schemas/LICENSE` =
-   Apache-2.0; `cargo new` workspace skeleton (§11.1); CI skeleton (fmt/clippy/test + wasm32 build
-   on push); reserve the `outlap` names on crates.io and PyPI with 0.0.1 placeholders.
-2. **Day 2–3**: `outlap-schema`: vehicle (incl. drivetrain topology graph §8.0) / track / ptm /
-   tyr serde types + schemars JSON-Schema emission + round-trip tests. This is the contract —
-   review it hard before writing physics.
-3. **Day 3–4**: `outlap-track`: centerline CSV → arc-length spline → κ(s), elevation, banking;
-   OSM importer (Python) for one real circuit; plot sanity.
-4. **Day 5**: T0 point-mass with constant-μ + simple power cap: first lap time on the real track.
-   Compare magnitude vs published lap records (~sanity, not parity).
-5. **Day 6–7**: `python/outlap/importers/pdt_h5.py` against §10 (the three reference files are on
-   the author's machines; synthetic fixtures for CI): EDrive → `.ptm` first, then DriveUnit,
-   BatteryPack. Round-trip validation per §13.
-6. Then follow the milestone order (§12). At every milestone, update the docs theory page with the
-   equations + citations *as they are implemented* (clean-room provenance, §15).
+1. **Day 1.** Set up the environment (§3). Create the **public** GitHub repository `outlap`, with
+   `LICENSE` set to AGPL-3.0-only, the DCO in `CONTRIBUTING.md`, the CLA decision noted as open
+   (§15), and `schemas/LICENSE` set to Apache-2.0. Run `cargo new` for the workspace skeleton
+   (§11.1). Add a CI skeleton, running fmt, clippy, test, and the wasm32 build on push. Reserve the
+   `outlap` names on crates.io and PyPI, with 0.0.1 placeholders.
+2. **Day 2–3.** Write `outlap-schema`: the serde types for vehicle, including the drivetrain
+   topology graph of §8.0, plus track, ptm, and tyr. Add schemars JSON-Schema emission and
+   round-trip tests. This is the contract. Review it hard before writing any physics.
+3. **Day 3–4.** Write `outlap-track`: centerline CSV, then an arc-length spline, then κ(s),
+   elevation, and banking. Add the OSM importer, in Python, for one real circuit. Plot the result
+   as a sanity check.
+4. **Day 5.** Write T0 as a point mass, with constant μ and a simple power cap. Get the first lap
+   time on the real track. Compare the magnitude against published lap records. That is a sanity
+   check, not parity.
+5. **Day 6–7.** Write `python/outlap/importers/pdt_h5.py`, against §10. The three reference files
+   are on the author's machines; CI uses synthetic fixtures. Do EDrive to `.ptm` first, then
+   DriveUnit, then BatteryPack. Validate the round trip, per §13.
+6. Then follow the milestone order of §12. At every milestone, update the theory page in the
+   documentation with the equations and the citations, *as they are implemented*. That is the
+   record of clean-room provenance, §15.
 
 ---
 
 ## Appendix A — repo CLAUDE.md
 
-Copy verbatim to `outlap/CLAUDE.md` (the AI-assistant working agreement for the new repo):
+Copy this verbatim to `outlap/CLAUDE.md`. It is the working agreement for the AI assistant in the
+new repository. It is quoted here as-is, so do not edit it in this document; edit `CLAUDE.md`
+itself.
 
 ````markdown
 # CLAUDE.md — outlap
@@ -1514,7 +1829,7 @@ implementing anything new; the Locked Decisions log in §1 overrides everything 
 
 ## Appendix B — CI workflow
 
-Copy to `.github/workflows/ci.yml` (trim as needed while bootstrapping):
+Copy this to `.github/workflows/ci.yml`. Trim it as needed while bootstrapping.
 
 ```yaml
 name: CI
@@ -1555,53 +1870,65 @@ jobs:
         with: {command: build, args: --release -m crates/outlap-py/Cargo.toml}
 ```
 
-(Perf gates — iai-callgrind instruction counts on tire-eval/step/gg-solve kernels — join the
-matrix once those kernels exist, per §11.5.)
+The performance gates join this matrix once the kernels exist, per §11.5. They are instruction
+counts from iai-callgrind, on the kernels for tire evaluation, the step, and the gg solve.
 
 ## Appendix C — CONTRIBUTING.md
 
 ```markdown
 # Contributing to outlap
 
-Thanks for helping! Ground rules — they are strict because they protect the project's legal
-standing and its physics credibility.
+Thank you for helping. The rules below are strict, because they protect two things: the legal
+standing of the project, and the credibility of its physics.
 
 ## Sign-off (DCO)
-Every commit must carry `Signed-off-by:` (`git commit -s`) certifying the Developer Certificate
-of Origin (developercertificate.org): you wrote the change or have the right to submit it under
-AGPL-3.0.
+
+Every commit must carry a `Signed-off-by:` line. Use `git commit -s` to add it. That line certifies
+the Developer Certificate of Origin (developercertificate.org). It states that you wrote the change,
+or that you have the right to submit it under AGPL-3.0.
 
 ## Licensing
-- Code: AGPL-3.0-only (SPDX header in every file). `schemas/`: Apache-2.0. Data: CC-BY-SA-4.0.
-- Dependencies must be MIT/Apache/BSD/Zlib/LGPL. Anything else: open an issue first.
 
-## Clean-room policy (non-negotiable)
-- Physics models are implemented from published literature; PRs adding/changing models MUST update
-  the matching docs theory page with equations + citations.
-- **Never copy or closely paraphrase code** from other simulators/game engines or proprietary tools.
-  You MAY *consult* other open-source projects whose licence permits it to understand the approach or
-  avoid pitfalls ("how did they solve this") — record the repo (name + licence) alongside the
-  citations, re-author independently (ideas, not expression), and read strong-copyleft (GPL/AGPL)
-  sources for approach only. Never lift code from GPL game engines.
-- No proprietary data: FSAE TTC data and fitted TTC parameter sets cannot be committed; raw F1
-  telemetry cannot be committed. Synthetic/citable data only.
+- Code is AGPL-3.0-only. Put an SPDX header in every file. `schemas/` is Apache-2.0. Data is
+  CC-BY-SA-4.0.
+- A dependency must be MIT, Apache, BSD, Zlib, or LGPL. For anything else, open an issue first.
+
+## Clean-room policy, which you must not break
+
+- Implement each physics model from published literature. A PR that adds or changes a model MUST
+  also update the matching theory page in the documentation, with the equations and the citations.
+- **Never copy code from another simulator, game engine, or proprietary tool. Never closely
+  paraphrase it either.**
+
+  You MAY *consult* an open-source project whose license permits it, to understand the approach or
+  to avoid a pitfall — that is, to see how they solved a problem. Three conditions apply. Record
+  the repository, with its name and license, next to the citations. Re-author the code
+  independently, taking ideas and not expression. And read a strong-copyleft source, under GPL or
+  AGPL, for approach only.
+
+  Never lift code from a GPL game engine.
+- Commit no proprietary data. You may not commit FSAE TTC data, and you may not commit a parameter
+  set fitted from it. You may not commit raw F1 telemetry. Commit only data that is synthetic, or
+  data that you can cite.
 
 ## PR checklist
-- [ ] `cargo fmt` / `clippy -D warnings` / `cargo test` green, wasm target builds
-- [ ] No new allocations in step paths (alloc-counter test green)
-- [ ] Golden files unchanged, or regenerated with `--bless` + a physics justification in the PR
-- [ ] New physics → property test + theory-page citation
-- [ ] Schema changes → version bump + migration + round-trip test
+
+- [ ] `cargo fmt`, `clippy -D warnings`, and `cargo test` are green, and the wasm target builds
+- [ ] No step path allocates. The alloc-counter test is green
+- [ ] The golden files are unchanged. If you regenerated them with `--bless`, the PR justifies the
+      change on physics grounds
+- [ ] New physics comes with a property test and a citation on the theory page
+- [ ] A schema change comes with a version bump, a migration, and a round-trip test
 ```
 
 ---
 
 ## Appendix D — Ubuntu bootstrap, exact commands (fresh machine, SSH, nothing installed)
 
-Assumes: Ubuntu 24.04, SSH session from the Windows machine, no files transferred yet, no Claude
-Code. Run top to bottom.
+This assumes Ubuntu 24.04, an SSH session from the Windows machine, no files transferred yet, and no
+Claude Code. Run the steps from top to bottom.
 
-### D.0 Transfer this document (run on the WINDOWS machine, PowerShell)
+### D.0 Transfer this document. Run this on the WINDOWS machine, in PowerShell
 
 ```powershell
 scp "C:\Users\neomo\Documents\RACESIM_HANDOFF.md" <user>@<ubuntu-ip>:~/
@@ -1615,8 +1942,8 @@ sudo apt install -y build-essential git curl wget pkg-config libssl-dev cmake \
                     tmux ripgrep gh mesa-vulkan-drivers vulkan-tools
 ```
 
-`tmux` matters: run Claude Code inside tmux so dropped SSH connections never kill a session
-(`tmux new -s outlap` / reattach with `tmux attach -t outlap`).
+`tmux` matters. Run Claude Code inside tmux, so that a dropped SSH connection never kills a session.
+Start one with `tmux new -s outlap`, and reattach with `tmux attach -t outlap`.
 
 ### D.2 Rust toolchain
 
@@ -1627,8 +1954,8 @@ rustup component add clippy rustfmt
 rustup target add wasm32-unknown-unknown
 ```
 
-(`wasm-pack`, `git-cliff`, `cargo-criterion`, `iai-callgrind-runner` install later when first
-needed — they compile for a while on the i5-6500.)
+Install `wasm-pack`, `git-cliff`, `cargo-criterion`, and `iai-callgrind-runner` later, when you
+first need them. They compile for a while on the i5-6500.
 
 ### D.3 Python toolchain
 
@@ -1638,7 +1965,7 @@ source "$HOME/.local/bin/env"
 uv python install 3.12
 ```
 
-### D.4 Identity + GitHub auth
+### D.4 Identity and GitHub authentication
 
 ```bash
 git config --global user.name  "Konstantinos Moulakis"
@@ -1650,10 +1977,10 @@ gh auth login
 # it prints a one-time code + URL — open the URL in the WINDOWS browser, enter the code
 ```
 
-### D.4a Status check — skip whatever is already satisfied
+### D.4a A status check. Skip whatever is already satisfied
 
-Some tools (e.g. git) are already on the machine. Run this block first and skip any command in
-steps D.1–D.5 whose check already passes:
+Some tools, git for example, are already on the machine. Run this block first. Then skip any command
+in steps D.1 to D.5 whose check already passes:
 
 ```bash
 # --- versions: a version string = installed, "command not found" = run that step ---
@@ -1685,17 +2012,25 @@ ls -la ~/dev/outlap 2>/dev/null && echo "WARNING: ~/dev/outlap already exists �
 ls ~/RACESIM_HANDOFF.md 2>/dev/null || echo "handoff not transferred yet: run D.0 on Windows"
 ```
 
-Interpretation rules: a passing check means **skip that command, not the whole step** (e.g. git
-installed but `user.email` unset → still run the two `git config` identity lines). `gh auth
-status` failing with "not logged in" is the only trigger for `gh auth login`. If
-`~/dev/outlap` already exists, look inside before D.6 — never overwrite it blindly.
+How to read the results. A check that passes means **skip that command, not the whole step**. For
+example, git may be installed while `user.email` is unset; then still run the two `git config`
+identity lines.
 
-> **Machine snapshot (verified 2026-07-03, host `kmoulakis-linux`, user `kmoulakis`):** already
-> present — git 2.43.0 (user.name `KMoula30`, user.email set, `credential.helper=store`),
-> gh 2.45.0 (**not authenticated**), rustc/cargo 1.96.1, uv 0.11.26, Claude Code 2.1.19, tmux 3.4,
-> ripgrep 14.1.0, Vulkan 1.3.275. Still needed: `init.defaultBranch main`, `gh auth login`,
-> handoff transfer. Unverified: build-essential/cmake/pkg-config/libssl-dev, rustup-managed vs
-> apt rust, clippy/rustfmt components, wasm32 target, Claude login. Skip D.1–D.5 except those.
+`gh auth status` failing with "not logged in" is the only trigger for `gh auth login`.
+
+If `~/dev/outlap` already exists, look inside it before D.6. Never overwrite it blindly.
+
+> **Machine snapshot, verified 2026-07-03, on host `kmoulakis-linux`, user `kmoulakis`.**
+>
+> Already present: git 2.43.0, with user.name `KMoula30`, user.email set, and
+> `credential.helper=store`; gh 2.45.0, which is **not authenticated**; rustc and cargo 1.96.1; uv
+> 0.11.26; Claude Code 2.1.19; tmux 3.4; ripgrep 14.1.0; and Vulkan 1.3.275.
+>
+> Still needed: `init.defaultBranch main`, `gh auth login`, and the transfer of this handoff.
+>
+> Unverified: build-essential, cmake, pkg-config, libssl-dev; whether Rust is managed by rustup or
+> by apt; the clippy and rustfmt components; the wasm32 target; and the Claude login. Skip D.1 to
+> D.5, except for those.
 
 ### D.5 Claude Code (terminal)
 
@@ -1705,10 +2040,10 @@ export PATH="$HOME/.local/bin:$PATH"     # installer adds this to your shell pro
 claude --version
 ```
 
-First login: run `claude` once anywhere, use `/login` — it prints a URL + code for the browser
-(same device-flow dance as gh).
+To log in the first time, run `claude` once, anywhere, and use `/login`. It prints a URL and a code
+for the browser. That is the same device flow as gh.
 
-### D.6 Repository skeleton
+### D.6 The repository skeleton
 
 ```bash
 mkdir -p ~/dev/outlap && cd ~/dev/outlap
@@ -1766,7 +2101,7 @@ EOF
 echo -e "target/\n__pycache__/\n.venv/\n*.egg-info/\ndist/\n.pytest_cache/" > .gitignore
 ```
 
-### D.7 Create the public GitHub repo + first commit
+### D.7 Create the public GitHub repository, and make the first commit
 
 ```bash
 cd ~/dev/outlap
@@ -1777,10 +2112,10 @@ gh repo create outlap --public \
   --source=. --remote=origin --push
 ```
 
-Then (once, from any browser): create the crates.io and PyPI accounts and reserve the `outlap`
-name with 0.0.1 placeholder releases when convenient (§2).
+Then do this once, from any browser. Create the accounts on crates.io and PyPI, and reserve the
+`outlap` name with 0.0.1 placeholder releases when convenient (§2).
 
-### D.8 First Claude Code session
+### D.8 The first Claude Code session
 
 ```bash
 cd ~/dev/outlap
@@ -1788,7 +2123,7 @@ tmux new -s outlap
 claude
 ```
 
-Opening prompt (paste as-is):
+Paste this opening prompt as-is:
 
 > Read docs/HANDOFF.md in full before doing anything — it is the single source of truth for this
 > project, and its Locked Decisions log (§1) overrides any other instinct. Then: (1) extract
@@ -1798,15 +2133,19 @@ Opening prompt (paste as-is):
 > schemars JSON-Schema emission for the vehicle/track/conditions/sim quartet, §6.2b + §9) and show
 > me the vehicle schema types for review before implementing the rest.
 
-Working habits that extract the most from Claude Code here:
-- One milestone task per session; `/clear` between unrelated tasks; `claude --continue` to resume.
-- Plan mode (Shift+Tab) for anything architectural; let it read HANDOFF.md sections first.
-- Keep CLAUDE.md the lean working agreement (Appendix A); deep spec stays in docs/HANDOFF.md —
-  Claude reads the relevant section on demand.
-- Review diffs before accepting writes on schema/format code — the contracts are the product.
-- Once CI exists, have Claude open PRs (`gh pr create`) instead of pushing to main, per #36.
+Five working habits get the most out of Claude Code here.
+
+- Do one milestone task in each session. Run `/clear` between unrelated tasks. Use
+  `claude --continue` to resume.
+- Use plan mode, Shift+Tab, for anything architectural. Let it read the relevant sections of
+  HANDOFF.md first.
+- Keep CLAUDE.md lean: it is the working agreement, Appendix A. The deep specification stays in
+  docs/HANDOFF.md, and Claude reads the section it needs, on demand.
+- Review the diff before you accept a write to schema or format code. The contracts are the
+  product.
+- Once CI exists, have Claude open PRs with `gh pr create`, instead of pushing to main. See #36.
 
 ---
 
-*End of handoff. This document supersedes any prior conversation context — everything the project
-needs to start is above.*
+*End of handoff. This document supersedes any prior conversation context. Everything the project
+needs in order to start is above.*
