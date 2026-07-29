@@ -38,7 +38,13 @@ pub(crate) fn build_sim(
     if let Some(t) = tier {
         value["tier"] = serde_json::Value::String(t.to_owned());
     }
-    serde_json::from_value(value).map_err(|e| PyValueError::new_err(format!("invalid sim: {e}")))
+    let sim: Sim = serde_json::from_value(value)
+        .map_err(|e| PyValueError::new_err(format!("invalid sim: {e}")))?;
+    // The merged dict never passed through `load_sim`, so run the same semantic checks here —
+    // otherwise an out-of-range override reaches the solver. `vertical_baseline_m: 0` is the
+    // sharp case: it NaNs every grade and curvature for the lap instead of raising.
+    outlap_schema::load::validate_sim(&sim).map_err(schema_err)?;
+    Ok(sim)
 }
 
 /// Deep-merge a JSON `patch` onto `value`, erroring on an unknown object key (a product surface).

@@ -32,13 +32,19 @@ fn track_doc_loads() {
 /// A minimal in-memory track dir: a `track.yaml` (with optional keypoints) plus a 4-row
 /// centerline whose `banking_deg` column is the given values.
 fn mem_track(keypoints: bool, banking: [f64; 4]) -> MemLoader {
+    mem_track_at("track/1.1", keypoints, banking)
+}
+
+/// The same fixture at an explicit declared schema version, so the banking-conflict rule can be
+/// exercised on both sides of the MINOR that introduced it.
+fn mem_track_at(schema: &str, keypoints: bool, banking: [f64; 4]) -> MemLoader {
     let kp = if keypoints {
         "banking_keypoints:\n  - { s_m: 0.0, banking_deg: 0.0 }\n  - { s_m: 20.0, banking_deg: 5.0 }\n"
     } else {
         ""
     };
     let yaml = format!(
-        "schema: track/1.1\nname: Mem Track\nclosed: false\ncenterline: centerline.csv\n{kp}"
+        "schema: {schema}\nname: Mem Track\nclosed: false\ncenterline: centerline.csv\n{kp}"
     );
     let mut csv =
         String::from("s_m,x_m,y_m,z_m,banking_deg,width_left_m,width_right_m,grip_scale\n");
@@ -60,6 +66,19 @@ fn track_both_banking_forms_conflict() {
         msg.contains("banking") && msg.contains("twice"),
         "unexpected message: {msg}"
     );
+}
+
+#[test]
+fn track_1_0_keeps_the_documented_keypoint_override() {
+    // `track/1.0` documented keypoints as overriding the dense column, so a file combining them
+    // was valid with defined behavior. Tightening that into an error is MAJOR-shaped; the rule is
+    // gated on the declared MINOR so older documents keep loading exactly as before.
+    let doc = load_track_doc(
+        "track.yaml",
+        &mem_track_at("track/1.0", true, [0.0, 2.5, 0.0, 0.0]),
+    )
+    .expect("track/1.0 with both banking forms must still load");
+    assert_eq!(doc.banking_keypoints.len(), 2);
 }
 
 #[test]
