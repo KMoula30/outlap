@@ -24,10 +24,13 @@ dependencies = [
 outlap-core = { path = "../crates/outlap-py" }
 
 [project.optional-dependencies]
-# Tooling for the track importer + plot sanity (§9.3). Network + heavier deps, kept out of the
-# core install; enable with `uv sync --extra track-import`. pyproj (MIT) + rasterio
-# (BSD-3-Clause) serve the LiDAR DTM fusion (`outlap.importers.lidar_dem`) — imported lazily,
-# never in CI.
+# Tooling for the track importer + plot sanity (§9.3). Heavier deps, kept out of the core
+# install; enable with `uv sync --extra track-import`. pyproj (MIT) + rasterio (BSD-3-Clause)
+# serve the LiDAR DTM fusion (`outlap.importers.lidar_dem`) — imported lazily, so the module
+# imports without them. CI *does* sync this extra: these are offline libraries and the committed
+# synthetic-raster fixtures need them to run. Only `requests` reaches the network, and only from
+# the explicit `--refresh-snapshot` stage; the network data source (`fastf1`) lives in
+# `wear-cal`, which CI never installs.
 track-import = [
     "requests>=2.32.0",
     "scipy>=1.14.0",
