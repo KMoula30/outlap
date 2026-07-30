@@ -229,7 +229,12 @@ def test_low_snr_sections_fall_back_to_zero_with_provenance() -> None:
     )
     fallback = ~profile.resolved
     assert float(np.mean(fallback)) >= 0.8  # noise >= signal: sections don't resolve
-    assert np.all(profile.banking_deg[fallback] == 0.0)
+    # No data, NOT a measurement of zero — a zero here would claim these sections were
+    # measured flat, which is what track/1.2 exists to stop conflating.
+    assert np.all(np.isnan(profile.banking_deg[fallback]))
+    assert np.all(np.isfinite(profile.banking_deg[profile.resolved]))
+    # The lossy pre-1.2 column collapses them back to zero, deliberately and on request.
+    assert np.all(profile.as_column(nodata=False)[fallback] == 0.0)
 
     provenance = profile.provenance()
     assert provenance["sections"] == 25

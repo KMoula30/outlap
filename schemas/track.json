@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "banking_keypoints": {
-      "description": "Optional sparse banking keypoints, interpolated in `s` (§9.3) — the hand-annotation path\nwhen per-row LiDAR banking is not available. The centerline's dense `banking_deg` column\nand this list are two competing declarations: a document carrying keypoints alongside any\nNON-zero column value is rejected at load (track/1.1 semantic check); keypoints over an\nall-zero placeholder column remain valid and drive the banking channel.",
+      "description": "Optional sparse banking keypoints, interpolated in `s` (§9.3) — the hand-annotation path\nfor corners the dense `banking_deg` column does not resolve.\n\nHow the two combine depends on the declared MINOR, because the column's meaning changed.\nFrom [`TRACK_MINOR_BANKING_NODATA`] the keypoints **fill** its `NaN` (no-data) stations\nand measured values win everywhere else, so the two compose. `track/1.1` rejects a\ndocument carrying keypoints alongside any non-zero column value\n([`TRACK_MINOR_BANKING_CONFLICT`]); `track/1.0` lets keypoints override the column\noutright.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/BankingKeypoint"

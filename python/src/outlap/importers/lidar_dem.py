@@ -644,9 +644,15 @@ class BankingProfile:
     """Per-row banking with the per-section quality record.
 
     ``banking_deg[i]`` is the resolved banking at station ``i`` (**positive raises the left
-    edge**, the ``outlap-track`` convention) or exactly ``0.0`` where the section did not
-    clear the SNR gate (``resolved[i] = False`` — the honest fallback, flagged in
-    :meth:`provenance`). ``snr`` is each section's slope-to-noise ratio.
+    edge**, the ``outlap-track`` convention), or ``NaN`` where the section did not clear the SNR
+    gate (``resolved[i] = False``). ``snr`` is each section's slope-to-noise ratio.
+
+    The no-data marker matters: a zero here would claim the station was *measured flat*, which
+    is a different fact from *not measured*, and the two were indistinguishable before
+    ``track/1.2``. Emitting ``NaN`` lets ``banking_keypoints`` fill exactly the unresolved
+    stations without overwriting a real flat measurement, and lets the loaded-model report count
+    what the geometry is assuming. Use :meth:`as_column` for a zero-filled column when writing an
+    older schema version.
     """
 
     banking_deg: F
@@ -654,6 +660,17 @@ class BankingProfile:
     resolved: NDArray[np.bool_]
     snr_min: float
     source: DemSource | None = None
+
+    def as_column(self, *, nodata: bool = True) -> F:
+        """The dense ``banking_deg`` column to write.
+
+        ``nodata=False`` collapses unresolved stations back to ``0.0`` for a pre-``track/1.2``
+        file, where the column cannot express the distinction — lossy, and only for writing an
+        older schema version deliberately.
+        """
+        if nodata:
+            return self.banking_deg
+        return np.nan_to_num(self.banking_deg, nan=0.0)
 
     def provenance(self) -> dict[str, object]:
         """The meta record the caller writes into ``track.yaml`` (KTD9)."""
@@ -686,6 +703,7 @@ def estimate_banking(
     slice_spacing_m: float = 1.0,
     noise_floor_m: float = 0.0,
     snr_min: float = 2.0,
+    precision_deg: float = 0.25,
     source: DemSource | None = None,
 ) -> BankingProfile:
     """Estimate per-row banking from detrended cross-track LiDAR sections.
@@ -699,7 +717,9 @@ def estimate_banking(
 
     The SNR gate is ``|b| / se(b) >= snr_min`` with the residual scatter floored at
     ``noise_floor_m / √2`` (odd-differencing of two independent samples halves the
-    variance). Sections below the gate fall back to banking 0 with ``resolved = False``.
+    variance). A section is **measured** when its slope clears ``snr_min`` OR its standard
+    error is within ``precision_deg`` (so a confidently-flat corner is a measurement of zero,
+    not an absence); otherwise it is unresolved and its banking is ``NaN``.
 
     ``sample_z`` is an ENU elevation sampler — :func:`make_enu_sampler` over a DTM mosaic,
     or any callable of the same shape.
@@ -763,11 +783,20 @@ def estimate_banking(
     dof = max(n_slices * n_offsets - 1, 1)
     sigma = np.sqrt(np.sum(resid * resid, axis=(1, 2)) / dof)
     sigma = np.maximum(sigma, max(noise_floor_m / math.sqrt(2.0), _SIGMA_FLOOR))
-    snr = np.abs(b) * np.sqrt(sum_t2) / sigma  # |b| / se(b), se(b) = sigma / sqrt(Σt²)
-    resolved = snr >= snr_min
+    se = sigma / np.sqrt(sum_t2)  # standard error of the slope
+    snr = np.abs(b) / se
+    # A section counts as measured when EITHER the slope is significantly non-zero, OR its
+    # uncertainty is small enough that "indistinguishable from flat" is itself a finding. The
+    # ratio alone cannot tell those apart: a genuinely flat corner has a tiny numerator and so a
+    # low ratio, and calling that "no data" would mark most of a flat circuit unresolved and
+    # invite keypoints to overwrite real measurements.
+    se_deg = np.degrees(np.arctan(se))
+    resolved = (snr >= snr_min) | (se_deg <= precision_deg)
 
     banking_deg = np.degrees(np.arctan(b))
-    banking_deg[~resolved] = 0.0  # honest fallback, flagged in provenance
+    # No data — NOT a measurement of zero. `track/1.2` keeps the two apart; keypoints fill
+    # these stations and the loaded-model report counts any that stay uncovered.
+    banking_deg[~resolved] = np.nan
     return BankingProfile(
         banking_deg=banking_deg,
         snr=snr,

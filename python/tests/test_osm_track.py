@@ -225,7 +225,7 @@ def test_base_only_import_emits_honest_meta_and_manifest(tmp_path: Path) -> None
     assert result.stages == ("base",)
 
     doc = yaml.safe_load((track_dir / "track.yaml").read_text(encoding="utf-8"))
-    assert doc["schema"] == "track/1.1"
+    assert doc["schema"] == "track/1.2"
     assert doc["closed"] is True
     meta = doc["meta"]
     assert meta["accuracy_class"] == "C"

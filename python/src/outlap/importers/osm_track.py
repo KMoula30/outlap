@@ -1152,7 +1152,7 @@ def run_import(
         **({"notes": "; ".join(notes)} if notes else {}),
     }
     track_doc: dict[str, Any] = {
-        "schema": "track/1.1",
+        "schema": "track/1.2",
         "name": fc.name,
         "closed": fc.closed,
         "centerline": "centerline.csv",

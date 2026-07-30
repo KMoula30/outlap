@@ -789,7 +789,7 @@ def run_import(
         "raceline in it. z and banking are 0: position telemetry carries no usable elevation."
     )
     track_doc: dict[str, Any] = {
-        "schema": "track/1.1",
+        "schema": "track/1.2",
         "name": track_name,
         "closed": True,
         "centerline": "centerline.csv",
