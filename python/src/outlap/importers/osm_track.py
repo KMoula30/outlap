@@ -112,6 +112,16 @@ OUTPUT_FILES = ("centerline.csv", "track.yaml", MANIFEST_FILE)
 STAGE_WIDTHS = "widths"
 STAGE_LIDAR = "lidar"
 STAGE_TELEMETRY_AUDIT = "telemetry-audit"
+
+#: How :func:`_assemble_circuit` resolved the lap, recorded in meta and the manifest.
+#: ``longest_way`` is the fallback — a fragment of the circuit, usually open — and it caps
+#: the accuracy class, because geometry that is not the lap must never wear an A.
+ASSEMBLY_CYCLE = "cycle"
+ASSEMBLY_THETA = "theta"
+ASSEMBLY_LONGEST_WAY = "longest_way"
+#: Geometry that was measured directly rather than assembled from a graph (the FastF1
+#: driven-line importer shares :class:`FittedCenterline`, but has no OSM topology to resolve).
+ASSEMBLY_DIRECT = "direct"
 KNOWN_STAGES = (STAGE_WIDTHS, STAGE_LIDAR, STAGE_TELEMETRY_AUDIT)
 
 # Known circuit presets (name, approximate center lat/lon, search radius m). Decision #23.
@@ -162,6 +172,14 @@ class MissingElevationError(OsmTrackError):
 
 class OutputExistsError(OsmTrackError):
     """A file this import would write already exists and ``--force`` was not given."""
+
+
+class TornBuildError(OsmTrackError):
+    """A track dir's manifest describes a different centerline than the one on disk.
+
+    The signature of an import interrupted partway through its per-file replaces: the geometry
+    is from the new run and the metadata from the old one.
+    """
 
 
 # --- OSM centerline -----------------------------------------------------------------------------
@@ -227,8 +245,32 @@ def _polyline_len(node_ids: list[int], nodes: dict[int, Any]) -> float:
     )
 
 
+def _components(adj: dict[int, set[int]]) -> list[dict[int, set[int]]]:
+    """Split an adjacency map into its connected components (deterministic order)."""
+    seen: set[int] = set()
+    out: list[dict[int, set[int]]] = []
+    for root in adj:
+        if root in seen:
+            continue
+        stack, group = [root], set()
+        while stack:
+            n = stack.pop()
+            if n in group:
+                continue
+            group.add(n)
+            stack.extend(x for x in adj[n] if x not in group)
+        seen |= group
+        out.append({n: adj[n] for n in sorted(group)})
+    return out
+
+
 def _walk_cycle(adj: dict[int, set[int]]) -> list[int]:
-    """Order a simple cycle (all nodes degree 2) into a node sequence."""
+    """Order a simple cycle (all nodes degree 2) into a node sequence.
+
+    Assumes ``adj`` is ONE cycle: it walks from an arbitrary start, so a map holding several
+    disjoint cycles would yield whichever the iteration order happened to reach. Callers split
+    into components first (see :func:`_components`).
+    """
     start = next(iter(adj))
     loop = [start]
     prev, cur = None, start
@@ -261,7 +303,7 @@ def _path_between(
     return path
 
 
-def _assemble_circuit(osm: dict[str, Any]) -> list[int]:
+def _assemble_circuit(osm: dict[str, Any]) -> tuple[list[int], str]:
     """Assemble the main **closed** circuit lap from the OSM ``highway=raceway`` ways.
 
     OSM splits a circuit into many corner-named ways plus non-circuit ways (pit lane, kart track).
@@ -272,6 +314,11 @@ def _assemble_circuit(osm: dict[str, Any]) -> list[int]:
     degree-3 junctions joined by three paths, the classic pit-bypass chord) — the cycle formed by
     the **two longest** of the three paths (the short third path is the bypass/pit link). Falls
     back to the longest single way on any unexpected topology.
+
+    Returns the lap plus **how it was assembled** (:data:`ASSEMBLY_CYCLE`,
+    :data:`ASSEMBLY_THETA`, :data:`ASSEMBLY_LONGEST_WAY`). The fallback is not an equal
+    outcome — it yields a fragment of the circuit, usually open — so the caller records the
+    method and refuses to dress a fallback up in a high accuracy class.
     """
     nodes = {e["id"]: e for e in osm["elements"] if e["type"] == "node"}
     ways = [
@@ -289,7 +336,7 @@ def _assemble_circuit(osm: dict[str, Any]) -> list[int]:
 
     circ = [w for w in ways if is_circuit(w)]
     if not circ:
-        return _longest_way(osm)
+        return _longest_way(osm), ASSEMBLY_LONGEST_WAY
 
     adj: dict[int, set[int]] = defaultdict(set)
     for w in circ:
@@ -310,14 +357,27 @@ def _assemble_circuit(osm: dict[str, Any]) -> list[int]:
             changed = True
 
     if not adj:
-        return _longest_way(osm)
+        return _longest_way(osm), ASSEMBLY_LONGEST_WAY
 
     juncs = [n for n, nb in adj.items() if len(nb) > 2]
     if not juncs:
-        loop = _walk_cycle(adj)
-        return loop + [
-            loop[0]
-        ]  # close the ring so the closing edge enters the arc length
+        # The 2-core can hold SEVERAL disjoint cycles — a service ring, an untagged old
+        # layout, a kart loop the name filter missed. Walking from an arbitrary start would
+        # return whichever the dict order reached and still label it `cycle`, so the accuracy
+        # class would trust a lap that is not the circuit. Pick the longest, deterministically.
+        groups = _components(adj)
+        if len(groups) > 1:
+            print(
+                f"  {len(groups)} disjoint raceway cycles survived pruning; taking the "
+                "longest as the lap — check the extract if that is not the circuit",
+                file=sys.stderr,
+            )
+        loop = max(
+            (_walk_cycle(g) for g in groups),
+            key=lambda lp: _polyline_len(lp, nodes),
+        )
+        # close the ring so the closing edge enters the arc length
+        return loop + [loop[0]], ASSEMBLY_CYCLE
 
     if len(juncs) == 2 and all(len(adj[j]) == 3 for j in juncs):
         a, b = juncs
@@ -330,13 +390,13 @@ def _assemble_circuit(osm: dict[str, Any]) -> list[int]:
         if len(paths) >= 2:
             long1, long2 = paths[-1], paths[-2]  # two longest = the racing loop
             # a → (long1 interior) → b → (long2 reversed interior) → back to a (ring closed)
-            return long1[:-1] + long2[::-1][:-1] + [a]
+            return long1[:-1] + long2[::-1][:-1] + [a], ASSEMBLY_THETA
 
     print(
         "  circuit graph has complex junctions; falling back to the longest single way",
         file=sys.stderr,
     )
-    return _longest_way(osm)
+    return _longest_way(osm), ASSEMBLY_LONGEST_WAY
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -435,6 +495,10 @@ class FittedCenterline:
     smoothing_lambda: float
     bias_corrected: bool
     effective_dof: float
+    assembly: str = ASSEMBLY_DIRECT
+    """How the lap was resolved from the OSM graph — ``longest_way`` means the topology
+    fallback fired and this is a fragment, not the circuit. Defaults to ``direct`` for
+    geometry that was measured rather than graph-assembled."""
 
     def __len__(self) -> int:
         return int(self.s.size)
@@ -468,7 +532,7 @@ def fit_snapshot_centerline(
     :func:`outlap.trackcal.geometry.fit_centerline` P-spline (KTD2/KTD3), with ``noise_std_m``
     the declared per-axis OSM digitisation noise the discrepancy principle matches.
     """
-    node_ids = _assemble_circuit(snapshot)
+    node_ids, assembly = _assemble_circuit(snapshot)
     closed = len(node_ids) > 3 and node_ids[0] == node_ids[-1]
     nodes = {e["id"]: e for e in snapshot["elements"] if e["type"] == "node"}
     pts = [nodes[i] for i in node_ids if i in nodes]
@@ -500,6 +564,7 @@ def fit_snapshot_centerline(
         smoothing_lambda=fit.smoothing_lambda,
         bias_corrected=fit.bias_corrected,
         effective_dof=fit.effective_dof,
+        assembly=assembly,
     )
 
 
@@ -527,10 +592,23 @@ def _dem_batch(dataset: str, chunk: list[tuple[float, float]]) -> list[float]:
         data = resp.json()
         if data.get("status") != "OK":
             raise ValueError(data.get("error", "DEM error"))
-        return [
-            float(r["elevation"]) if r["elevation"] is not None else 0.0
-            for r in data["results"]
-        ]
+        # A null elevation means the DEM has no coverage at that point. Coercing it to 0.0
+        # would commit a fake sea-level sample indistinguishable from a real one, and the C²
+        # fusion would smooth it into the surrounding profile where nothing downstream could
+        # ever tell. Fail loudly instead and name a point, so the operator picks a DEM that
+        # covers the circuit.
+        missing = [i for i, r in enumerate(data["results"]) if r["elevation"] is None]
+        if missing:
+            first = missing[0]
+            raise MissingElevationError(
+                f"the DEM returned no elevation for {len(missing)} of {len(data['results'])} "
+                f"sampled points (first at index {first}: "
+                f"lat {data['results'][first].get('location', {}).get('lat')}, "
+                f"lon {data['results'][first].get('location', {}).get('lng')}). "
+                "That dataset does not cover this circuit — pick one that does rather than "
+                "committing a fabricated sea-level sample."
+            )
+        return [float(r["elevation"]) for r in data["results"]]
     raise RuntimeError("DEM rate-limited after retries")
 
 
@@ -740,8 +818,17 @@ def run_lidar_stage(
     )
 
 
-def derive_accuracy_class(stages: Sequence[str], *, has_elevation: bool) -> str:
-    """The honest accuracy class from what actually ran (KTD10; mapping in the module doc)."""
+def derive_accuracy_class(
+    stages: Sequence[str], *, has_elevation: bool, assembly: str = ASSEMBLY_CYCLE
+) -> str:
+    """The honest accuracy class from what actually ran (KTD10; mapping in the module doc).
+
+    ``assembly`` caps it: when the topology fallback fired the geometry is a fragment of the
+    circuit, so no amount of width tracing or LiDAR fusion earns better than ``C``. Enriching
+    the wrong shape very precisely is still the wrong shape.
+    """
+    if assembly == ASSEMBLY_LONGEST_WAY:
+        return "C"
     if STAGE_WIDTHS in stages and STAGE_LIDAR in stages:
         return "A"
     if has_elevation:
@@ -794,12 +881,19 @@ def render_yaml(doc: dict[str, Any], header: str) -> str:
 def write_track_dir(
     track_dir: Path, files: Mapping[str, str], *, force: bool = False
 ) -> None:
-    """Atomically materialise ``files`` in ``track_dir`` (KTD10).
+    """Materialise ``files`` in ``track_dir`` with per-file atomic replaces (KTD10).
 
     Every file is staged in a fresh temp dir on the same filesystem, then moved into place
     with ``os.replace`` — an interruption before the first replace leaves the target
     untouched (the temp dir is always cleaned up). Any pre-existing file among ``files``
     requires ``force``.
+
+    **The guarantee is per file, not per build.** A portable directory-granularity swap does
+    not exist (``os.replace`` refuses a non-empty target and Python exposes no atomic
+    exchange), so an interruption *during* the replace loop can leave new geometry beside a
+    stale ``track.yaml``. The manifest is therefore written **strictly last** and acts as the
+    completion marker: it carries the centerline's hash, so a torn build is detectable rather
+    than silent — see :func:`verify_track_dir`, which the import runs before returning.
     """
     track_dir.mkdir(parents=True, exist_ok=True)
     existing = sorted(name for name in files if (track_dir / name).exists())
@@ -816,10 +910,42 @@ def write_track_dir(
             src = tmp / name
             src.write_text(content, encoding="utf-8")
             staged.append((src, track_dir / name))
+        # Manifest last, explicitly — not by whatever order the caller's dict happened to have.
+        # It is the completion marker, so it must never land before the files it describes.
+        staged.sort(key=lambda pair: pair[1].name == MANIFEST_FILE)
         for src, dst in staged:
             os.replace(src, dst)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def verify_track_dir(track_dir: Path) -> None:
+    """Raise when a track dir's manifest disagrees with the centerline it describes.
+
+    The write path is atomic per file, not per build, so an interrupted import can leave new
+    geometry beside a stale manifest. The manifest pins ``centerline.csv``'s hash, so that
+    state is detectable — this is the check that turns it from silent into loud. Cheap enough
+    to run at the end of every import; also worth running over a committed track dir.
+    """
+    manifest_path = track_dir / MANIFEST_FILE
+    centerline = track_dir / "centerline.csv"
+    if not manifest_path.exists() or not centerline.exists():
+        return  # not a manifest-bearing track dir (e.g. a vendored TUMFTM circuit)
+    recorded = (
+        (yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {})
+        .get("outputs", {})
+        .get("centerline_csv_sha256")
+    )
+    if recorded is None:
+        return
+    actual = sha256_file(centerline)
+    if actual != recorded:
+        raise TornBuildError(
+            f"{track_dir} is inconsistent: {MANIFEST_FILE} records centerline sha256 "
+            f"{recorded[:12]}… but the file on disk hashes to {actual[:12]}…. An import was "
+            "interrupted partway through its writes, so the geometry and the metadata "
+            "describing it are from different runs. Re-run the import with --force."
+        )
 
 
 # --- the staged import ---------------------------------------------------------------------------
@@ -997,7 +1123,15 @@ def run_import(
     # 5) Meta + manifest (KTD7/KTD9/KTD10).
     stages_ran = ["base", *stage_list]
     has_elevation = STAGE_LIDAR in stage_list or dem_dataset is not None
-    accuracy = derive_accuracy_class(stage_list, has_elevation=has_elevation)
+    accuracy = derive_accuracy_class(
+        stage_list, has_elevation=has_elevation, assembly=fc.assembly
+    )
+    if fc.assembly == ASSEMBLY_LONGEST_WAY:
+        print(
+            "  WARNING: the lap came from the longest-way fallback, so it is a fragment of "
+            f"the circuit — accuracy_class pinned to {accuracy}",
+            file=sys.stderr,
+        )
     attribution = "© OpenStreetMap contributors (ODbL)"
     if dem_dataset:
         attribution += f"; elevation {dem_dataset} via opentopodata.org"
@@ -1014,10 +1148,11 @@ def run_import(
         **({"georef_transform": georef_transform} if georef_transform else {}),
         "importer_version": IMPORTER_VERSION,
         "stages": stages_ran,
+        "assembly": fc.assembly,
         **({"notes": "; ".join(notes)} if notes else {}),
     }
     track_doc: dict[str, Any] = {
-        "schema": "track/1.1",
+        "schema": "track/1.2",
         "name": fc.name,
         "closed": fc.closed,
         "centerline": "centerline.csv",
@@ -1050,6 +1185,19 @@ def run_import(
             "dem_knot_spacing_m": _DEM_KNOT_SPACING_M,
         },
         "inputs": manifest_inputs,
+        # Which smoother actually produced this geometry. The bias-correction step is a
+        # discrete branch whose outcome depends on the noise realisation, not on any declared
+        # setting, so without this a re-import cannot be checked against the shipped file.
+        "fit": {
+            "length_m": float(fc.length_m),
+            "n_stations": len(fc),
+            "assembly": fc.assembly,
+            "residual_rms_m": float(fc.residual_rms_m),
+            "discrepancy_rms_m": float(fc.discrepancy_rms_m),
+            "smoothing_lambda": float(fc.smoothing_lambda),
+            "bias_corrected": bool(fc.bias_corrected),
+            "effective_dof": float(fc.effective_dof),
+        },
         "outputs": {"centerline_csv_sha256": sha256_text(csv_text)},
     }
 
@@ -1062,6 +1210,8 @@ def run_import(
         "# Input manifest (KTD7): this import is a pure function of these committed inputs.\n",
     )
     write_track_dir(track_dir, files, force=force)
+    # The write path is atomic per file, not per build; prove the dir is coherent.
+    verify_track_dir(track_dir)
     return ImportResult(
         track_dir=track_dir,
         stages=tuple(stages_ran),

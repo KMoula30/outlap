@@ -165,8 +165,8 @@ pub fn current_major(name: &str) -> u16 {
 pub fn current_minor(name: &str) -> u16 {
     match name {
         schema_name::SIM => 3,
-        schema_name::BATTERY | schema_name::TYR => 2,
-        schema_name::VEHICLE | schema_name::TRACK => 1,
+        schema_name::BATTERY | schema_name::TYR | schema_name::TRACK => 2,
+        schema_name::VEHICLE => 1,
         // `vehicle` resets to the fresh 2.0 baseline (see `current_major`); emotor/conditions
         // (and anything unknown) have had no additive change since their `.0`.
         _ => 0,

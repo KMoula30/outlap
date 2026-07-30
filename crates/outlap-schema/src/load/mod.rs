@@ -667,13 +667,14 @@ pub fn load_battery(path: &str, loader: &dyn SourceLoader) -> Result<crate::batt
 /// Load and validate a standalone `track.yaml` document (the referenced `centerline.csv` is parsed
 /// by the `outlap-track` crate, which owns the geometry).
 ///
-/// One cross-file check runs here (KTD9): when the document carries `banking_keypoints`, the
-/// referenced centerline's dense `banking_deg` column must be all zero — two competing banking
-/// declarations are a config error. The check applies only from
-/// [`track::TRACK_MINOR_BANKING_CONFLICT`] onward: `track/1.0` documented the two forms as
-/// coexisting (keypoints override the column), so older files keep loading unchanged. A
-/// centerline that fails to load or parse is NOT an error at this stage (the geometry layer owns
-/// those diagnostics); the conflict check simply runs only when the sidecar is readable.
+/// One cross-file check runs here (KTD9), and only for `track/1.1`: that version treats
+/// `banking_keypoints` alongside a non-zero dense `banking_deg` column as two competing
+/// declarations, hence a config error. It is bracketed on both sides because the column's
+/// meaning differs either way — `track/1.0` lets keypoints override the column outright, and
+/// from [`track::TRACK_MINOR_BANKING_NODATA`] the two compose (keypoints fill the column's
+/// `NaN` no-data stations), so neither is a conflict. A centerline that fails to load or parse
+/// is NOT an error at this stage (the geometry layer owns those diagnostics); the check simply
+/// runs only when the sidecar is readable.
 pub fn load_track_doc(path: &str, loader: &dyn SourceLoader) -> Result<crate::track::TrackDoc> {
     let mut sources = Sources::new();
     let (doc, id, index, _) =
@@ -681,6 +682,7 @@ pub fn load_track_doc(path: &str, loader: &dyn SourceLoader) -> Result<crate::tr
     semantic::check_track(&doc, &index, &sources, id)?;
     if !doc.banking_keypoints.is_empty()
         && doc.schema.minor >= crate::track::TRACK_MINOR_BANKING_CONFLICT
+        && doc.schema.minor < crate::track::TRACK_MINOR_BANKING_NODATA
     {
         if let Ok(csv) = loader.load(doc.centerline.as_str()) {
             if let Ok(centerline) = crate::centerline::parse_centerline(&csv, 1) {

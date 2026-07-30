@@ -587,7 +587,7 @@ def test_driven_line_meta_is_honest(
     assert result.accuracy_class == "C"
 
     doc = yaml.safe_load((track_dir / "track.yaml").read_text(encoding="utf-8"))
-    assert doc["schema"] == "track/1.1"
+    assert doc["schema"] == "track/1.2"
     assert doc["closed"] is True
     meta = doc["meta"]
     assert meta["source"] == "fastf1-position"

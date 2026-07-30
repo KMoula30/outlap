@@ -22,6 +22,20 @@ use crate::version::SchemaVersion;
 /// documents loading exactly as before while `track/1.1` opts into the stricter rule.
 pub const TRACK_MINOR_BANKING_CONFLICT: u16 = 1;
 
+/// MINOR that introduced the **no-data** banking convention.
+///
+/// From `track/1.2` the `banking_deg` column separates two facts a single number used to
+/// conflate: `0.0` is a *measurement* ("this station is flat") and `NaN` is an *absence* ("no
+/// banking was resolved here" — the LiDAR cross-section did not clear its signal-to-noise gate).
+/// That makes the two forms compose instead of compete: `banking_keypoints` fill the absences,
+/// measured values win where they exist, and a hand-annotated corner can no longer overwrite a
+/// real flat measurement. Absences left uncovered by keypoints are driven as flat and counted,
+/// so the loaded-model report can say so rather than the geometry quietly implying it.
+///
+/// Older files are untouched: under `1.0` keypoints override the column outright, and `1.1`
+/// rejects the combination (see [`TRACK_MINOR_BANKING_CONFLICT`]).
+pub const TRACK_MINOR_BANKING_NODATA: u16 = 2;
+
 /// A track descriptor: topology, the centerline reference, optional banking keypoints, and meta.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -36,10 +50,14 @@ pub struct TrackDoc {
     /// Reference to the `centerline.csv` sidecar (columns per §9.3).
     pub centerline: CenterlineRef,
     /// Optional sparse banking keypoints, interpolated in `s` (§9.3) — the hand-annotation path
-    /// when per-row LiDAR banking is not available. The centerline's dense `banking_deg` column
-    /// and this list are two competing declarations: a document carrying keypoints alongside any
-    /// NON-zero column value is rejected at load (track/1.1 semantic check); keypoints over an
-    /// all-zero placeholder column remain valid and drive the banking channel.
+    /// for corners the dense `banking_deg` column does not resolve.
+    ///
+    /// How the two combine depends on the declared MINOR, because the column's meaning changed.
+    /// From [`TRACK_MINOR_BANKING_NODATA`] the keypoints **fill** its `NaN` (no-data) stations
+    /// and measured values win everywhere else, so the two compose. `track/1.1` rejects a
+    /// document carrying keypoints alongside any non-zero column value
+    /// ([`TRACK_MINOR_BANKING_CONFLICT`]); `track/1.0` lets keypoints override the column
+    /// outright.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub banking_keypoints: Vec<BankingKeypoint>,
     /// Provenance / accuracy metadata.

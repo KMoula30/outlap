@@ -105,6 +105,7 @@ from outlap.importers.osm_track import (
     render_yaml,
     sha256_file,
     sha256_text,
+    verify_track_dir,
     write_track_dir,
 )
 from outlap.trackcal.corners import detect_corners
@@ -788,7 +789,7 @@ def run_import(
         "raceline in it. z and banking are 0: position telemetry carries no usable elevation."
     )
     track_doc: dict[str, Any] = {
-        "schema": "track/1.1",
+        "schema": "track/1.2",
         "name": track_name,
         "closed": True,
         "centerline": "centerline.csv",
@@ -876,6 +877,7 @@ def run_import(
         ),
     }
     write_track_dir(track_dir, files, force=force)
+    verify_track_dir(track_dir)  # per-file atomicity: prove the dir is coherent
     return ImportResult(
         track_dir=track_dir,
         session=session,

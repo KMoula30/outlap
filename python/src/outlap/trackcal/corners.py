@@ -149,6 +149,14 @@ def detect_corners(
         raise TrackCalError("window_kappa_frac must be in (0, 1]")
     if min_radius_m <= 0.0 or min_arc_m <= 0.0:
         raise TrackCalError("min_radius_m and min_arc_m must be positive")
+    if min_arc_m < MIN_ARC_POINTS * step_m:
+        # Otherwise a run can qualify as a corner while holding fewer samples than a circle
+        # fit needs, and the degeneracy surfaces from inside the fit rather than here.
+        raise TrackCalError(
+            f"min_arc_m={min_arc_m} is shorter than the {MIN_ARC_POINTS} samples a circle fit "
+            f"needs at step_m={step_m} (>= {MIN_ARC_POINTS * step_m}): a corner could be "
+            "detected that cannot be fitted"
+        )
     samples = fit.sample_uniform(step_m)
     kappa = samples.kappa_per_m
     absk = np.abs(kappa)

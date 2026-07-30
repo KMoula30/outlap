@@ -173,6 +173,9 @@ pub struct Track {
     // Vertical finite-difference baseline, metres ([`VERTICAL_BASELINE_M`] unless overridden by
     // `with_vertical_baseline_m` — a recorded simulation setting, `sim.vertical_baseline_m`).
     vertical_baseline_m: f64,
+    // Stations whose banking was declared no-data (`NaN`) with no keypoint covering them, so the
+    // channel drives them flat. An assumption, not a measurement — see `banking_unresolved`.
+    banking_unresolved: usize,
 }
 
 impl Track {
@@ -218,23 +221,7 @@ impl Track {
             )
         };
 
-        // Banking channel: sparse keypoints override the centerline column (§9.3).
-        let (bank_s, bank_v): (Vec<f64>, Vec<f64>) = if doc.banking_keypoints.is_empty() {
-            (
-                s.clone(),
-                rows.iter().map(|r| r.banking_deg.to_radians()).collect(),
-            )
-        } else {
-            (
-                doc.banking_keypoints.iter().map(|k| k.s_m - s0).collect(),
-                doc.banking_keypoints
-                    .iter()
-                    .map(|k| k.banking_deg.to_radians())
-                    .collect(),
-            )
-        };
-
-        let banking = build_channel(&bank_s, &bank_v, doc.closed, length)?;
+        let (banking, banking_unresolved) = build_banking(doc, rows, &s, s0, length)?;
         let width_left = build_channel(
             &s,
             &rows.iter().map(|r| r.width_left_m).collect::<Vec<_>>(),
@@ -266,7 +253,21 @@ impl Track {
             width_right,
             grip,
             vertical_baseline_m: VERTICAL_BASELINE_M,
+            banking_unresolved,
         })
+    }
+
+    /// Stations driven flat because nothing declared their banking.
+    ///
+    /// Non-zero means the geometry carries an **assumption** there, not a measurement: the
+    /// centerline marked those stations no-data (`NaN`, from
+    /// [`TRACK_MINOR_BANKING_NODATA`](outlap_schema::track::TRACK_MINOR_BANKING_NODATA)) and no
+    /// `banking_keypoints` covered them. Surface it in the loaded-model report rather than
+    /// letting flat geometry imply a flat measurement. Always zero for earlier MINORs, whose
+    /// column cannot express the distinction.
+    #[must_use]
+    pub fn banking_unresolved(&self) -> usize {
+        self.banking_unresolved
     }
 
     /// The circuit name.
@@ -576,6 +577,70 @@ fn fit_closed_geometry(s: &[f64], x: &[f64], y: &[f64], z: &[f64]) -> Result<Geo
             period,
         ))
     }
+}
+
+/// Build the banking channel, returning it with the count of stations driven flat by assumption.
+///
+/// From `track/1.2` the dense column separates a measurement from an absence: `0.0` means
+/// "measured, and flat"; `NaN` means "nothing resolved here" (§9.3,
+/// [`TRACK_MINOR_BANKING_NODATA`](outlap_schema::track::TRACK_MINOR_BANKING_NODATA)). The two
+/// declarations then compose rather than compete — `banking_keypoints` fill the absences and
+/// measured values win everywhere else, so hand-annotating one corner can no longer overwrite a
+/// real flat measurement somewhere else. An absence no keypoint covers is driven flat, because a
+/// `NaN` would poison every downstream evaluation, and counted so the loaded-model report can
+/// name it as an assumption. Earlier MINORs keep their own semantics: `1.0` lets keypoints
+/// replace the column outright, and `1.1` rejects the combination at load.
+fn build_banking(
+    doc: &TrackDoc,
+    rows: &[outlap_schema::centerline::CenterlineRow],
+    s: &[f64],
+    s0: f64,
+    length: f64,
+) -> Result<(MonotoneCubic<f64>, usize), TrackError> {
+    let keypoint_channel =
+        |doc: &TrackDoc| -> Result<MonotoneCubic<f64>, outlap_core::InterpError> {
+            let ks: Vec<f64> = doc.banking_keypoints.iter().map(|k| k.s_m - s0).collect();
+            let kv: Vec<f64> = doc
+                .banking_keypoints
+                .iter()
+                .map(|k| k.banking_deg.to_radians())
+                .collect();
+            build_channel(&ks, &kv, doc.closed, length)
+        };
+    let column: Vec<f64> = rows.iter().map(|r| r.banking_deg.to_radians()).collect();
+    let has_keypoints = !doc.banking_keypoints.is_empty();
+
+    if doc.schema.minor < outlap_schema::track::TRACK_MINOR_BANKING_NODATA {
+        // Legacy: keypoints replace the column outright when present.
+        let channel = if has_keypoints {
+            keypoint_channel(doc)?
+        } else {
+            build_channel(s, &column, doc.closed, length)?
+        };
+        return Ok((channel, 0));
+    }
+
+    let kp = if has_keypoints {
+        Some(keypoint_channel(doc)?)
+    } else {
+        None
+    };
+    let mut unresolved = 0usize;
+    let merged: Vec<f64> = column
+        .iter()
+        .zip(s.iter())
+        .map(|(&v, &si)| {
+            if !v.is_nan() {
+                return v; // a measurement, flat or not
+            }
+            if let Some(k) = &kp {
+                return k.eval(si); // hand annotation covers the gap
+            }
+            unresolved += 1;
+            0.0
+        })
+        .collect();
+    Ok((build_channel(s, &merged, doc.closed, length)?, unresolved))
 }
 
 /// Build a monotone-Hermite data channel in `s`. For closed tracks a wrap knot is appended at

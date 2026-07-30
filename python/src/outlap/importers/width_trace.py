@@ -457,6 +457,11 @@ def _apply_control_points(
     for cp in cps:
         d = np.abs(s - cp.s_m)
         if wrap_length_m is not None:
+            # Reduce modulo the lap BEFORE folding. Without it an out-of-range `s_m` gives
+            # `d > L`, so `L - d` is negative, the minimum is negative, and the smoothstep
+            # saturates — one stray control point would take over an entire sector at full
+            # strength instead of being confined to its window.
+            d = np.mod(d, wrap_length_m)
             d = np.minimum(d, wrap_length_m - d)
         u = np.clip(1.0 - d / window_m, 0.0, 1.0)
         w = u * u * (3.0 - 2.0 * u)
